@@ -1,0 +1,97 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+}
+
+/* ---------- Mobile safety: prevent accidental horizontal cut/overflow ---------- */
+*, *::before, *::after { box-sizing: border-box; }
+
+html, body {
+  height: 100%;
+  width: 100%;
+  max-width: 100%;
+  overflow-x: hidden;
+}
+
+body {
+  background: #000;
+  color: rgba(255,255,255,0.92);
+}
+
+img, svg, video, canvas {
+  max-width: 100%;
+  height: auto;
+}
+
+/* Flex children shrink safely */
+.min-w-0 { min-width: 0; }
+
+/* ✅ IMPORTANT:
+   Do NOT force "anywhere" wrapping on ALL div/span/a, because it causes vertical letter stacking on mobile.
+   Keep it only for text elements. */
+p, h1, h2, h3, h4, h5, h6, li {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+/* For rich markdown/math content we can allow safe breaking + horizontal scroll if needed */
+.richtext {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+pre {
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+.no-scrollbar::-webkit-scrollbar { display: none; }
+.no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+
+/* ---------- Background + UI style ---------- */
+.grid-bg {
+  background-image:
+    linear-gradient(to right, rgba(255,255,255,0.055) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(255,255,255,0.055) 1px, transparent 1px);
+  background-size: 72px 72px;
+  opacity: 0.12;
+}
+
+.glow {
+  position: absolute;
+  inset: -40% -20% auto -20%;
+  height: 70vh;
+  background:
+    radial-gradient(700px 420px at 25% 30%, rgba(120,80,255,0.06), transparent 65%),
+    radial-gradient(620px 380px at 70% 35%, rgba(0,180,255,0.05), transparent 62%),
+    radial-gradient(560px 380px at 50% 80%, rgba(0,255,160,0.03), transparent 65%);
+  filter: blur(10px);
+  pointer-events: none;
+}
+
+.glass {
+  background: rgba(255,255,255,0.04);
+  border: 1px solid rgba(255,255,255,0.08);
+  backdrop-filter: blur(14px);
+}
+
+.text-dim { color: rgba(255,255,255,0.72); }
+.text-muted { color: rgba(255,255,255,0.55); }
+
+.fade-edges {
+  -webkit-mask-image: radial-gradient(ellipse at center, rgba(0,0,0,1) 55%, rgba(0,0,0,0) 88%);
+  mask-image: radial-gradient(ellipse at center, rgba(0,0,0,1) 55%, rgba(0,0,0,0) 88%);
+}
+
+.media-card { background: #000; }
+.media-card::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: radial-gradient(ellipse at center, rgba(0,0,0,0) 55%, rgba(0,0,0,0.92) 85%);
+}
+.media-card img { filter: saturate(1.02) contrast(1.02); }

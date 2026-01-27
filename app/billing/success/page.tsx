@@ -3,6 +3,7 @@
 import { useEffect, useState } from 'react'
 import Link from 'next/link'
 import { useSearchParams } from 'next/navigation'
+import { useRouter } from 'next/navigation'
 import AuthGate from '@/components/AuthGate'
 import { authedFetch } from '@/lib/authClient'
 import { Button, Card } from '@/components/ui'
@@ -16,38 +17,63 @@ export default function BillingSuccessPage() {
 }
 
 function Inner() {
+  const router = useRouter()
   const sp = useSearchParams()
   const sessionId = sp.get('session_id')
-  const [credits, setCredits] = useState<number | null>(null)
+  const [status, setStatus] = useState<'idle' | 'ok' | 'already' | 'error'>('idle')
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
+    let active = true
+    let timeoutId: number | null = null
     ;(async () => {
       try {
-        const res = await authedFetch('/api/me')
+        if (!sessionId) {
+          if (active) {
+            setError('Missing session_id')
+            setStatus('error')
+          }
+          return
+        }
+        const res = await authedFetch('/api/billing/fulfill', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ session_id: sessionId }),
+        })
         const json = await res.json()
         if (!res.ok) throw new Error(json?.error ?? 'Error')
-        setCredits(json?.entitlement?.credits ?? null)
+        if (active) {
+          if (json?.already) setStatus('already')
+          else setStatus('ok')
+          timeoutId = window.setTimeout(() => {
+            router.push('/billing')
+          }, 2000)
+        }
       } catch (e: any) {
-        setError(e?.message ?? 'Error')
+        if (active) {
+          setError(e?.message ?? 'Error')
+          setStatus('error')
+        }
       }
     })()
-  }, [])
+    return () => {
+      active = false
+      if (timeoutId) window.clearTimeout(timeoutId)
+    }
+  }, [router, sessionId])
 
   return (
     <div className="mx-auto max-w-2xl px-4 py-16">
       <Card>
         <h1 className="text-2xl font-semibold">Payment received ✅</h1>
         <p className="mt-2 text-white/70">
-          Your credits are being added to your account. If you don’t see them immediately, refresh once.
+          {status === 'already'
+            ? 'Payment already processed.'
+            : status === 'ok'
+            ? 'Payment received. Credits added.'
+            : 'Processing payment…'}
         </p>
         {sessionId && <p className="mt-3 text-xs text-white/50">Checkout session: {sessionId}</p>}
-
-        {credits !== null && (
-          <div className="mt-6 rounded-xl border border-white/10 bg-white/[0.02] p-4 text-sm text-white/70">
-            Current credits: <span className="text-white font-semibold">{credits}</span>
-          </div>
-        )}
 
         {error && <p className="mt-4 text-sm text-red-400">{error}</p>}
 

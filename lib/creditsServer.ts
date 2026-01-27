@@ -77,10 +77,19 @@ export async function getOrCreateProfile(userId: string): Promise<ProfileRow> {
     const patch: any = { updated_at: nowIso() }
     let needPatch = false
     if ((existing as any).credits == null) {
-      patch.credits = 0
+      patch.credits = STARTER_CREDITS
+      if ((existing as any).starter_granted == null || (existing as any).starter_granted === false) {
+        patch.starter_granted = true
+      }
       needPatch = true
     }
-    if ((existing as any).starter_granted == null) {
+    const existingCredits = Number((existing as any).credits ?? 0)
+    if (existingCredits < STARTER_CREDITS && !(existing as any).starter_granted) {
+      patch.credits = STARTER_CREDITS
+      patch.starter_granted = true
+      needPatch = true
+    }
+    if ((existing as any).starter_granted == null && patch.starter_granted === undefined) {
       patch.starter_granted = false
       needPatch = true
     }
@@ -101,8 +110,8 @@ export async function getOrCreateProfile(userId: string): Promise<ProfileRow> {
     full_name: null,
     phone: null,
     phone_normalized: null,
-    credits: 0,
-    starter_granted: false,
+    credits: STARTER_CREDITS,
+    starter_granted: true,
     stripe_customer_id: null,
     stripe_payment_method_id: null,
     auto_recharge: false,
@@ -311,8 +320,8 @@ export async function ensureProfileFromUser(user: any): Promise<ProfileRow> {
       full_name: metaName,
       phone: metaPhone,
       phone_normalized: phoneNorm,
-      credits: 0,
-      starter_granted: false,
+      credits: STARTER_CREDITS,
+      starter_granted: true,
       created_at: now,
       updated_at: now,
     }

@@ -303,7 +303,7 @@ export default function Pomodoro({ dailyPlan }: { dailyPlan: DayPlan[] }) {
     if (typeof window === "undefined") return
     try {
       const payload = {
-        running: isRunning,
+        running: running,
         secondsLeft: seconds,
         label: activeBlock?.label ?? null,
         focus: (dailyPlan?.[0]?.focus ?? null),
@@ -312,7 +312,7 @@ export default function Pomodoro({ dailyPlan }: { dailyPlan: DayPlan[] }) {
       window.localStorage.setItem("examly_pomodoro_state_v1", JSON.stringify(payload))
       window.dispatchEvent(new Event("examly_pomodoro_update"))
     } catch {}
-  }, [isRunning, seconds, activeBlock?.label])
+  }, [running, seconds, activeBlock?.label])
 
   return (
     <>

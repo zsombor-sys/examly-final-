@@ -312,7 +312,7 @@ export default function Pomodoro({ dailyPlan }: { dailyPlan: DayPlan[] }) {
       window.localStorage.setItem("examly_pomodoro_state_v1", JSON.stringify(payload))
       window.dispatchEvent(new Event("examly_pomodoro_update"))
     } catch {}
-  }, [running, seconds, activeBlock?.label])
+  }, [running, secondsLeft, activeBlock?.label])
 
   return (
     <>

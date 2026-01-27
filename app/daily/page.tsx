@@ -4,6 +4,7 @@ import Link from 'next/link'
 import { useEffect, useState } from 'react'
 import AuthGate from '@/components/AuthGate'
 import { authedFetch } from '@/lib/authClient'
+import { supabase } from '@/lib/supabaseClient'
 import HScroll from '@/components/HScroll'
 import { ArrowLeft, Loader2 } from 'lucide-react'
 import Pomodoro from '@/components/Pomodoro'
@@ -12,20 +13,29 @@ type Block = { type: 'study' | 'break'; minutes: number; label: string }
 type DayPlan = { day: string; focus: string; tasks: string[]; minutes: number; blocks?: Block[] }
 type PlanResult = { title: string; daily_plan: DayPlan[] }
 
-const CURRENT_PLAN_LS_KEY = 'examly_current_plan_id_v1'
-const LS_KEY = 'examly_plans_v1'
+function historyKeyForUser(userId: string | null) {
+  return userId ? `examly_plans_v1:${userId}` : null
+}
 
-function getLocalCurrentId(): string | null {
+function currentPlanKeyForUser(userId: string | null) {
+  return userId ? `examly_current_plan_id_v1:${userId}` : null
+}
+
+function getLocalCurrentId(userId: string | null): string | null {
   try {
-    return window.localStorage.getItem(CURRENT_PLAN_LS_KEY)
+    const key = currentPlanKeyForUser(userId)
+    if (!key) return null
+    return window.localStorage.getItem(key)
   } catch {
     return null
   }
 }
 
-function loadLocalPlan(id: string): any | null {
+function loadLocalPlan(userId: string | null, id: string): any | null {
   try {
-    const raw = window.localStorage.getItem(LS_KEY)
+    const key = historyKeyForUser(userId)
+    if (!key) return null
+    const raw = window.localStorage.getItem(key)
     if (!raw) return null
     const arr = JSON.parse(raw)
     if (!Array.isArray(arr)) return null
@@ -48,12 +58,36 @@ function Inner() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [plan, setPlan] = useState<PlanResult | null>(null)
+  const [userId, setUserId] = useState<string | null>(null)
+  const [authReady, setAuthReady] = useState(false)
+
+  useEffect(() => {
+    let active = true
+    supabase.auth.getUser().then((res) => {
+      if (!active) return
+      setUserId(res?.data?.user?.id ?? null)
+      setAuthReady(true)
+    })
+    const { data } = supabase.auth.onAuthStateChange((_event, session) => {
+      if (!active) return
+      setUserId(session?.user?.id ?? null)
+      setAuthReady(true)
+    })
+    return () => {
+      active = false
+      data.subscription.unsubscribe()
+    }
+  }, [])
 
   useEffect(() => {
     ;(async () => {
+      if (!authReady) return
       setLoading(true)
       setError(null)
       try {
+        if (!userId) {
+          throw new Error('Nincs bejelentkezett felhasználó.')
+        }
         let id: string | null = null
 
         // remote current
@@ -64,7 +98,7 @@ function Inner() {
         } catch {}
 
         // local current fallback
-        if (!id) id = getLocalCurrentId()
+        if (!id) id = getLocalCurrentId(userId)
         if (!id) throw new Error('Nincs kiválasztott plan. Menj a Plan oldalra és generálj vagy válassz egyet.')
 
         // try server plan
@@ -76,7 +110,7 @@ function Inner() {
           setLoading(false)
           return
         } catch {
-          const local = loadLocalPlan(id)
+          const local = loadLocalPlan(userId, id)
           if (!local) throw new Error('Nem találom a plan-t (se szerveren, se lokálisan).')
           setPlan(local)
           setLoading(false)
@@ -87,7 +121,7 @@ function Inner() {
         setLoading(false)
       }
     })()
-  }, [])
+  }, [userId])
 
   return (
     <div className="mx-auto max-w-6xl px-4 py-10">

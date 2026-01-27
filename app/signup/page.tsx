@@ -22,31 +22,47 @@ export default function SignupPage() {
       setError('Auth is not configured (missing Supabase env vars).')
       return
     }
-    setLoading(true)
     if (fullName.trim().length < 2) {
-      setLoading(false)
       setError('Full name is required')
       return
     }
     if (phone.trim().length < 6) {
-      setLoading(false)
       setError('Phone number is required')
       return
     }
 
-    const { error } = await supabase.auth.signUp({
-      email,
-      password,
-      options: {
-        data: {
-          full_name: fullName.trim(),
-          phone: phone.trim(),
+    setLoading(true)
+    try {
+      const phoneTrim = phone.trim()
+      const checkRes = await fetch('/api/auth/check-phone', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ phone: phoneTrim }),
+      })
+      const checkJson = await checkRes.json().catch(() => ({} as any))
+      if (!checkRes.ok) throw new Error(checkJson?.error ?? 'Phone check failed')
+      if (checkJson?.available === false) {
+        setError('Ez a telefonszám már foglalt')
+        return
+      }
+
+      const { error } = await supabase.auth.signUp({
+        email,
+        password,
+        options: {
+          data: {
+            full_name: fullName.trim(),
+            phone: phoneTrim,
+          },
         },
-      },
-    })
-    setLoading(false)
-    if (error) setError(error.message)
-    else router.push('/check-email')
+      })
+      if (error) throw error
+      router.push('/check-email')
+    } catch (e: any) {
+      setError(e?.message ?? 'Error')
+    } finally {
+      setLoading(false)
+    }
   }
 
   return (

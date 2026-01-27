@@ -24,6 +24,12 @@ function Inner() {
   }, [])
 
   useEffect(() => {
+    if (!paymentLink) {
+      setMsg('Billing is not configured (missing NEXT_PUBLIC_STRIPE_PAYMENT_LINK).')
+    }
+  }, [paymentLink])
+
+  useEffect(() => {
     if (typeof window === 'undefined') return
     const p = new URLSearchParams(window.location.search)
     if (p.get('canceled')) setCanceled(true)
@@ -33,9 +39,7 @@ function Inner() {
     setMsg(null)
     setLoading(true)
     try {
-      if (!paymentLink) {
-        throw new Error('Billing is not configured (missing NEXT_PUBLIC_STRIPE_PAYMENT_LINK).')
-      }
+      if (!paymentLink) throw new Error('Billing is not configured (missing NEXT_PUBLIC_STRIPE_PAYMENT_LINK).')
 
       // Optional: prefill email on Stripe if we can read it.
       let email: string | null = null
@@ -73,7 +77,7 @@ function Inner() {
         </p>
 
         <div className="mt-6 flex flex-wrap items-center gap-3">
-          <Button onClick={go} disabled={loading} className="gap-2">
+          <Button onClick={go} disabled={loading || !paymentLink} className="gap-2">
             {loading ? <Loader2 className="animate-spin" size={16} /> : <Lock size={16} />}
             Continue to payment
           </Button>

@@ -39,13 +39,20 @@ type PlanResult = {
 type SavedPlan = { id: string; title: string; created_at: string }
 type LocalSavedPlan = SavedPlan & { result: PlanResult }
 
-const LS_KEY = 'examly_plans_v1'
-const CURRENT_PLAN_LS_KEY = 'examly_current_plan_id_v1'
+function historyKeyForUser(userId: string | null) {
+  return userId ? `examly_plans_v1:${userId}` : null
+}
 
-function loadLocalPlans(): LocalSavedPlan[] {
+function currentPlanKeyForUser(userId: string | null) {
+  return userId ? `examly_current_plan_id_v1:${userId}` : null
+}
+
+function loadLocalPlans(userId: string | null): LocalSavedPlan[] {
   if (typeof window === 'undefined') return []
   try {
-    const raw = window.localStorage.getItem(LS_KEY)
+    const key = historyKeyForUser(userId)
+    if (!key) return []
+    const raw = window.localStorage.getItem(key)
     if (!raw) return []
     const arr = JSON.parse(raw)
     if (!Array.isArray(arr)) return []
@@ -63,27 +70,33 @@ function loadLocalPlans(): LocalSavedPlan[] {
   }
 }
 
-function saveLocalPlan(entry: LocalSavedPlan) {
+function saveLocalPlan(userId: string | null, entry: LocalSavedPlan) {
   if (typeof window === 'undefined') return
   try {
-    const curr = loadLocalPlans()
+    const key = historyKeyForUser(userId)
+    if (!key) return
+    const curr = loadLocalPlans(userId)
     const next = [entry, ...curr.filter((p) => p.id !== entry.id)].slice(0, 50)
-    window.localStorage.setItem(LS_KEY, JSON.stringify(next))
+    window.localStorage.setItem(key, JSON.stringify(next))
   } catch {}
 }
 
-function clearLocalPlans() {
+function clearLocalPlans(userId: string | null) {
   if (typeof window === 'undefined') return
   try {
-    window.localStorage.removeItem(LS_KEY)
+    const key = historyKeyForUser(userId)
+    if (!key) return
+    window.localStorage.removeItem(key)
   } catch {}
 }
 
-function setCurrentPlanLocal(id: string | null) {
+function setCurrentPlanLocal(userId: string | null, id: string | null) {
   if (typeof window === 'undefined') return
   try {
-    if (!id) window.localStorage.removeItem(CURRENT_PLAN_LS_KEY)
-    else window.localStorage.setItem(CURRENT_PLAN_LS_KEY, id)
+    const key = currentPlanKeyForUser(userId)
+    if (!key) return
+    if (!id) window.localStorage.removeItem(key)
+    else window.localStorage.setItem(key, id)
   } catch {}
 }
 
@@ -99,8 +112,8 @@ async function setCurrentPlanRemote(id: string | null) {
   }
 }
 
-async function setCurrentPlan(id: string | null) {
-  setCurrentPlanLocal(id)
+async function setCurrentPlan(userId: string | null, id: string | null) {
+  setCurrentPlanLocal(userId, id)
   await setCurrentPlanRemote(id)
 }
 
@@ -149,8 +162,30 @@ function Inner() {
   const [askAnswer, setAskAnswer] = useState<string | null>(null)
   const [askError, setAskError] = useState<string | null>(null)
 
-  async function loadHistory() {
-    const local = loadLocalPlans().map(({ id, title, created_at }) => ({ id, title, created_at }))
+  const [userId, setUserId] = useState<string | null>(null)
+
+  useEffect(() => {
+    let active = true
+    supabase.auth.getUser().then((res) => {
+      if (!active) return
+      setUserId(res?.data?.user?.id ?? null)
+    })
+    const { data } = supabase.auth.onAuthStateChange((_event, session) => {
+      if (!active) return
+      setUserId(session?.user?.id ?? null)
+    })
+    return () => {
+      active = false
+      data.subscription.unsubscribe()
+    }
+  }, [])
+
+  async function loadHistory(uid: string | null) {
+    if (!uid) {
+      setSaved([])
+      return
+    }
+    const local = loadLocalPlans(uid).map(({ id, title, created_at }) => ({ id, title, created_at }))
     try {
       const res = await authedFetch('/api/plan/history')
       const json = await res.json().catch(() => ({} as any))
@@ -176,9 +211,15 @@ function Inner() {
   }
 
   useEffect(() => {
-    loadHistory()
+    if (!userId) {
+      setSaved([])
+      setSelectedId(null)
+      setResult(null)
+      return
+    }
+    loadHistory(userId)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+  }, [userId])
 
   async function loadPlan(id: string) {
     setError(null)
@@ -195,10 +236,10 @@ function Inner() {
       setAskText('')
       setTab('plan')
 
-      await setCurrentPlan(id)
+      await setCurrentPlan(userId, id)
       return
     } catch (e: any) {
-      const local = loadLocalPlans().find((p) => p.id === id)
+      const local = loadLocalPlans(userId).find((p) => p.id === id)
       if (local?.result) {
         setSelectedId(id)
         setResult(local.result)
@@ -208,7 +249,7 @@ function Inner() {
         setAskText('')
         setTab('plan')
 
-        await setCurrentPlan(id)
+        await setCurrentPlan(userId, id)
         return
       }
 
@@ -267,12 +308,12 @@ function Inner() {
       setAskText('')
 
       // ✅ always keep local history too (serverless-proof)
-      saveLocalPlan({ id: localId, title: r.title || 'Untitled plan', created_at, result: r })
+      saveLocalPlan(userId, { id: localId, title: r.title || 'Untitled plan', created_at, result: r })
 
       // ✅ set current plan to the same id we use in history
-      await setCurrentPlan(localId)
+      await setCurrentPlan(userId, localId)
 
-      await loadHistory()
+      await loadHistory(userId)
     } catch (e: any) {
       setError(e?.message ?? 'Error')
     } finally {
@@ -288,13 +329,13 @@ function Inner() {
       if (!res.ok) throw new Error(json?.error ?? 'Failed')
       setSaved([])
       setSelectedId(null)
-      clearLocalPlans()
-      await setCurrentPlan(null)
+      clearLocalPlans(userId)
+      await setCurrentPlan(userId, null)
     } catch (e: any) {
-      clearLocalPlans()
+      clearLocalPlans(userId)
       setSaved([])
       setSelectedId(null)
-      await setCurrentPlan(null)
+      await setCurrentPlan(userId, null)
       setError(e?.message ?? 'Error')
     }
   }

@@ -304,7 +304,7 @@ export default function Pomodoro({ dailyPlan }: { dailyPlan: DayPlan[] }) {
     try {
       const payload = {
         running: running,
-        secondsLeft: seconds,
+        secondsLeft: secondsLeft,
         label: activeBlock?.label ?? null,
         focus: (dailyPlan?.[0]?.focus ?? null),
         updatedAt: Date.now(),

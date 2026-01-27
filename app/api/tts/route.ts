@@ -27,7 +27,7 @@ export async function POST(req: Request) {
 
     const voice = String(body?.voice ?? 'alloy')
     const format = (String(body?.format ?? 'mp3') === 'wav' ? 'wav' : 'mp3') as 'mp3' | 'wav'
-    const model = String(body?.model ?? 'gpt-4o-mini-tts')
+    const model = process.env.OPENAI_MODEL || 'gpt-5.1-instant'
 
     const openai = new OpenAI({ apiKey })
 

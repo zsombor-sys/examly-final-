@@ -190,16 +190,25 @@ Return ONLY a JSON object that matches this shape:
 LANGUAGE:
 - If the user prompt is Hungarian, output Hungarian and set language="Hungarian". Otherwise English.
 
-STYLE:
-- Write like a school notebook/textbook.
-- Clean headings, short bullets, step-by-step.
-- No chatty filler.
+STYLE (study_notes):
+- "Iskolai jegyzet" stílus.
+- Strukturált Markdown: cím, alcímek, bulletpontok.
+- Rövid definíciók.
+- "Tipikus hibák" szekció.
+- 1-2 kidolgozott példa.
+- Tömör, nem csevegős.
 
 MATH (KaTeX):
-- Inline \\( ... \\)
-- Block \\[ ... \\]
-- Prefer \\frac, \\sqrt, \\cdot
-- No $$
+- Használj inline $...$ és csak ritkán $$...$$.
+- Használj \\frac, \\sqrt, \\cdot, \\log_{b}(x).
+- Ne használj furcsa makrókat (pl. ext(log)).
+- Képletek után 1 mondat: mit jelent a képlet.
+- Ne generálj képleteket képként, csak szöveg/Markdown.
+
+CHEMISTRY (oxidációszám):
+- Reakciórendezés oxidációszámmal: lépések számozva.
+- Oxidációszámok kiemelve (pl. **+2**).
+- Elektronmérleg táblázatszerűen Markdownban.
 
 DAILY_PLAN:
 - focus <= ~8 words
@@ -363,7 +372,7 @@ export async function POST(req: Request) {
     }
 
     let textFromFiles = textParts.join('\n\n').slice(0, 120_000)
-    const model = process.env.OPENAI_MODEL || 'gpt-4o-mini'
+    const model = process.env.OPENAI_MODEL || 'gpt-5.1-instant'
 
     // If the user uploaded lots of images, OCR them in batches and feed the text in.
     // This keeps handwritten notes usable while avoiding per-request image limits.

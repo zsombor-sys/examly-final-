@@ -55,24 +55,15 @@ Language:
 - If language is Hungarian, answer in Hungarian.
 - If language is English, answer in English.`
 
-    const preferredModel = process.env.OPENAI_MODEL ?? 'gpt-4.1'
+    const model = process.env.OPENAI_MODEL || 'gpt-5.1-instant'
 
-    async function callModel(model: string) {
-      return await openai.responses.create({
-        model,
-        input: [
-          { role: 'system', content: [{ type: 'input_text', text: system }] },
-          { role: 'user', content: [{ type: 'input_text', text: `Language: ${language}\nQuestion: ${question}` }] },
-        ],
-      })
-    }
-
-    let resp
-    try {
-      resp = await callModel(preferredModel)
-    } catch {
-      resp = await callModel('gpt-4o-mini')
-    }
+    const resp = await openai.responses.create({
+      model,
+      input: [
+        { role: 'system', content: [{ type: 'input_text', text: system }] },
+        { role: 'user', content: [{ type: 'input_text', text: `Language: ${language}\nQuestion: ${question}` }] },
+      ],
+    })
 
     const raw = resp.output_text
     const parsed = safeParseJson(raw)

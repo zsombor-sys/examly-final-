@@ -143,7 +143,7 @@ export async function POST(req: Request) {
     }
 
     const openai = new OpenAI({ apiKey })
-    const model = process.env.OPENAI_MODEL || 'gpt-4o-mini'
+    const model = process.env.OPENAI_MODEL || 'gpt-5.1-instant'
 
     // If there are many images, do OCR in batches, then build the final set from text.
     let extractedText = ''

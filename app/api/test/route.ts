@@ -103,24 +103,15 @@ Rules:
       `User request:\n${prompt}\n\n` +
       `Guidelines:\n- 15-20 questions (minimum 15)\n- Mix MCQ and short answer\n- Provide answers and explanations\n- duration_minutes 15-25 unless user specifies`
 
-    const preferredModel = process.env.OPENAI_MODEL ?? 'gpt-4.1'
+    const model = process.env.OPENAI_MODEL || 'gpt-5.1-instant'
 
-    async function callModel(model: string) {
-      return await openai.responses.create({
-        model,
-        input: [
-          { role: 'system', content: [{ type: 'input_text', text: system }] },
-          { role: 'user', content: [{ type: 'input_text', text: userText }] },
-        ],
-      })
-    }
-
-    let resp
-    try {
-      resp = await callModel(preferredModel)
-    } catch {
-      resp = await callModel('gpt-4o-mini')
-    }
+    const resp = await openai.responses.create({
+      model,
+      input: [
+        { role: 'system', content: [{ type: 'input_text', text: system }] },
+        { role: 'user', content: [{ type: 'input_text', text: userText }] },
+      ],
+    })
 
     const parsed = safeParseJson(resp.output_text)
     const json = normalizeTest(parsed)

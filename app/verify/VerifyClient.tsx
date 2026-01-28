@@ -14,7 +14,7 @@ export default function VerifyClient() {
     if (typeof window === 'undefined') return ''
     return String(window.localStorage.getItem('umenify_verify_email') ?? '').trim()
   }, [])
-  const email = emailFromQuery || emailFromStorage
+  const email = (emailFromQuery || emailFromStorage).trim().toLowerCase()
 
   const [code, setCode] = useState('')
   const [loading, setLoading] = useState(false)
@@ -52,8 +52,15 @@ export default function VerifyClient() {
         type: 'signup',
       })
       if (verifyErr) {
-        setError(verifyErr.message)
-        return
+        const { error: verifyErr2 } = await supabase.auth.verifyOtp({
+          email,
+          token,
+          type: 'email',
+        })
+        if (verifyErr2) {
+          setError(verifyErr2.message)
+          return
+        }
       }
       await supabase.auth.refreshSession()
       await authedFetch('/api/me')

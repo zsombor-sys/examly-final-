@@ -72,7 +72,7 @@ function Inner() {
         </div>
         <h1 className="mt-3 text-3xl font-semibold tracking-tight">30 generations</h1>
         <p className="mt-3 text-white/70">
-          One-time purchase of 30 credits. After your first purchase, Examly can auto-recharge another 30 when you run out
+          One-time purchase of 30 credits. After your first purchase, Umenify can auto-recharge another 30 when you run out
           (best-effort; some banks may require confirmation).
         </p>
 

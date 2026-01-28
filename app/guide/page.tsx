@@ -1,6 +1,6 @@
 export const metadata = {
-  title: 'Examly Guide',
-  description: 'How to use Examly.'
+  title: 'Umenify Guide',
+  description: 'How to use Umenify.'
 }
 
 const QA = [
@@ -24,7 +24,7 @@ const QA = [
     q: 'Plans & limits (important)',
     a: `**Free (trial):** 10 generations for **48 hours**, **one-time only** per account. Activation requires **full name + email + phone**.
 
-**Pro:** 30 generations for **3500 Ft** (≈ €8.9). After you buy Pro once, Examly can **auto-recharge** another 30 when you run out (best-effort, some banks may require confirmation).`
+**Pro:** 30 generations for **3500 Ft** (≈ €8.9). After you buy Pro once, Umenify can **auto-recharge** another 30 when you run out (best-effort, some banks may require confirmation).`
   },
   {
     q: 'What counts as 1 generation?',
@@ -49,7 +49,7 @@ export default function GuidePage() {
   return (
     <div className="mx-auto max-w-4xl px-4 py-12">
       <h1 className="text-3xl font-semibold tracking-tight">Guide</h1>
-      <p className="mt-2 text-white/70">Quick Q&amp;A on how to use Examly.</p>
+      <p className="mt-2 text-white/70">Quick Q&amp;A on how to use Umenify.</p>
 
       <div className="mt-8 space-y-4">
         {QA.map((item) => (

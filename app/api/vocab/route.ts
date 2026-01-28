@@ -161,7 +161,7 @@ export async function POST(req: Request) {
     const src = langLabel(sourceLang)
     const tgt = langLabel(targetLang)
 
-    const system = `You are Examly Vocab.
+    const system = `You are Umenify Vocab.
 
 Return ONLY a JSON object with this exact shape:
 {

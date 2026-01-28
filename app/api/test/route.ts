@@ -76,7 +76,7 @@ export async function POST(req: Request) {
 
     const openai = new OpenAI({ apiKey })
 
-    const system = `You are Examly.
+    const system = `You are Umenify.
 Return ONLY valid JSON. No extra text.
 
 Math formatting (if the request is math/physics/chemistry):

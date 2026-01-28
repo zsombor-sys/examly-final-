@@ -490,7 +490,7 @@ function VocabPageInner() {
         <div className="min-w-0">
           <h1 className="text-3xl font-semibold tracking-tight">Vocab</h1>
           <p className="mt-2 text-white/70 max-w-[70ch]">
-            Paste a word list or upload a photo of your vocab sheet. Examly turns it into flashcards you can actually use (any
+            Paste a word list or upload a photo of your vocab sheet. Umenify turns it into flashcards you can actually use (any
             language pair).
           </p>
           <p className="mt-1 text-xs text-white/50">Free: 1 set / 48h. Pro: unlimited.</p>

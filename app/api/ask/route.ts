@@ -32,7 +32,7 @@ export async function POST(req: Request) {
 
     const openai = new OpenAI({ apiKey })
 
-    const system = `You are Examly, a helpful tutor.
+    const system = `You are Umenify, a helpful tutor.
 
 Return ONLY valid JSON. No extra text.
 

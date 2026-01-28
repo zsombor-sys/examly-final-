@@ -153,7 +153,7 @@ export async function maybeAutoRecharge(userId: string) {
         payment_method: p.stripe_payment_method_id,
         off_session: true,
         confirm: true,
-        description: 'Examly Pro top-up (30 generations)',
+        description: 'Umenify Pro top-up (30 generations)',
         metadata: { user_id: userId, product: 'examly_pro_30_credits_autorecharge' },
       },
       { idempotencyKey }

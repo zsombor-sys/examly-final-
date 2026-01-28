@@ -122,14 +122,14 @@ export default function HomePage() {
             </h2>
             <p className="mx-auto mt-3 max-w-3xl text-white/55">
               You get a plan, summaries, and tests that stick to your material. No endless conversation.
-              PDFs, photos, even handwritten notes, if you can upload it, Examly can use it.
+              PDFs, photos, even handwritten notes, if you can upload it, Umenify can use it.
             </p>
           </div>
 
           <div className="mt-10 fade-edges">
             <Image
               src="/assets/hero.png"
-              alt="Examly preview"
+              alt="Umenify preview"
               width={1600}
               height={900}
               className="h-auto w-full"
@@ -144,14 +144,14 @@ export default function HomePage() {
         <Feature
           tag="NOTES"
           title="Study notes that feel like a real notebook."
-          desc="Examly transforms your material into clear sections, key points, examples, and what teachers love to ask. No endless chat. Just learnable notes."
+          desc="Umenify transforms your material into clear sections, key points, examples, and what teachers love to ask. No endless chat. Just learnable notes."
           img="/assets/feature-summary.png"
         />
 
         <Feature
           tag="DAILY PLAN"
           title="A daily plan you can actually follow."
-          desc="Start a session, focus, then take a break. Examly guides you with a progress bar and realistic blocks so you finish on time."
+          desc="Start a session, focus, then take a break. Umenify guides you with a progress bar and realistic blocks so you finish on time."
           img="/assets/feature-plan.png"
           reverse
         />
@@ -159,7 +159,7 @@ export default function HomePage() {
         <Feature
           tag="VOCAB"
           title="Quizlet-style vocab from text or photos."
-          desc="Paste up to 70 words (free) or upload a photo of your vocab sheet. Examly turns it into flashcards, learn mode, and timed tests (English ↔ Hungarian)."
+          desc="Paste up to 70 words (free) or upload a photo of your vocab sheet. Umenify turns it into flashcards, learn mode, and timed tests (English ↔ Hungarian)."
           img="/assets/feature-vocab.png"
         />
 
@@ -196,7 +196,7 @@ export default function HomePage() {
           </div>
 
           <div className="mt-10 flex items-center justify-between text-xs text-white/50">
-            <div>© {new Date().getFullYear()} Examly</div>
+            <div>© {new Date().getFullYear()} Umenify</div>
             <div className="flex gap-4">
               <span>Privacy</span>
               <span>Terms</span>

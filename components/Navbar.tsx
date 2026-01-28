@@ -2,6 +2,7 @@
 
 import Link from 'next/link'
 import { useState } from 'react'
+import { BRAND_NAME } from '@/lib/brand'
 
 const links = [
   { href: '/plan', label: 'Plan' },
@@ -20,7 +21,7 @@ export default function Navbar() {
     <div className="w-full border-b border-white/10">
       <div className="mx-auto max-w-6xl px-4 py-3 flex items-center justify-between gap-3">
         <Link href="/" className="font-semibold shrink-0">
-          Examly
+          {BRAND_NAME}
         </Link>
 
         {/* Desktop tabs */}

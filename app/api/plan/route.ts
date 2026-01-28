@@ -171,7 +171,7 @@ function normalizePlan(obj: any) {
 
 function buildSystemPrompt() {
   return `
-You are Examly.
+You are Umenify.
 
 Return ONLY a JSON object that matches this shape:
 {

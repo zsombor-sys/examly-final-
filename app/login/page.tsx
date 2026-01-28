@@ -13,10 +13,12 @@ export default function LoginPage() {
   const [password, setPassword] = useState('')
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
+  const [resendMsg, setResendMsg] = useState<string | null>(null)
 
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault()
     setError(null)
+    setResendMsg(null)
 
     if (!supabase) {
       setError('Auth is not configured (missing Supabase env vars).')
@@ -39,6 +41,27 @@ export default function LoginPage() {
     }
   }
 
+  async function onResendConfirmation() {
+    setError(null)
+    setResendMsg(null)
+    const normalized = email.trim().toLowerCase()
+    if (!normalized) {
+      setError('Please enter your email.')
+      return
+    }
+    try {
+      const { error: resendErr } = await supabase.auth.resend({
+        type: 'signup',
+        email: normalized,
+      })
+      if (resendErr) throw resendErr
+      setResendMsg('Confirmation email sent.')
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Resend failed'
+      setError(msg)
+    }
+  }
+
   return (
     <div className="mx-auto max-w-md px-4 py-16">
       <Card>
@@ -49,10 +72,19 @@ export default function LoginPage() {
           <Input value={email} onChange={(e) => setEmail(e.target.value)} placeholder="Email" type="email" />
           <Input value={password} onChange={(e) => setPassword(e.target.value)} placeholder="Password" type="password" />
           {error && <p className="text-sm text-red-400">{error}</p>}
+          {resendMsg && <p className="text-sm text-green-400">{resendMsg}</p>}
           <Button disabled={loading} className="w-full">
             {loading ? 'Signing in…' : 'Sign in'}
           </Button>
         </form>
+
+        {error?.toLowerCase().includes('confirm') && (
+          <div className="mt-3">
+            <Button variant="ghost" className="w-full" onClick={onResendConfirmation}>
+              Resend confirmation email
+            </Button>
+          </div>
+        )}
 
         <p className="mt-6 text-sm text-dim">
           No account?{' '}

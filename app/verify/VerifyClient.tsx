@@ -47,13 +47,13 @@ export default function VerifyClient() {
     setLoading(true)
     try {
       let lastError: string | null = null
-      const types: Array<'signup' | 'email' | 'magiclink'> = ['signup', 'email', 'magiclink']
+      const types = ['signup', 'email', 'magiclink'] as const
       let ok = false
       for (const type of types) {
         const { error: verifyErr } = await supabase.auth.verifyOtp({
           email,
           token,
-          type,
+          type: type as any,
         })
         if (!verifyErr) {
           ok = true
@@ -97,7 +97,7 @@ export default function VerifyClient() {
       })
       if (resendErr) {
         const { error: resendErr2 } = await supabase.auth.resend({
-          type: 'email',
+          type: 'magiclink' as any,
           email,
         })
         if (resendErr2) throw resendErr2

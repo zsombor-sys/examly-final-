@@ -1,20 +1,33 @@
 'use client'
 
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
 import { supabase } from '@/lib/supabaseClient'
+import { authedFetch } from '@/lib/authClient'
 import { Button, Card, Input } from '@/components/ui'
 
 export default function VerifyClient() {
   const router = useRouter()
   const sp = useSearchParams()
-  const email = useMemo(() => String(sp.get('email') ?? '').trim(), [sp])
+  const emailFromQuery = useMemo(() => String(sp.get('email') ?? '').trim(), [sp])
+  const emailFromStorage = useMemo(() => {
+    if (typeof window === 'undefined') return ''
+    return String(window.localStorage.getItem('umenify_verify_email') ?? '').trim()
+  }, [])
+  const email = emailFromQuery || emailFromStorage
 
   const [code, setCode] = useState('')
   const [loading, setLoading] = useState(false)
   const [resending, setResending] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [message, setMessage] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    if (emailFromQuery) {
+      window.localStorage.setItem('umenify_verify_email', emailFromQuery)
+    }
+  }, [emailFromQuery])
 
   async function onVerify(e: React.FormEvent) {
     e.preventDefault()
@@ -36,10 +49,15 @@ export default function VerifyClient() {
       const { error: verifyErr } = await supabase.auth.verifyOtp({
         email,
         token,
-        type: 'signup',
+        type: 'email',
       })
       if (verifyErr) throw verifyErr
+      await supabase.auth.refreshSession()
+      await authedFetch('/api/me')
       setMessage('Email verified. Redirecting…')
+      if (typeof window !== 'undefined') {
+        window.localStorage.removeItem('umenify_verify_email')
+      }
       window.setTimeout(() => router.push('/plan'), 1200)
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Verification failed'

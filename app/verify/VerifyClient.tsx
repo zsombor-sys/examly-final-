@@ -38,7 +38,7 @@ export default function VerifyClient() {
       setError('Missing email. Please go back and sign up again.')
       return
     }
-    const token = code.trim()
+    const token = code.replace(/\s+/g, '')
     if (!/^\d{8}$/.test(token)) {
       setError('Please enter the 8-digit code.')
       return
@@ -46,21 +46,24 @@ export default function VerifyClient() {
 
     setLoading(true)
     try {
-      const { error: verifyErr } = await supabase.auth.verifyOtp({
-        email,
-        token,
-        type: 'signup',
-      })
-      if (verifyErr) {
-        const { error: verifyErr2 } = await supabase.auth.verifyOtp({
+      let lastError: string | null = null
+      const types: Array<'signup' | 'email' | 'magiclink'> = ['signup', 'email', 'magiclink']
+      let ok = false
+      for (const type of types) {
+        const { error: verifyErr } = await supabase.auth.verifyOtp({
           email,
           token,
-          type: 'email',
+          type,
         })
-        if (verifyErr2) {
-          setError(verifyErr2.message)
-          return
+        if (!verifyErr) {
+          ok = true
+          break
         }
+        lastError = verifyErr.message
+      }
+      if (!ok) {
+        setError(lastError || 'Verification failed')
+        return
       }
       await supabase.auth.refreshSession()
       await authedFetch('/api/me')
@@ -92,7 +95,13 @@ export default function VerifyClient() {
         type: 'signup',
         email,
       })
-      if (resendErr) throw resendErr
+      if (resendErr) {
+        const { error: resendErr2 } = await supabase.auth.resend({
+          type: 'email',
+          email,
+        })
+        if (resendErr2) throw resendErr2
+      }
       setMessage('Verification code sent.')
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Resend failed'

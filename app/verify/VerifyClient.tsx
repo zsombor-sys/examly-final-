@@ -49,9 +49,12 @@ export default function VerifyClient() {
       const { error: verifyErr } = await supabase.auth.verifyOtp({
         email,
         token,
-        type: 'email',
+        type: 'signup',
       })
-      if (verifyErr) throw verifyErr
+      if (verifyErr) {
+        setError(verifyErr.message)
+        return
+      }
       await supabase.auth.refreshSession()
       await authedFetch('/api/me')
       setMessage('Email verified. Redirecting…')

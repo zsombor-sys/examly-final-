@@ -57,7 +57,7 @@ export default function SignupPage() {
         },
       })
       if (error) throw error
-      router.push('/check-email')
+      router.push(`/verify?email=${encodeURIComponent(email.trim())}`)
     } catch (e: any) {
       setError(e?.message ?? 'Error')
     } finally {

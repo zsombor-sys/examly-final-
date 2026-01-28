@@ -19,5 +19,13 @@ export async function requireUser(req: Request) {
     throw err
   }
 
+  const u = data.user as any
+  const emailVerified = !!(u?.email_confirmed_at || u?.confirmed_at)
+  if (!emailVerified) {
+    const err: any = new Error('Email not verified')
+    err.status = 403
+    throw err
+  }
+
   return data.user
 }

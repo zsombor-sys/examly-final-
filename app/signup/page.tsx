@@ -46,10 +46,16 @@ export default function SignupPage() {
         return
       }
 
+      const siteUrl =
+        (process.env.NEXT_PUBLIC_SITE_URL || '').trim() ||
+        (typeof window !== 'undefined' ? window.location.origin : '')
+      const emailRedirectTo = siteUrl ? `${siteUrl}/auth/callback` : undefined
+
       const { error } = await supabase.auth.signUp({
         email,
         password,
         options: {
+          ...(emailRedirectTo ? { emailRedirectTo } : {}),
           data: {
             full_name: fullName.trim(),
             phone: phoneTrim,
@@ -57,7 +63,7 @@ export default function SignupPage() {
         },
       })
       if (error) throw error
-      router.push(`/verify?email=${encodeURIComponent(email.trim())}`)
+      router.push('/check-email')
     } catch (e: any) {
       setError(e?.message ?? 'Error')
     } finally {

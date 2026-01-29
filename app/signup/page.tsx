@@ -34,49 +34,28 @@ export default function SignupPage() {
     setLoading(true)
     try {
       const phoneTrim = phone.trim()
-      const { data: phoneOk, error: phoneErr } = await supabase.rpc('is_phone_available', { phone: phoneTrim })
-      if (phoneErr) throw new Error(phoneErr.message || 'Phone check failed')
-      if (phoneOk === false) {
-        setError('Ez a telefonszám már foglalt')
+      const res = await fetch('/api/auth/signup', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          full_name: fullName.trim(),
+          email: email.trim(),
+          phone: phoneTrim,
+          password,
+        }),
+      })
+      const json = await res.json().catch(() => ({} as any))
+      if (!res.ok) {
+        setError(json?.error ?? 'Signup failed')
         return
       }
 
-      const siteUrl =
-        (process.env.NEXT_PUBLIC_SITE_URL || '').trim() ||
-        (typeof window !== 'undefined' ? window.location.origin : '')
-      const emailRedirectTo = siteUrl ? `${siteUrl}/auth/callback` : undefined
-
-      const { data, error } = await supabase.auth.signUp({
-        email,
+      const { error: signInErr } = await supabase.auth.signInWithPassword({
+        email: email.trim(),
         password,
-        options: {
-          ...(emailRedirectTo ? { emailRedirectTo } : {}),
-          data: {
-            full_name: fullName.trim(),
-            phone: phoneTrim,
-          },
-        },
       })
-      if (error) throw error
-
-      const userId = data?.user?.id
-      if (userId) {
-        const welcomeRes = await fetch('/api/profile/welcome', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            user_id: userId,
-            email: email.trim(),
-            full_name: fullName.trim(),
-            phone: phoneTrim,
-          }),
-        })
-        const welcomeJson = await welcomeRes.json().catch(() => ({} as any))
-        if (!welcomeRes.ok) {
-          throw new Error(welcomeJson?.error ?? 'Signup failed')
-        }
-      }
-      router.push('/check-email')
+      if (signInErr) throw signInErr
+      router.replace('/plan')
     } catch (e: any) {
       setError(e?.message ?? 'Error')
     } finally {

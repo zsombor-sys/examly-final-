@@ -43,9 +43,11 @@ function Inner() {
 
       // Optional: prefill email on Stripe if we can read it.
       let email: string | null = null
+      let userId: string | null = null
       try {
         const { data } = await supabase.auth.getUser()
         email = data?.user?.email ?? null
+        userId = data?.user?.id ?? null
       } catch {
         // ignore
       }
@@ -53,6 +55,9 @@ function Inner() {
       const url = new URL(paymentLink)
       if (email && !url.searchParams.get('prefilled_email')) {
         url.searchParams.set('prefilled_email', email)
+      }
+      if (userId && !url.searchParams.get('client_reference_id')) {
+        url.searchParams.set('client_reference_id', userId)
       }
 
       window.location.href = url.toString()

@@ -11,12 +11,14 @@ import Stripe from 'stripe'
 
 export type ProfileRow = {
   id: string
+  user_id?: string | null
   full_name: string | null
   phone: string | null
   phone_normalized: string | null
 
   credits: number | null
   starter_granted: boolean | null
+  welcome_bonus_claimed?: boolean | null
 
   stripe_customer_id: string | null
   stripe_payment_method_id: string | null
@@ -38,11 +40,9 @@ function nowIso() {
 function normalizePhone(raw: string | null | undefined) {
   const s = String(raw ?? '').trim()
   if (!s) return null
-  // Keep digits and + only, remove spaces and punctuation.
-  const cleaned = s.replace(/[()\-\s.]/g, '')
-  const plusFixed = cleaned.startsWith('00') ? `+${cleaned.slice(2)}` : cleaned
-  // If it doesn't start with +, keep it as-is (still normalized)
-  return plusFixed
+  // Digits only.
+  const digits = s.replace(/\D/g, '')
+  return digits || null
 }
 
 function stripeClient() {
@@ -59,6 +59,7 @@ function normalizeProfile(p: any): ProfileRow {
   if (out.phone_normalized === undefined) out.phone_normalized = normalizePhone(out.phone)
   if (out.credits == null) out.credits = 0
   if (out.starter_granted == null) out.starter_granted = false
+  if (out.welcome_bonus_claimed == null) out.welcome_bonus_claimed = false
   if (out.stripe_customer_id === undefined) out.stripe_customer_id = null
   if (out.stripe_payment_method_id === undefined) out.stripe_payment_method_id = null
   if (out.auto_recharge == null) out.auto_recharge = false
@@ -85,6 +86,10 @@ export async function getOrCreateProfile(userId: string): Promise<ProfileRow> {
       patch.starter_granted = false
       needPatch = true
     }
+    if ((existing as any).welcome_bonus_claimed == null) {
+      patch.welcome_bonus_claimed = false
+      needPatch = true
+    }
     if ((existing as any).phone_normalized == null) {
       patch.phone_normalized = normalizePhone((existing as any).phone)
       needPatch = true
@@ -107,6 +112,7 @@ export async function getOrCreateProfile(userId: string): Promise<ProfileRow> {
     stripe_customer_id: null,
     stripe_payment_method_id: null,
     auto_recharge: false,
+    welcome_bonus_claimed: false,
     updated_at: nowIso(),
   }
 
@@ -314,6 +320,7 @@ export async function ensureProfileFromUser(user: any): Promise<ProfileRow> {
       phone_normalized: phoneNorm,
       credits: 0,
       starter_granted: false,
+      welcome_bonus_claimed: false,
       created_at: now,
       updated_at: now,
     }

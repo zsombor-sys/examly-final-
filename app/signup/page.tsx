@@ -51,7 +51,7 @@ export default function SignupPage() {
         (typeof window !== 'undefined' ? window.location.origin : '')
       const emailRedirectTo = siteUrl ? `${siteUrl}/auth/callback` : undefined
 
-      const { error } = await supabase.auth.signUp({
+      const { data, error } = await supabase.auth.signUp({
         email,
         password,
         options: {
@@ -63,6 +63,24 @@ export default function SignupPage() {
         },
       })
       if (error) throw error
+
+      const userId = data?.user?.id
+      if (userId) {
+        const welcomeRes = await fetch('/api/profile/welcome', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            user_id: userId,
+            email: email.trim(),
+            full_name: fullName.trim(),
+            phone: phoneTrim,
+          }),
+        })
+        const welcomeJson = await welcomeRes.json().catch(() => ({} as any))
+        if (!welcomeRes.ok) {
+          throw new Error(welcomeJson?.error ?? 'Signup failed')
+        }
+      }
       router.push('/check-email')
     } catch (e: any) {
       setError(e?.message ?? 'Error')

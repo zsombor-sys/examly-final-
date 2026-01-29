@@ -28,16 +28,28 @@ export async function POST(req: Request) {
 
     if (event.type === 'checkout.session.completed') {
       const session = event.data.object as Stripe.Checkout.Session
-      const userId = session.metadata?.user_id ? String(session.metadata.user_id) : ''
+      const userId =
+        (session.metadata?.user_id ? String(session.metadata.user_id) : '') ||
+        (session.client_reference_id ? String(session.client_reference_id) : '')
+
       if (!userId) {
-        console.error('Stripe webhook: missing metadata.user_id', { sessionId: session.id })
-        return NextResponse.json({ error: 'Missing user_id metadata' }, { status: 400 })
+        console.error('Stripe webhook: missing user_id', { sessionId: session.id })
+        return NextResponse.json({ received: true })
       }
 
       const rawAmount = Number(process.env.STRIPE_CREDITS_PER_PURCHASE ?? 30)
       const amount = Number.isFinite(rawAmount) ? Math.trunc(rawAmount) : 30
 
       const sb = supabaseAdmin()
+      const { error: insErr } = await sb.from('billing_events').insert({
+        stripe_session_id: session.id,
+        user_id: userId,
+      })
+      if (insErr) {
+        if (insErr.code === '23505') return NextResponse.json({ received: true })
+        throw insErr
+      }
+
       const { error } = await sb.rpc('add_credits', { p_user_id: userId, p_amount: amount })
       if (error) throw error
     }

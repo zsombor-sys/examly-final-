@@ -34,14 +34,9 @@ export default function SignupPage() {
     setLoading(true)
     try {
       const phoneTrim = phone.trim()
-      const checkRes = await fetch('/api/auth/check-phone', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ phone: phoneTrim }),
-      })
-      const checkJson = await checkRes.json().catch(() => ({} as any))
-      if (!checkRes.ok) throw new Error(checkJson?.error ?? 'Phone check failed')
-      if (checkJson?.available === false) {
+      const { data: phoneOk, error: phoneErr } = await supabase.rpc('is_phone_available', { phone: phoneTrim })
+      if (phoneErr) throw new Error(phoneErr.message || 'Phone check failed')
+      if (phoneOk === false) {
         setError('Ez a telefonszám már foglalt')
         return
       }

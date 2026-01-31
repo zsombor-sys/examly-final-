@@ -30,9 +30,10 @@ export default function LoginPage() {
     setLoading(false)
 
     if (error) {
-      setError(error.message)
+      setError(error.message || 'Login failed')
     } else {
       try {
+        await authedFetch('/api/profile/init', { method: 'POST' })
         await authedFetch('/api/profile/ensure', { method: 'POST' })
       } catch {
         // Best-effort: don't block login on profile setup.

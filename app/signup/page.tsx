@@ -5,6 +5,7 @@ import { useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { supabase } from '@/lib/supabaseClient'
 import { Button, Card, Input } from '@/components/ui'
+import { authedFetch } from '@/lib/authClient'
 
 export default function SignupPage() {
   const router = useRouter()
@@ -54,7 +55,15 @@ export default function SignupPage() {
         email: email.trim(),
         password,
       })
-      if (signInErr) throw signInErr
+      if (signInErr) {
+        setError(signInErr.message || 'Login failed')
+        return
+      }
+      await authedFetch('/api/profile/init', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ full_name: fullName.trim(), phone: phoneTrim }),
+      })
       router.replace('/plan')
     } catch (e: any) {
       setError(e?.message ?? 'Error')

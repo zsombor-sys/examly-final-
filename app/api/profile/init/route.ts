@@ -15,7 +15,7 @@ export async function POST(req: Request) {
     const { data: existing, error: selErr } = await sb
       .from('profiles')
       .select('*')
-      .eq('user_id', user.id)
+      .eq('id', user.id)
       .maybeSingle()
     if (selErr) throw selErr
 
@@ -23,7 +23,7 @@ export async function POST(req: Request) {
       const { data: inserted, error: insErr } = await sb
         .from('profiles')
         .insert({
-          user_id: user.id,
+          id: user.id,
           full_name: fullName || null,
           phone: phone || null,
           credits: 5,
@@ -40,7 +40,7 @@ export async function POST(req: Request) {
         full_name: existing.full_name ?? (fullName || null),
         phone: existing.phone ?? (phone || null),
       })
-      .eq('user_id', user.id)
+      .eq('id', user.id)
     if (updErr) throw updErr
 
     return NextResponse.json({ ok: true, credits: Number(existing?.credits ?? 0) })

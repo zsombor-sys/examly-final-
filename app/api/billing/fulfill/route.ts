@@ -67,18 +67,12 @@ export async function POST(req: Request) {
     }
 
     if (!updated) {
-      const { data: rowByUserId } = await sb.from('profiles').select('credits').eq('user_id', user.id).maybeSingle()
-      if (rowByUserId) {
-        const next = Number(rowByUserId.credits ?? 0) + PRO_CREDITS_PER_PURCHASE
-        await sb.from('profiles').update({ credits: next }).eq('user_id', user.id)
+      const { data: rowById } = await sb.from('profiles').select('credits').eq('id', user.id).maybeSingle()
+      if (rowById) {
+        const next = Number(rowById.credits ?? 0) + PRO_CREDITS_PER_PURCHASE
+        await sb.from('profiles').update({ credits: next }).eq('id', user.id)
       } else {
-        const { data: rowById } = await sb.from('profiles').select('credits').eq('id', user.id).maybeSingle()
-        if (rowById) {
-          const next = Number(rowById.credits ?? 0) + PRO_CREDITS_PER_PURCHASE
-          await sb.from('profiles').update({ credits: next }).eq('id', user.id)
-        } else {
-          throw new Error('Profile not found for credit update')
-        }
+        throw new Error('Profile not found for credit update')
       }
     }
 

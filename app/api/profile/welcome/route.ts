@@ -48,7 +48,6 @@ export async function POST(req: Request) {
     if (!existing) {
       const { error: insErr } = await sb.from('profiles').insert({
         id: userId,
-        user_id: userId,
         full_name: fullName || null,
         phone: phoneRaw || null,
         phone_normalized: phoneNorm,

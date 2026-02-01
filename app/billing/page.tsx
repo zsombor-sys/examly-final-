@@ -51,9 +51,12 @@ function Inner() {
       } catch {
         // ignore
       }
+      if (!email) {
+        throw new Error('Missing email for payment.')
+      }
 
       const url = new URL(paymentLink)
-      if (email && !url.searchParams.get('prefilled_email')) {
+      if (!url.searchParams.get('prefilled_email')) {
         url.searchParams.set('prefilled_email', email)
       }
       if (userId && !url.searchParams.get('client_reference_id')) {

@@ -35,7 +35,7 @@ export async function POST(req: Request) {
       const sb = supabaseAdmin()
 
       // Idempotency by Stripe event id
-      const { error: eventErr } = await sb.from('stripe_events').insert({ event_id: event.id })
+      const { error: eventErr } = await sb.from('stripe_events').insert({ id: event.id })
       if (eventErr) {
         if (eventErr.code === '23505') return NextResponse.json({ received: true })
         throw eventErr

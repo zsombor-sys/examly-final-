@@ -10,6 +10,7 @@ export async function POST(req: Request) {
     const body = await req.json().catch(() => ({} as any))
     const fullName = String(body?.full_name ?? user?.user_metadata?.full_name ?? '').trim()
     const phone = String(body?.phone ?? user?.user_metadata?.phone ?? '').trim()
+    const email = String(user?.email ?? '').trim().toLowerCase()
 
     const sb = supabaseAdmin()
     const { data: existing, error: selErr } = await sb
@@ -24,6 +25,7 @@ export async function POST(req: Request) {
         .from('profiles')
         .insert({
           id: user.id,
+          email: email || null,
           full_name: fullName || null,
           phone: phone || null,
           credits: 5,
@@ -37,6 +39,7 @@ export async function POST(req: Request) {
     const { error: updErr } = await sb
       .from('profiles')
       .update({
+        email: existing.email ?? (email || null),
         full_name: existing.full_name ?? (fullName || null),
         phone: existing.phone ?? (phone || null),
       })

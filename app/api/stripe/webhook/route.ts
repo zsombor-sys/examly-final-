@@ -28,29 +28,39 @@ export async function POST(req: Request) {
 
     if (event.type === 'checkout.session.completed') {
       const session = event.data.object as Stripe.Checkout.Session
-      const userId =
-        (session.metadata?.user_id ? String(session.metadata.user_id) : '') ||
-        (session.client_reference_id ? String(session.client_reference_id) : '')
+      const email =
+        session.customer_details?.email ||
+        (typeof session.customer_email === 'string' ? session.customer_email : null)
 
-      if (!userId) {
-        console.error('Stripe webhook: missing user_id', { sessionId: session.id })
+      const sb = supabaseAdmin()
+
+      // Idempotency by Stripe event id
+      const { error: eventErr } = await sb.from('stripe_events').insert({ event_id: event.id })
+      if (eventErr) {
+        if (eventErr.code === '23505') return NextResponse.json({ received: true })
+        throw eventErr
+      }
+
+      if (!email) {
+        console.error('Stripe webhook: missing customer email', { eventId: event.id, sessionId: session.id })
+        return NextResponse.json({ received: true })
+      }
+
+      const { data: profile, error: profErr } = await sb
+        .from('profiles')
+        .select('id')
+        .ilike('email', email)
+        .maybeSingle()
+      if (profErr) throw profErr
+      if (!profile?.id) {
+        console.error('Stripe webhook: no profile for email', { eventId: event.id, email })
         return NextResponse.json({ received: true })
       }
 
       const rawAmount = Number(process.env.STRIPE_CREDITS_PER_PURCHASE ?? 30)
       const amount = Number.isFinite(rawAmount) ? Math.trunc(rawAmount) : 30
 
-      const sb = supabaseAdmin()
-      const { error: insErr } = await sb.from('billing_events').insert({
-        stripe_session_id: session.id,
-        user_id: userId,
-      })
-      if (insErr) {
-        if (insErr.code === '23505') return NextResponse.json({ received: true })
-        throw insErr
-      }
-
-      const { error } = await sb.rpc('add_credits', { p_user_id: userId, p_amount: amount })
+      const { error } = await sb.rpc('add_credits', { p_user_id: profile.id, p_amount: amount })
       if (error) throw error
     }
 

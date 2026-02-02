@@ -148,7 +148,7 @@ function Inner() {
   const [files, setFiles] = useState<File[]>([])
   const [loading, setLoading] = useState(false)
   const [processing, setProcessing] = useState(false)
-  const [materials, setMaterials] = useState<Array<{ id: string; status: string; error?: string | null }>>([])
+  const [materials, setMaterials] = useState<Array<{ id: string; status: string; error?: string | null; original_name?: string | null }>>([])
   const [planId, setPlanId] = useState<string | null>(null)
   const pendingGenerateRef = useRef(false)
   const [error, setError] = useState<string | null>(null)
@@ -276,6 +276,37 @@ function Inner() {
     pendingGenerateRef.current = false
   }
 
+  async function compressImage(file: File) {
+    if (typeof window === 'undefined') return file
+    if (!file.type.startsWith('image/')) return file
+
+    const img = new Image()
+    const url = URL.createObjectURL(file)
+    await new Promise((resolve, reject) => {
+      img.onload = resolve
+      img.onerror = reject
+      img.src = url
+    })
+    const maxW = 1600
+    const scale = img.width > maxW ? maxW / img.width : 1
+    const w = Math.round(img.width * scale)
+    const h = Math.round(img.height * scale)
+    const canvas = document.createElement('canvas')
+    canvas.width = w
+    canvas.height = h
+    const ctx = canvas.getContext('2d')
+    if (!ctx) {
+      URL.revokeObjectURL(url)
+      return file
+    }
+    ctx.drawImage(img, 0, 0, w, h)
+    const blob: Blob = await new Promise((resolve) =>
+      canvas.toBlob((b) => resolve(b || file), 'image/jpeg', 0.8)
+    )
+    URL.revokeObjectURL(url)
+    return new File([blob], file.name.replace(/\.\w+$/, '.jpg'), { type: 'image/jpeg' })
+  }
+
   async function uploadMaterials(nextPlanId: string) {
     if (!supabase) throw new Error('Auth is not configured (missing Supabase env vars).')
     const sess = await supabase.auth.getSession()
@@ -296,16 +327,28 @@ function Inner() {
     const uploaded: Array<{ file_path: string; mime_type: string; original_name: string | null; type: string }> = []
 
     for (const f of list) {
-      const safeName = f.name.replace(/\s+/g, '_')
+      const file = f.type.startsWith('image/') ? await compressImage(f) : f
+      const safeName = file.name.replace(/\s+/g, '_')
       const path = `${userId}/${nextPlanId}/${Date.now()}_${safeName}`
-      const { error: upErr } = await bucket.upload(path, f, {
+      const { error: upErr } = await bucket.upload(path, file, {
         upsert: false,
-        contentType: f.type || undefined,
+        contentType: file.type || undefined,
         cacheControl: '3600',
       })
       if (upErr) throw new Error(upErr.message)
-      const kind = f.type.startsWith('image/') ? 'image' : f.type === 'application/pdf' ? 'pdf' : 'file'
-      uploaded.push({ file_path: path, mime_type: f.type || 'application/octet-stream', original_name: f.name || null, type: kind })
+      const kind = file.type.startsWith('image/') ? 'image' : file.type === 'application/pdf' ? 'pdf' : 'file'
+      console.log('Uploaded material', {
+        name: file.name,
+        size: file.size,
+        mime: file.type,
+        path,
+      })
+      uploaded.push({
+        file_path: path,
+        mime_type: file.type || 'application/octet-stream',
+        original_name: f.name || null,
+        type: kind,
+      })
     }
 
     const res = await authedFetch('/api/materials/upload', {
@@ -314,6 +357,7 @@ function Inner() {
       body: JSON.stringify({ plan_id: nextPlanId, items: uploaded }),
     })
     const json = await res.json().catch(() => ({} as any))
+    console.log('Materials upload response', json)
     if (!res.ok) throw new Error(json?.error ?? 'Upload failed')
   }
 
@@ -323,7 +367,7 @@ function Inner() {
     if (!res.ok) throw new Error(json?.error ?? 'Failed to load materials status')
     const items = Array.isArray(json?.items) ? json.items : []
     setMaterials(items)
-    return items as Array<{ id: string; status: string; error?: string | null }>
+    return items as Array<{ id: string; status: string; error?: string | null; original_name?: string | null }>
   }
 
   async function kickProcessing(nextPlanId: string) {
@@ -552,6 +596,16 @@ function Inner() {
             <div className="mt-2 text-xs text-white/60">
               Processing {processedCount}/{totalMaterials || files.length}…
               {failedCount > 0 ? ` (${failedCount} failed)` : ''}
+            </div>
+          ) : null}
+          {materials.length > 0 ? (
+            <div className="mt-2 space-y-1 text-xs text-white/60">
+              {materials.map((m) => (
+                <div key={m.id}>
+                  {m.original_name || 'File'}: {m.status}
+                  {m.status === 'failed' && m.error ? ` — ${m.error}` : ''}
+                </div>
+              ))}
             </div>
           ) : null}
 

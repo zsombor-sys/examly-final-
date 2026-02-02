@@ -23,7 +23,7 @@ export async function POST(req: Request) {
         mime_type: String(x?.mime_type ?? '') || 'application/octet-stream',
         type: String(x?.type ?? ''),
         original_name: String(x?.original_name ?? '') || null,
-        status: 'uploaded',
+        status: 'pending',
       }))
       .map((x: any) => {
         if (!x.type) {

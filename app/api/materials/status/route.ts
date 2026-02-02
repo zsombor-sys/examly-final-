@@ -14,7 +14,7 @@ export async function GET(req: Request) {
     const sb = supabaseAdmin()
     const { data, error } = await sb
       .from('materials')
-      .select('id, status, error')
+      .select('id, status, error, original_name')
       .eq('user_id', user.id)
       .eq('plan_id', planId)
       .order('created_at', { ascending: true })

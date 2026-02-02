@@ -16,6 +16,28 @@ function isPdf(path: string, mime: string | null) {
   return /\.pdf$/i.test(path)
 }
 
+function isRetriable(err: any) {
+  const msg = String(err?.message || '').toLowerCase()
+  const status = Number(err?.status || err?.cause?.status)
+  if (status >= 500) return true
+  return msg.includes('timeout') || msg.includes('econn') || msg.includes('network')
+}
+
+async function withRetries<T>(fn: () => Promise<T>) {
+  const delays = [500, 1500, 3000]
+  let lastErr: any = null
+  for (let i = 0; i < delays.length; i++) {
+    try {
+      return await fn()
+    } catch (err: any) {
+      lastErr = err
+      if (!isRetriable(err) || i === delays.length - 1) break
+      await new Promise((r) => setTimeout(r, delays[i]))
+    }
+  }
+  throw lastErr
+}
+
 async function extractImageText(buf: Buffer, mime: string) {
   const apiKey = process.env.OPENAI_API_KEY
   if (!apiKey) return ''
@@ -52,7 +74,7 @@ export async function POST(req: Request) {
       .select('id, file_path, mime_type')
       .eq('user_id', user.id)
       .eq('plan_id', planId)
-      .eq('status', 'uploaded')
+      .eq('status', 'pending')
       .order('created_at', { ascending: true })
       .limit(1)
     if (error) throw error
@@ -62,24 +84,27 @@ export async function POST(req: Request) {
     await sb.from('materials').update({ status: 'processing' }).eq('id', item.id)
 
     try {
-      const { data, error: dlErr } = await sb.storage.from('uploads').download(item.file_path)
-      if (dlErr || !data) throw dlErr || new Error('Download failed')
-      const ab = await data.arrayBuffer()
-      const buf = Buffer.from(ab)
-      let extracted = ''
-      if (isPdf(item.file_path, item.mime_type)) {
-        const parsed = await pdfParse(buf)
-        extracted = String(parsed.text ?? '').trim()
-      } else if (isImage(item.file_path, item.mime_type)) {
-        const mime = item.mime_type || 'image/png'
-        extracted = await extractImageText(buf, mime)
-      } else {
-        extracted = buf.toString('utf8')
-      }
-      extracted = extracted.slice(0, 120_000)
+      const extracted = await withRetries(async () => {
+        const { data, error: dlErr } = await sb.storage.from('uploads').download(item.file_path)
+        if (dlErr || !data) throw dlErr || new Error('Download failed')
+        const ab = await data.arrayBuffer()
+        const buf = Buffer.from(ab)
+        let out = ''
+        if (isPdf(item.file_path, item.mime_type)) {
+          const parsed = await pdfParse(buf)
+          out = String(parsed.text ?? '').trim()
+        } else if (isImage(item.file_path, item.mime_type)) {
+          const mime = item.mime_type || 'image/png'
+          out = await extractImageText(buf, mime)
+        } else {
+          out = buf.toString('utf8')
+        }
+        return out
+      })
+      const clipped = extracted.slice(0, 120_000)
       await sb
         .from('materials')
-        .update({ status: 'processed', extracted_text: extracted || null, error: null })
+        .update({ status: 'processed', extracted_text: clipped || null, error: null })
         .eq('id', item.id)
     } catch (err: any) {
       await sb

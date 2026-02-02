@@ -18,6 +18,11 @@ Open: http://localhost:3000
 
 1) Create a Supabase project
 2) In Supabase SQL editor, run **supabase.sql** (in this repo)
+
+After running migrations that change tables, reload PostgREST schema:
+```sql
+select pg_notify('pgrst','reload schema');
+```
 3) Supabase Dashboard → Settings → API:
    - Project URL → `NEXT_PUBLIC_SUPABASE_URL`
    - anon public key → `NEXT_PUBLIC_SUPABASE_ANON_KEY`
@@ -71,4 +76,3 @@ Important:
 - You must be logged in to use any AI endpoint
 - **Free**: 10 generations total for 48 hours (activated once per account)
 - **Pro**: each purchase adds +30 credits; when credits reach 0 you can buy again
-

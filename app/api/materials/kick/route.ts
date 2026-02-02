@@ -49,7 +49,7 @@ export async function POST(req: Request) {
     const sb = supabaseAdmin()
     const { data: rows, error } = await sb
       .from('materials')
-      .select('id, storage_path, mime_type')
+      .select('id, file_path, mime_type')
       .eq('user_id', user.id)
       .eq('plan_id', planId)
       .eq('status', 'uploaded')
@@ -62,15 +62,15 @@ export async function POST(req: Request) {
     await sb.from('materials').update({ status: 'processing' }).eq('id', item.id)
 
     try {
-      const { data, error: dlErr } = await sb.storage.from('uploads').download(item.storage_path)
+      const { data, error: dlErr } = await sb.storage.from('uploads').download(item.file_path)
       if (dlErr || !data) throw dlErr || new Error('Download failed')
       const ab = await data.arrayBuffer()
       const buf = Buffer.from(ab)
       let extracted = ''
-      if (isPdf(item.storage_path, item.mime_type)) {
+      if (isPdf(item.file_path, item.mime_type)) {
         const parsed = await pdfParse(buf)
         extracted = String(parsed.text ?? '').trim()
-      } else if (isImage(item.storage_path, item.mime_type)) {
+      } else if (isImage(item.file_path, item.mime_type)) {
         const mime = item.mime_type || 'image/png'
         extracted = await extractImageText(buf, mime)
       } else {
@@ -79,12 +79,12 @@ export async function POST(req: Request) {
       extracted = extracted.slice(0, 120_000)
       await sb
         .from('materials')
-        .update({ status: 'processed', extracted_text: extracted || null, error_message: null })
+        .update({ status: 'processed', extracted_text: extracted || null, error: null })
         .eq('id', item.id)
     } catch (err: any) {
       await sb
         .from('materials')
-        .update({ status: 'failed', error_message: String(err?.message ?? 'Processing failed') })
+        .update({ status: 'failed', error: String(err?.message ?? 'Processing failed') })
         .eq('id', item.id)
     }
 

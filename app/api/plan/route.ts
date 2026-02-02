@@ -340,12 +340,12 @@ export async function POST(req: Request) {
           const sb = supabaseAdmin()
           const { data } = await sb
             .from('materials')
-            .select('storage_path')
+            .select('file_path')
             .eq('user_id', user.id)
             .eq('plan_id', planId)
             .eq('status', 'processed')
           if (Array.isArray(data)) {
-            for (const m of data) fileNames.push(String(m.storage_path || '').split('/').pop() || 'file')
+            for (const m of data) fileNames.push(String(m.file_path || '').split('/').pop() || 'file')
           }
         } catch {}
       }
@@ -367,7 +367,7 @@ export async function POST(req: Request) {
       const sb = supabaseAdmin()
       const { data, error } = await sb
         .from('materials')
-        .select('storage_path, extracted_text')
+        .select('file_path, extracted_text')
         .eq('user_id', user.id)
         .eq('plan_id', planId)
         .eq('status', 'processed')
@@ -375,7 +375,7 @@ export async function POST(req: Request) {
       if (Array.isArray(data)) {
         const parts: string[] = []
         for (const m of data) {
-          const name = String(m.storage_path || '').split('/').pop() || 'file'
+          const name = String(m.file_path || '').split('/').pop() || 'file'
           fileNames.push(name)
           if (m.extracted_text) parts.push(`--- ${name} ---\n${String(m.extracted_text)}`)
         }

@@ -148,7 +148,7 @@ function Inner() {
   const [files, setFiles] = useState<File[]>([])
   const [loading, setLoading] = useState(false)
   const [processing, setProcessing] = useState(false)
-  const [materials, setMaterials] = useState<Array<{ id: string; status: string; error_message?: string | null }>>([])
+  const [materials, setMaterials] = useState<Array<{ id: string; status: string; error?: string | null }>>([])
   const [planId, setPlanId] = useState<string | null>(null)
   const pendingGenerateRef = useRef(false)
   const [error, setError] = useState<string | null>(null)
@@ -293,7 +293,7 @@ function Inner() {
     }
 
     const bucket = supabase.storage.from('uploads')
-    const uploaded: Array<{ storage_path: string; mime_type: string | null }> = []
+    const uploaded: Array<{ file_path: string; mime_type: string | null; original_name: string | null }> = []
 
     for (const f of list) {
       const safeName = f.name.replace(/\s+/g, '_')
@@ -304,7 +304,7 @@ function Inner() {
         cacheControl: '3600',
       })
       if (upErr) throw new Error(upErr.message)
-      uploaded.push({ storage_path: path, mime_type: f.type || null })
+      uploaded.push({ file_path: path, mime_type: f.type || null, original_name: f.name || null })
     }
 
     const res = await authedFetch('/api/materials/upload', {
@@ -322,7 +322,7 @@ function Inner() {
     if (!res.ok) throw new Error(json?.error ?? 'Failed to load materials status')
     const items = Array.isArray(json?.items) ? json.items : []
     setMaterials(items)
-    return items as Array<{ id: string; status: string; error_message?: string | null }>
+    return items as Array<{ id: string; status: string; error?: string | null }>
   }
 
   async function kickProcessing(nextPlanId: string) {

@@ -19,11 +19,12 @@ export async function POST(req: Request) {
       .map((x: any) => ({
         user_id: user.id,
         plan_id: planId,
-        storage_path: String(x?.storage_path ?? ''),
+        file_path: String(x?.file_path ?? ''),
         mime_type: String(x?.mime_type ?? '') || null,
+        original_name: String(x?.original_name ?? '') || null,
         status: 'uploaded',
       }))
-      .filter((x: any) => x.storage_path && x.storage_path.startsWith(prefix))
+      .filter((x: any) => x.file_path && x.file_path.startsWith(prefix))
 
     if (rows.length === 0) {
       return NextResponse.json({ error: 'No valid items' }, { status: 400 })

@@ -1,7 +1,7 @@
 'use client'
 
 import Link from 'next/link'
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { Button, Textarea } from '@/components/ui'
 import MarkdownMath from '@/components/MarkdownMath'
 import InlineMath from '@/components/InlineMath'
@@ -9,7 +9,6 @@ import { FileUp, Loader2, Trash2, ArrowLeft, Send } from 'lucide-react'
 import AuthGate from '@/components/AuthGate'
 import { authedFetch } from '@/lib/authClient'
 import { supabase } from '@/lib/supabaseClient'
-import { uploadFilesToStorage } from '@/lib/uploadClient'
 import HScroll from '@/components/HScroll'
 import Pomodoro from '@/components/Pomodoro'
 
@@ -148,6 +147,10 @@ function Inner() {
   const [prompt, setPrompt] = useState('')
   const [files, setFiles] = useState<File[]>([])
   const [loading, setLoading] = useState(false)
+  const [processing, setProcessing] = useState(false)
+  const [materials, setMaterials] = useState<Array<{ id: string; status: string; error_message?: string | null }>>([])
+  const [planId, setPlanId] = useState<string | null>(null)
+  const pendingGenerateRef = useRef(false)
   const [error, setError] = useState<string | null>(null)
 
   const [saved, setSaved] = useState<SavedPlan[]>([])
@@ -267,25 +270,85 @@ function Inner() {
     setAskError(null)
     setAskText('')
     setError(null)
+    setMaterials([])
+    setProcessing(false)
+    setPlanId(null)
+    pendingGenerateRef.current = false
+  }
+
+  async function uploadMaterials(nextPlanId: string) {
+    if (!supabase) throw new Error('Auth is not configured (missing Supabase env vars).')
+    const sess = await supabase.auth.getSession()
+    const userId = sess.data.session?.user?.id
+    if (!userId) throw new Error('Not authenticated')
+
+    const list = (files || []).slice(0, 40)
+    if (list.length === 0) return
+
+    const MAX_BYTES = 10 * 1024 * 1024
+    for (const f of list) {
+      if (f.size > MAX_BYTES) {
+        throw new Error(`File too large (max 10MB): ${f.name}`)
+      }
+    }
+
+    const bucket = supabase.storage.from('uploads')
+    const uploaded: Array<{ storage_path: string; mime_type: string | null }> = []
+
+    for (const f of list) {
+      const safeName = f.name.replace(/\s+/g, '_')
+      const path = `${userId}/${nextPlanId}/${Date.now()}_${safeName}`
+      const { error: upErr } = await bucket.upload(path, f, {
+        upsert: false,
+        contentType: f.type || undefined,
+        cacheControl: '3600',
+      })
+      if (upErr) throw new Error(upErr.message)
+      uploaded.push({ storage_path: path, mime_type: f.type || null })
+    }
+
+    const res = await authedFetch('/api/materials/upload', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ plan_id: nextPlanId, items: uploaded }),
+    })
+    const json = await res.json().catch(() => ({} as any))
+    if (!res.ok) throw new Error(json?.error ?? 'Upload failed')
+  }
+
+  async function fetchStatus(nextPlanId: string) {
+    const res = await authedFetch(`/api/materials/status?planId=${encodeURIComponent(nextPlanId)}`)
+    const json = await res.json().catch(() => ({} as any))
+    if (!res.ok) throw new Error(json?.error ?? 'Failed to load materials status')
+    const items = Array.isArray(json?.items) ? json.items : []
+    setMaterials(items)
+    return items as Array<{ id: string; status: string; error_message?: string | null }>
+  }
+
+  async function kickProcessing(nextPlanId: string) {
+    await authedFetch(`/api/materials/kick?planId=${encodeURIComponent(nextPlanId)}`, { method: 'POST' })
   }
 
   async function generate() {
     setError(null)
     setLoading(true)
     try {
-      const form = new FormData()
-      form.append('prompt', prompt || '')
+      const nextPlanId = planId || crypto.randomUUID()
+      if (!planId) setPlanId(nextPlanId)
 
-      // Upload PDFs/images to Supabase Storage first (supports large + many files)
-      if (files.length) {
-        const uploadPaths = await uploadFilesToStorage({
-          files,
-          folder: 'plan',
-          maxFiles: 40,
-        })
-        form.append('uploadPaths', JSON.stringify(uploadPaths))
+      if (files.length > 0 && !processing && materials.length === 0) {
+        await uploadMaterials(nextPlanId)
+        pendingGenerateRef.current = true
+        setProcessing(true)
+        await fetchStatus(nextPlanId)
+        await kickProcessing(nextPlanId)
+        setLoading(false)
+        return
       }
 
+      const form = new FormData()
+      form.append('prompt', prompt || '')
+      form.append('planId', nextPlanId)
 
       const res = await authedFetch('/api/plan', { method: 'POST', body: form })
       const json = await res.json().catch(() => ({} as any))
@@ -320,6 +383,36 @@ function Inner() {
       setLoading(false)
     }
   }
+
+  useEffect(() => {
+    if (!processing || !planId) return
+    let cancelled = false
+    const tick = async () => {
+      try {
+        const items = await fetchStatus(planId)
+        const pending = items.filter((x) => x.status === 'uploaded' || x.status === 'processing')
+        if (pending.length > 0) {
+          await kickProcessing(planId)
+        } else {
+          setProcessing(false)
+          if (pendingGenerateRef.current) {
+            pendingGenerateRef.current = false
+            await generate()
+          }
+        }
+      } catch (e: any) {
+        if (!cancelled) setError(e?.message ?? 'Processing error')
+      }
+    }
+    const id = window.setInterval(() => {
+      if (!cancelled) tick()
+    }, 1500)
+    tick()
+    return () => {
+      cancelled = true
+      window.clearInterval(id)
+    }
+  }, [processing, planId])
 
   async function clearHistory() {
     setError(null)
@@ -368,7 +461,10 @@ function Inner() {
 
   const displayTitle = result?.title?.trim() ? result.title : 'Study plan'
   const displayInput = shortPrompt(prompt)
-  const canGenerate = !loading && (prompt.trim().length >= 6 || files.length > 0)
+  const totalMaterials = materials.length
+  const processedCount = materials.filter((m) => m.status === 'processed').length
+  const failedCount = materials.filter((m) => m.status === 'failed').length
+  const canGenerate = !loading && !processing && (prompt.trim().length >= 6 || files.length > 0)
 
   return (
     <div className="mx-auto max-w-6xl px-4 py-10">
@@ -440,11 +536,23 @@ function Inner() {
               className="hidden"
               accept="application/pdf,image/*"
               multiple
-              onChange={(e) => setFiles(Array.from(e.target.files ?? []))}
+              onChange={(e) => {
+                setFiles(Array.from(e.target.files ?? []))
+                setMaterials([])
+                setProcessing(false)
+                setPlanId(null)
+                pendingGenerateRef.current = false
+              }}
             />
           </label>
 
           {files.length ? <div className="mt-2 text-xs text-white/60">Selected: {files.length} file(s)</div> : null}
+          {processing ? (
+            <div className="mt-2 text-xs text-white/60">
+              Processing {processedCount}/{totalMaterials || files.length}…
+              {failedCount > 0 ? ` (${failedCount} failed)` : ''}
+            </div>
+          ) : null}
 
           <Button className="mt-4 w-full" onClick={generate} disabled={!canGenerate}>
             {loading ? (

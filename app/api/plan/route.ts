@@ -330,12 +330,25 @@ export async function POST(req: Request) {
     const prompt = String(form.get('prompt') ?? '')
 
     // Files are uploaded client-side to Supabase Storage; server downloads by path.
-    const uploadPathsRaw = String(form.get('uploadPaths') ?? '').trim()
-    const uploadPaths = uploadPathsRaw ? (JSON.parse(uploadPathsRaw) as string[]) : []
-    const fileNames = uploadPaths.map((p) => p.split('/').pop() || p).slice(0, 20)
+    const planId = String(form.get('planId') ?? '').trim()
 
     const openAiKey = process.env.OPENAI_API_KEY
     if (!openAiKey) {
+      const fileNames: string[] = []
+      if (planId) {
+        try {
+          const sb = supabaseAdmin()
+          const { data } = await sb
+            .from('materials')
+            .select('storage_path')
+            .eq('user_id', user.id)
+            .eq('plan_id', planId)
+            .eq('status', 'processed')
+          if (Array.isArray(data)) {
+            for (const m of data) fileNames.push(String(m.storage_path || '').split('/').pop() || 'file')
+          }
+        } catch {}
+      }
       const plan = mock(prompt, fileNames)
       const saved = savePlan(user.id, plan.title, plan)
       await setCurrentPlanBestEffort(user.id, saved.id)
@@ -348,45 +361,30 @@ export async function POST(req: Request) {
 
     const client = new OpenAI({ apiKey: openAiKey })
 
-    const textParts: string[] = []
-    const imageParts: Array<{ name: string; b64: string; mime: string }> = []
-
-    // Allow many uploads, but keep server work bounded.
-    const limited = uploadPaths.slice(0, 40)
-
-    for (const path of limited) {
-      const d = await downloadToBuffer(path)
-      const name = d.name
-      const type = d.type || (name.toLowerCase().endsWith('.pdf') ? 'application/pdf' : '')
-
-      if (isImage(name, type) || name.match(/\.(png|jpe?g|webp)$/i)) {
-        imageParts.push({ name, mime: type || 'image/png', b64: d.buf.toString('base64') })
-      } else if (isPdf(name, type) || name.match(/\.pdf$/i)) {
-        const parsed = await pdfParse(d.buf)
-        const t = parsed.text?.slice(0, 120_000) ?? ''
-        if (t) textParts.push(`--- ${name} ---\n${t}`)
-      } else {
-        const t = d.buf.toString('utf8').slice(0, 120_000)
-        if (t) textParts.push(`--- ${name} ---\n${t}`)
+    let textFromFiles = ''
+    const fileNames: string[] = []
+    if (planId) {
+      const sb = supabaseAdmin()
+      const { data, error } = await sb
+        .from('materials')
+        .select('storage_path, extracted_text')
+        .eq('user_id', user.id)
+        .eq('plan_id', planId)
+        .eq('status', 'processed')
+      if (error) throw error
+      if (Array.isArray(data)) {
+        const parts: string[] = []
+        for (const m of data) {
+          const name = String(m.storage_path || '').split('/').pop() || 'file'
+          fileNames.push(name)
+          if (m.extracted_text) parts.push(`--- ${name} ---\n${String(m.extracted_text)}`)
+        }
+        textFromFiles = parts.join('\n\n').slice(0, 120_000)
       }
     }
-
-    let textFromFiles = textParts.join('\n\n').slice(0, 120_000)
     const model = process.env.OPENAI_MODEL || 'gpt-5.1-instant'
 
-    // If the user uploaded lots of images, OCR them in batches and feed the text in.
-    // This keeps handwritten notes usable while avoiding per-request image limits.
-    if (imageParts.length > 0) {
-      const ocrText = await extractTextFromImages(client, model, imageParts)
-      if (ocrText.trim()) {
-        textFromFiles = `${textFromFiles}\n\n--- OCR FROM IMAGES ---\n${ocrText}`.slice(0, 120_000)
-      }
-    }
-
-    // Pass only the first 6 images directly (vision), the rest is already OCR'd.
-    const visionImages = imageParts.slice(0, 6)
-
-    const raw = await callModel(client, model, prompt, textFromFiles, visionImages)
+    const raw = await callModel(client, model, prompt, textFromFiles, [])
     const parsed = safeParseJson(raw)
     const plan = normalizePlan(parsed)
 

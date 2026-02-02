@@ -20,10 +20,21 @@ export async function POST(req: Request) {
         user_id: user.id,
         plan_id: planId,
         file_path: String(x?.file_path ?? ''),
-        mime_type: String(x?.mime_type ?? '') || null,
+        mime_type: String(x?.mime_type ?? '') || 'application/octet-stream',
+        type: String(x?.type ?? ''),
         original_name: String(x?.original_name ?? '') || null,
         status: 'uploaded',
       }))
+      .map((x: any) => {
+        if (!x.type) {
+          x.type = x.mime_type.startsWith('image/')
+            ? 'image'
+            : x.mime_type === 'application/pdf'
+              ? 'pdf'
+              : 'file'
+        }
+        return x
+      })
       .filter((x: any) => x.file_path && x.file_path.startsWith(prefix))
 
     if (rows.length === 0) {

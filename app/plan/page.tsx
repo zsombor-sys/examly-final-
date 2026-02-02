@@ -293,7 +293,7 @@ function Inner() {
     }
 
     const bucket = supabase.storage.from('uploads')
-    const uploaded: Array<{ file_path: string; mime_type: string | null; original_name: string | null }> = []
+    const uploaded: Array<{ file_path: string; mime_type: string; original_name: string | null; type: string }> = []
 
     for (const f of list) {
       const safeName = f.name.replace(/\s+/g, '_')
@@ -304,7 +304,8 @@ function Inner() {
         cacheControl: '3600',
       })
       if (upErr) throw new Error(upErr.message)
-      uploaded.push({ file_path: path, mime_type: f.type || null, original_name: f.name || null })
+      const kind = f.type.startsWith('image/') ? 'image' : f.type === 'application/pdf' ? 'pdf' : 'file'
+      uploaded.push({ file_path: path, mime_type: f.type || 'application/octet-stream', original_name: f.name || null, type: kind })
     }
 
     const res = await authedFetch('/api/materials/upload', {

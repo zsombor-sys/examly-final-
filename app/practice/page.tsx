@@ -1,6 +1,7 @@
 'use client'
 
 import React, { useEffect, useMemo, useState } from 'react'
+import AuthGate from '@/components/AuthGate'
 import MarkdownMath from '@/components/MarkdownMath'
 import { Loader2, Play } from 'lucide-react'
 import { authedFetch } from '@/lib/authClient'
@@ -190,7 +191,8 @@ export default function PracticePage() {
   }
 
   return (
-    <div className="mx-auto max-w-3xl px-4 py-8 space-y-6">
+    <AuthGate requireEntitlement={true}>
+      <div className="mx-auto max-w-3xl px-4 py-8 space-y-6">
       <Panel className="p-6 space-y-4">
         <textarea
           className="w-full rounded-xl border border-white/10 bg-black/20 p-3 text-sm"
@@ -333,6 +335,7 @@ export default function PracticePage() {
           )}
         </Panel>
       )}
-    </div>
+      </div>
+    </AuthGate>
   )
 }

@@ -5,7 +5,6 @@ import { useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { supabase } from '@/lib/supabaseClient'
 import { Button, Card, Input } from '@/components/ui'
-import { authedFetch } from '@/lib/authClient'
 
 export default function SignupPage() {
   const router = useRouter()
@@ -15,6 +14,10 @@ export default function SignupPage() {
   const [phone, setPhone] = useState('')
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
+
+  function normalizePhoneDigits(raw: string) {
+    return raw.replace(/\D/g, '')
+  }
 
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault()
@@ -35,36 +38,28 @@ export default function SignupPage() {
     setLoading(true)
     try {
       const phoneTrim = phone.trim()
-      const res = await fetch('/api/auth/signup', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          full_name: fullName.trim(),
-          email: email.trim(),
-          phone: phoneTrim,
-          password,
-        }),
-      })
-      const json = await res.json().catch(() => ({} as any))
-      if (!res.ok) {
-        setError(json?.error ?? 'Signup failed')
-        return
-      }
-
-      const { error: signInErr } = await supabase.auth.signInWithPassword({
+      const phoneNorm = normalizePhoneDigits(phoneTrim)
+      const { data, error } = await supabase.auth.signUp({
         email: email.trim(),
         password,
+        options: {
+          data: {
+            full_name: fullName.trim(),
+            phone: phoneTrim,
+            phone_normalized: phoneNorm,
+          },
+        },
       })
-      if (signInErr) {
-        setError(signInErr.message || 'Login failed')
+      if (error) {
+        console.log('signup error', error)
+        setError(error.message || 'Signup failed')
         return
       }
-      await authedFetch('/api/profile/init', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ full_name: fullName.trim(), phone: phoneTrim }),
-      })
-      router.replace('/plan')
+      if (data?.session) {
+        router.replace('/plan')
+        return
+      }
+      router.replace('/login')
     } catch (e: any) {
       setError(e?.message ?? 'Error')
     } finally {

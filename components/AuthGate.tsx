@@ -41,6 +41,7 @@ export default function AuthGate({
       const session = data.session
 
       if (!session) {
+        console.log('AuthGate: no session', { path: pathname })
         router.replace(`/login?next=${encodeURIComponent(pathname || '/plan')}`)
         return
       }
@@ -64,6 +65,7 @@ export default function AuthGate({
           }
         } catch (e: any) {
           if (!alive) return
+          console.log('AuthGate: entitlement check failed', { path: pathname, error: e?.message })
           setError(e?.message ?? 'Error')
           // ha me hívás hibázik, NE rendereljünk csendben félkészen
           setReady(true)

@@ -4,7 +4,6 @@ import Link from 'next/link'
 import { useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { supabase } from '@/lib/supabaseClient'
-import { authedFetch } from '@/lib/authClient'
 import { Button, Card, Input } from '@/components/ui'
 
 export default function LoginPage() {
@@ -32,12 +31,6 @@ export default function LoginPage() {
     if (error) {
       setError(error.message || 'Login failed')
     } else {
-      try {
-        await authedFetch('/api/profile/init', { method: 'POST' })
-        await authedFetch('/api/profile/ensure', { method: 'POST' })
-      } catch {
-        // Best-effort: don't block login on profile setup.
-      }
       router.replace('/plan')
     }
   }

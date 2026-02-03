@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server'
 import { requireUser } from '@/lib/authServer'
-import { consumeGeneration, entitlementSnapshot, getOrCreateProfile } from '@/lib/creditsServer'
+import { consumeGeneration, entitlementSnapshot, getProfileStrict } from '@/lib/creditsServer'
 import OpenAI from 'openai'
 import pdfParse from 'pdf-parse'
 import { getPlan, savePlan } from '@/app/api/plan/store'
@@ -317,7 +317,7 @@ export async function POST(req: Request) {
     const user = await requireUser(req)
 
     // ✅ PRECHECK: ne generáljunk ha nincs entitlement
-    const profile = await getOrCreateProfile(user.id)
+    const profile = await getProfileStrict(user.id)
     const ent = entitlementSnapshot(profile as any)
     if (!ent.ok) {
       return NextResponse.json(

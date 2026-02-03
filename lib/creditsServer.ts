@@ -121,6 +121,19 @@ export async function getOrCreateProfile(userId: string): Promise<ProfileRow> {
   return normalizeProfile(inserted)
 }
 
+export async function getProfileStrict(userId: string): Promise<ProfileRow> {
+  if (!userId) throw new Error('Missing user id')
+  const sb = supabaseAdmin()
+  const { data: existing, error } = await sb.from('profiles').select('*').eq('id', userId).maybeSingle()
+  if (error) throw error
+  if (!existing) {
+    const err: any = new Error('Profile not found')
+    err.status = 401
+    throw err
+  }
+  return normalizeProfile(existing)
+}
+
 export function entitlementSnapshot(p: ProfileRow) {
   const norm = normalizeProfile(p)
   const credits = Number(norm.credits ?? 0)
@@ -141,7 +154,7 @@ async function markStripeEventOnce(eventId: string, type: string) {
 
 export async function maybeAutoRecharge(userId: string) {
   const sb = supabaseAdmin()
-  const p = await getOrCreateProfile(userId)
+  const p = await getProfileStrict(userId)
 
   if (!p.auto_recharge) return { attempted: false, succeeded: false }
   if (!p.stripe_customer_id || !p.stripe_payment_method_id) return { attempted: false, succeeded: false }
@@ -260,13 +273,13 @@ export async function consumeGeneration(userId: string) {
   if (!rpcErr && rpcData) return rpcData as any
 
   // Fallback (non-atomic, but stable): fetch -> update.
-  const p = await getOrCreateProfile(userId)
+  const p = await getProfileStrict(userId)
   const credits = Number(p.credits ?? 0)
 
   if (credits <= 0) {
     const recharge = await maybeAutoRecharge(userId)
     if (recharge.succeeded) {
-      const p2 = await getOrCreateProfile(userId)
+      const p2 = await getProfileStrict(userId)
       const credits2 = Number(p2.credits ?? 0)
       if (credits2 > 0) {
         const updated = await updateProfileById(userId, { credits: credits2 - 1, updated_at: nowIso() })
@@ -291,7 +304,7 @@ export async function consumeGeneration(userId: string) {
 
 export async function addProCredits(userId: string, amount = PRO_CREDITS_PER_PURCHASE) {
   const sb = supabaseAdmin()
-  const p = await getOrCreateProfile(userId)
+  const p = await getProfileStrict(userId)
   const next = Number(p.credits ?? 0) + amount
 
   const out = await updateProfileById(userId, { credits: next, updated_at: nowIso() })

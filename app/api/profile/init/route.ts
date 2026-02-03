@@ -7,10 +7,12 @@ export const runtime = 'nodejs'
 export async function POST(req: Request) {
   try {
     const user = await requireUser(req)
+    if (!user?.id) throw new Error('Not authenticated')
     const body = await req.json().catch(() => ({} as any))
     const fullName = String(body?.full_name ?? user?.user_metadata?.full_name ?? '').trim()
     const phone = String(body?.phone ?? user?.user_metadata?.phone ?? '').trim()
     const email = String(user?.email ?? '').trim().toLowerCase()
+    console.log('profile.init', { user_id: user.id, keys: Object.keys(body || {}) })
 
     const sb = supabaseAdmin()
     const { data: existing, error: selErr } = await sb

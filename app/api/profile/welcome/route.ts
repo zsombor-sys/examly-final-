@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server'
 import { supabaseAdmin } from '@/lib/supabaseServer'
+import { requireUser } from '@/lib/authServer'
 
 export const runtime = 'nodejs'
 
@@ -11,6 +12,8 @@ function normalizePhoneDigits(raw: string | null | undefined) {
 
 export async function POST(req: Request) {
   try {
+    const user = await requireUser(req)
+    if (!user?.id) throw new Error('Not authenticated')
     const body = await req.json().catch(() => ({} as any))
     const userId = String(body?.user_id ?? '').trim()
     const email = String(body?.email ?? '').trim().toLowerCase()
@@ -21,6 +24,10 @@ export async function POST(req: Request) {
     if (!userId || !email || !phoneNorm) {
       return NextResponse.json({ error: 'Missing signup data' }, { status: 400 })
     }
+    if (userId !== user.id) {
+      return NextResponse.json({ error: 'Not authenticated' }, { status: 401 })
+    }
+    console.log('profile.welcome', { user_id: user.id, keys: Object.keys(body || {}) })
 
     const sb = supabaseAdmin()
     const { data: userData, error: userErr } = await sb.auth.admin.getUserById(userId)

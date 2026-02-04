@@ -148,8 +148,10 @@ function Inner() {
   const [prompt, setPrompt] = useState('')
   const [files, setFiles] = useState<File[]>([])
   const [loading, setLoading] = useState(false)
-  const [processing, setProcessing] = useState(false)
+  const [isGenerating, setIsGenerating] = useState(false)
   const [materials, setMaterials] = useState<Array<{ id: string; status: string; error?: string | null }>>([])
+  const [processedFiles, setProcessedFiles] = useState(0)
+  const [totalFiles, setTotalFiles] = useState(0)
   const [planId, setPlanId] = useState<string | null>(null)
   const pendingGenerateRef = useRef(false)
   const [error, setError] = useState<string | null>(null)
@@ -272,7 +274,8 @@ function Inner() {
     setAskText('')
     setError(null)
     setMaterials([])
-    setProcessing(false)
+    setProcessedFiles(0)
+    setTotalFiles(0)
     setPlanId(null)
     pendingGenerateRef.current = false
   }
@@ -308,6 +311,19 @@ function Inner() {
     return new File([blob], file.name.replace(/\.\w+$/, '.jpg'), { type: 'image/jpeg' })
   }
 
+  async function uploadWithTimeout(path: string, file: File) {
+    const bucket = supabase.storage.from('uploads')
+    const uploadPromise = bucket.upload(path, file, {
+      upsert: false,
+      contentType: file.type || undefined,
+      cacheControl: '3600',
+    })
+    const timeoutPromise = new Promise((_, reject) =>
+      setTimeout(() => reject(new Error('Upload timed out')), 60_000)
+    )
+    return (await Promise.race([uploadPromise, timeoutPromise])) as { data?: { path?: string }; error?: any }
+  }
+
   async function uploadMaterials(nextPlanId: string) {
     if (!supabase) throw new Error('Auth is not configured (missing Supabase env vars).')
     const sess = await supabase.auth.getSession()
@@ -324,40 +340,45 @@ function Inner() {
       }
     }
 
-    const bucket = supabase.storage.from('uploads')
+    setTotalFiles(list.length)
+    setProcessedFiles(0)
     const uploaded: Array<{ file_path: string; mime_type: string; status: 'uploaded' }> = []
 
     for (const f of list) {
-      const file = f.type.startsWith('image/') ? await compressImage(f) : f
-      const path = buildMaterialObjectKey(userId, file)
-      const { data: upData, error: upErr } = await bucket.upload(path, file, {
-        upsert: false,
-        contentType: file.type || undefined,
-        cacheControl: '3600',
-      })
-      if (upErr) throw new Error(upErr.message)
-      const storedPath = upData?.path || path
-      console.log('Uploaded material', {
-        name: file.name,
-        size: file.size,
-        mime: file.type,
-        path: storedPath,
-      })
-      uploaded.push({
-        file_path: storedPath,
-        mime_type: file.type || 'application/octet-stream',
-        status: 'uploaded',
-      })
+      try {
+        const file = f.type.startsWith('image/') ? await compressImage(f) : f
+        const path = buildMaterialObjectKey(userId, file)
+        const { data: upData, error: upErr } = await uploadWithTimeout(path, file)
+        if (upErr) throw new Error(upErr.message || 'Upload failed')
+        const storedPath = upData?.path || path
+        console.log('Uploaded material', {
+          name: file.name,
+          size: file.size,
+          mime: file.type,
+          path: storedPath,
+        })
+        uploaded.push({
+          file_path: storedPath,
+          mime_type: file.type || 'application/octet-stream',
+          status: 'uploaded',
+        })
+      } catch (err: any) {
+        setError(`${f.name}: ${err?.message ?? 'Upload failed'}`)
+      } finally {
+        setProcessedFiles((v) => v + 1)
+      }
     }
 
-    const res = await authedFetch('/api/materials/upload', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ plan_id: nextPlanId, items: uploaded }),
-    })
-    const json = await res.json().catch(() => ({} as any))
-    console.log('Materials upload response', json)
-    if (!res.ok) throw new Error(json?.error ?? 'Upload failed')
+    if (uploaded.length > 0) {
+      const res = await authedFetch('/api/materials/upload', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ plan_id: nextPlanId, items: uploaded }),
+      })
+      const json = await res.json().catch(() => ({} as any))
+      console.log('Materials upload response', json)
+      if (!res.ok) throw new Error(json?.error ?? 'Upload failed')
+    }
   }
 
   async function fetchStatus(nextPlanId: string) {
@@ -376,18 +397,28 @@ function Inner() {
   async function generate() {
     setError(null)
     setLoading(true)
+    setIsGenerating(true)
     try {
       const nextPlanId = planId || crypto.randomUUID()
       if (!planId) setPlanId(nextPlanId)
 
-      if (files.length > 0 && !processing && materials.length === 0) {
+      if (files.length > 0 && materials.length === 0) {
         await uploadMaterials(nextPlanId)
-        pendingGenerateRef.current = true
-        setProcessing(true)
         await fetchStatus(nextPlanId)
+      }
+
+      // Process pending materials with bounded loop
+      const start = Date.now()
+      while (true) {
+        const items = await fetchStatus(nextPlanId)
+        const pending = items.filter((x) => x.status === 'uploaded' || x.status === 'processing' || x.status === 'pending')
+        if (pending.length === 0) break
         await kickProcessing(nextPlanId)
-        setLoading(false)
-        return
+        if (Date.now() - start > 120_000) {
+          setError('Processing timed out. Generating with available materials.')
+          break
+        }
+        await new Promise((r) => setTimeout(r, 1200))
       }
 
       const form = new FormData()
@@ -425,38 +456,9 @@ function Inner() {
       setError(e?.message ?? 'Error')
     } finally {
       setLoading(false)
+      setIsGenerating(false)
     }
   }
-
-  useEffect(() => {
-    if (!processing || !planId) return
-    let cancelled = false
-    const tick = async () => {
-      try {
-        const items = await fetchStatus(planId)
-        const pending = items.filter((x) => x.status === 'uploaded' || x.status === 'processing')
-        if (pending.length > 0) {
-          await kickProcessing(planId)
-        } else {
-          setProcessing(false)
-          if (pendingGenerateRef.current) {
-            pendingGenerateRef.current = false
-            await generate()
-          }
-        }
-      } catch (e: any) {
-        if (!cancelled) setError(e?.message ?? 'Processing error')
-      }
-    }
-    const id = window.setInterval(() => {
-      if (!cancelled) tick()
-    }, 1500)
-    tick()
-    return () => {
-      cancelled = true
-      window.clearInterval(id)
-    }
-  }, [processing, planId])
 
   async function clearHistory() {
     setError(null)
@@ -508,7 +510,7 @@ function Inner() {
   const totalMaterials = materials.length
   const processedCount = materials.filter((m) => m.status === 'processed').length
   const failedCount = materials.filter((m) => m.status === 'failed').length
-  const canGenerate = !loading && !processing && (prompt.trim().length >= 6 || files.length > 0)
+  const canGenerate = !loading && !isGenerating && (prompt.trim().length >= 6 || files.length > 0)
 
   return (
     <div className="mx-auto max-w-6xl px-4 py-10">
@@ -583,7 +585,8 @@ function Inner() {
               onChange={(e) => {
                 setFiles(Array.from(e.target.files ?? []))
                 setMaterials([])
-                setProcessing(false)
+                setProcessedFiles(0)
+                setTotalFiles(0)
                 setPlanId(null)
                 pendingGenerateRef.current = false
               }}
@@ -591,9 +594,9 @@ function Inner() {
           </label>
 
           {files.length ? <div className="mt-2 text-xs text-white/60">Selected: {files.length} file(s)</div> : null}
-          {processing ? (
+          {isGenerating && totalFiles > 0 ? (
             <div className="mt-2 text-xs text-white/60">
-              Processing {processedCount}/{totalMaterials || files.length}…
+              Processing {processedFiles}/{totalFiles}…
               {failedCount > 0 ? ` (${failedCount} failed)` : ''}
             </div>
           ) : null}

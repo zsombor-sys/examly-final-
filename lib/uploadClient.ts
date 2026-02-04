@@ -2,13 +2,18 @@
 
 import { supabase } from '@/lib/supabaseClient'
 
-function safeExt(name: string) {
-  const m = String(name || '').toLowerCase().match(/\.([a-z0-9]{1,10})$/)
-  return m?.[1] || 'bin'
+function extFromMime(type: string) {
+  const t = String(type || '').toLowerCase()
+  if (t === 'image/jpeg' || t === 'image/jpg') return 'jpg'
+  if (t === 'image/png') return 'png'
+  if (t === 'image/webp') return 'webp'
+  if (t === 'application/pdf') return 'pdf'
+  return 'jpg'
 }
 
-function randId() {
-  return Math.random().toString(16).slice(2) + Date.now().toString(16)
+export function buildMaterialObjectKey(userId: string, file: File) {
+  const ext = extFromMime(file.type || '')
+  return `materials/${userId}/${crypto.randomUUID()}.${ext}`
 }
 
 function isBucketMissingError(err: any) {
@@ -43,7 +48,7 @@ export async function uploadFilesToStorage(opts: {
   folder: 'plan' | 'vocab'
   maxFiles?: number
 }) {
-  const { files, folder, maxFiles = 40 } = opts
+  const { files, maxFiles = 40 } = opts
 
   if (!supabase) throw new Error('Supabase is not configured')
   const sess = await supabase.auth.getSession()
@@ -56,10 +61,9 @@ export async function uploadFilesToStorage(opts: {
   const bucket = supabase.storage.from('uploads')
 
   const paths = await withConcurrency(list, 3, async (f) => {
-    const ext = safeExt(f.name)
-    const path = `${userId}/${folder}/${Date.now()}_${randId()}.${ext}`
+    const path = buildMaterialObjectKey(userId, f)
 
-    const { error } = await bucket.upload(path, f, {
+    const { data, error } = await bucket.upload(path, f, {
       upsert: false,
       contentType: f.type || undefined,
       cacheControl: '3600',
@@ -70,7 +74,7 @@ export async function uploadFilesToStorage(opts: {
       }
       throw new Error(error.message)
     }
-    return path
+    return data?.path || path
   })
 
   return paths

@@ -9,6 +9,7 @@ import { FileUp, Loader2, Trash2, ArrowLeft, Send } from 'lucide-react'
 import AuthGate from '@/components/AuthGate'
 import { authedFetch } from '@/lib/authClient'
 import { supabase } from '@/lib/supabaseClient'
+import { buildMaterialObjectKey } from '@/lib/uploadClient'
 import HScroll from '@/components/HScroll'
 import Pomodoro from '@/components/Pomodoro'
 
@@ -148,7 +149,7 @@ function Inner() {
   const [files, setFiles] = useState<File[]>([])
   const [loading, setLoading] = useState(false)
   const [processing, setProcessing] = useState(false)
-  const [materials, setMaterials] = useState<Array<{ id: string; status: string; error?: string | null; original_name?: string | null }>>([])
+  const [materials, setMaterials] = useState<Array<{ id: string; status: string; error?: string | null }>>([])
   const [planId, setPlanId] = useState<string | null>(null)
   const pendingGenerateRef = useRef(false)
   const [error, setError] = useState<string | null>(null)
@@ -276,20 +277,6 @@ function Inner() {
     pendingGenerateRef.current = false
   }
 
-  function extFromFile(file: File) {
-    const type = (file.type || '').toLowerCase()
-    if (type === 'application/pdf') return 'pdf'
-    if (type === 'image/png') return 'png'
-    if (type === 'image/webp') return 'webp'
-    if (type === 'image/jpeg' || type === 'image/jpg') return 'jpg'
-    return 'bin'
-  }
-
-  function buildMaterialObjectKey(userId: string, file: File) {
-    const ext = extFromFile(file)
-    return `materials/${userId}/${crypto.randomUUID()}.${ext}`
-  }
-
   async function compressImage(file: File) {
     if (typeof window === 'undefined') return file
     if (!file.type.startsWith('image/')) return file
@@ -338,7 +325,7 @@ function Inner() {
     }
 
     const bucket = supabase.storage.from('uploads')
-    const uploaded: Array<{ file_path: string; mime_type: string; original_name: string | null; type: string }> = []
+    const uploaded: Array<{ file_path: string; mime_type: string; status: 'uploaded' }> = []
 
     for (const f of list) {
       const file = f.type.startsWith('image/') ? await compressImage(f) : f
@@ -350,7 +337,6 @@ function Inner() {
       })
       if (upErr) throw new Error(upErr.message)
       const storedPath = upData?.path || path
-      const kind = file.type.startsWith('image/') ? 'image' : file.type === 'application/pdf' ? 'pdf' : 'file'
       console.log('Uploaded material', {
         name: file.name,
         size: file.size,
@@ -360,8 +346,7 @@ function Inner() {
       uploaded.push({
         file_path: storedPath,
         mime_type: file.type || 'application/octet-stream',
-        original_name: f.name || null,
-        type: kind,
+        status: 'uploaded',
       })
     }
 
@@ -381,7 +366,7 @@ function Inner() {
     if (!res.ok) throw new Error(json?.error ?? 'Failed to load materials status')
     const items = Array.isArray(json?.items) ? json.items : []
     setMaterials(items)
-    return items as Array<{ id: string; status: string; error?: string | null; original_name?: string | null }>
+    return items as Array<{ id: string; status: string; error?: string | null }>
   }
 
   async function kickProcessing(nextPlanId: string) {
@@ -614,9 +599,9 @@ function Inner() {
           ) : null}
           {materials.length > 0 ? (
             <div className="mt-2 space-y-1 text-xs text-white/60">
-              {materials.map((m) => (
+              {materials.map((m, i) => (
                 <div key={m.id}>
-                  {m.original_name || 'File'}: {m.status}
+                  File {i + 1}: {m.status}
                   {m.status === 'failed' && m.error ? ` — ${m.error}` : ''}
                 </div>
               ))}

@@ -14,7 +14,7 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: 'Missing plan_id or items' }, { status: 400 })
     }
 
-    const prefix = `${user.id}/${planId}/`
+    const prefix = `materials/${user.id}/`
     const rows = items
       .map((x: any) => ({
         user_id: user.id,

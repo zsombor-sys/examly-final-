@@ -276,6 +276,20 @@ function Inner() {
     pendingGenerateRef.current = false
   }
 
+  function extFromFile(file: File) {
+    const type = (file.type || '').toLowerCase()
+    if (type === 'application/pdf') return 'pdf'
+    if (type === 'image/png') return 'png'
+    if (type === 'image/webp') return 'webp'
+    if (type === 'image/jpeg' || type === 'image/jpg') return 'jpg'
+    return 'bin'
+  }
+
+  function buildMaterialObjectKey(userId: string, file: File) {
+    const ext = extFromFile(file)
+    return `materials/${userId}/${crypto.randomUUID()}.${ext}`
+  }
+
   async function compressImage(file: File) {
     if (typeof window === 'undefined') return file
     if (!file.type.startsWith('image/')) return file
@@ -328,8 +342,7 @@ function Inner() {
 
     for (const f of list) {
       const file = f.type.startsWith('image/') ? await compressImage(f) : f
-      const safeName = file.name.replace(/\s+/g, '_')
-      const path = `${userId}/${nextPlanId}/${Date.now()}_${safeName}`
+      const path = buildMaterialObjectKey(userId, file)
       const { error: upErr } = await bucket.upload(path, file, {
         upsert: false,
         contentType: file.type || undefined,

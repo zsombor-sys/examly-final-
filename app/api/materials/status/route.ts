@@ -14,13 +14,16 @@ export async function GET(req: Request) {
     const sb = supabaseAdmin()
     const { data, error } = await sb
       .from('materials')
-      .select('id, status, error')
+      .select('id, status, processing_error')
       .eq('user_id', user.id)
       .eq('plan_id', planId)
       .order('created_at', { ascending: true })
     if (error) throw error
 
-    return NextResponse.json({ items: data ?? [] })
+    const items = data ?? []
+    const total = items.length
+    const processed = items.filter((x: any) => x.status === 'processed').length
+    return NextResponse.json({ items, total, processed })
   } catch (e: any) {
     return NextResponse.json({ error: e?.message ?? 'Server error' }, { status: e?.status ?? 500 })
   }

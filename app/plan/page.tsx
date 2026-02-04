@@ -149,7 +149,7 @@ function Inner() {
   const [files, setFiles] = useState<File[]>([])
   const [loading, setLoading] = useState(false)
   const [isGenerating, setIsGenerating] = useState(false)
-  const [materials, setMaterials] = useState<Array<{ id: string; status: string; error?: string | null }>>([])
+  const [materials, setMaterials] = useState<Array<{ id: string; status: string; processing_error?: string | null }>>([])
   const [processedFiles, setProcessedFiles] = useState(0)
   const [totalFiles, setTotalFiles] = useState(0)
   const [planId, setPlanId] = useState<string | null>(null)
@@ -342,7 +342,7 @@ function Inner() {
 
     setTotalFiles(list.length)
     setProcessedFiles(0)
-    const uploaded: Array<{ file_path: string; mime_type: string; status: 'uploaded' }> = []
+    const uploaded: Array<{ file_path: string; mime_type: string; status: 'uploaded'; type: 'image' | 'pdf' | 'file' }> = []
 
     for (const f of list) {
       try {
@@ -357,10 +357,12 @@ function Inner() {
           mime: file.type,
           path: storedPath,
         })
+        const kind = file.type.startsWith('image/') ? 'image' : file.type === 'application/pdf' ? 'pdf' : 'file'
         uploaded.push({
           file_path: storedPath,
           mime_type: file.type || 'application/octet-stream',
           status: 'uploaded',
+          type: kind,
         })
       } catch (err: any) {
         setError(`${f.name}: ${err?.message ?? 'Upload failed'}`)
@@ -387,11 +389,11 @@ function Inner() {
     if (!res.ok) throw new Error(json?.error ?? 'Failed to load materials status')
     const items = Array.isArray(json?.items) ? json.items : []
     setMaterials(items)
-    return items as Array<{ id: string; status: string; error?: string | null }>
+    return items as Array<{ id: string; status: string; processing_error?: string | null }>
   }
 
   async function kickProcessing(nextPlanId: string) {
-    await authedFetch(`/api/materials/kick?planId=${encodeURIComponent(nextPlanId)}`, { method: 'POST' })
+    await authedFetch(`/api/materials/process?planId=${encodeURIComponent(nextPlanId)}`, { method: 'POST' })
   }
 
   async function generate() {
@@ -411,7 +413,7 @@ function Inner() {
       const start = Date.now()
       while (true) {
         const items = await fetchStatus(nextPlanId)
-        const pending = items.filter((x) => x.status === 'uploaded' || x.status === 'processing' || x.status === 'pending')
+        const pending = items.filter((x) => x.status === 'uploaded' || x.status === 'processing' || x.status === 'failed')
         if (pending.length === 0) break
         await kickProcessing(nextPlanId)
         if (Date.now() - start > 120_000) {
@@ -426,8 +428,25 @@ function Inner() {
       form.append('planId', nextPlanId)
 
       const res = await authedFetch('/api/plan', { method: 'POST', body: form })
-      const json = await res.json().catch(() => ({} as any))
-      if (!res.ok) throw new Error(json?.error ?? `Generation failed (${res.status})`)
+      let json = await res.json().catch(() => ({} as any))
+      if (res.status === 202) {
+        setError(`Processing materials… (${json?.processed ?? 0}/${json?.total ?? 0})`)
+        const start2 = Date.now()
+        while (Date.now() - start2 < 60_000) {
+          await kickProcessing(nextPlanId)
+          const items = await fetchStatus(nextPlanId)
+          const processed = items.filter((x) => x.status === 'processed').length
+          if (processed > 0) {
+            const retry = await authedFetch('/api/plan', { method: 'POST', body: form })
+            json = await retry.json().catch(() => ({} as any))
+            if (!retry.ok) throw new Error(json?.error ?? `Generation failed (${retry.status})`)
+            break
+          }
+          await new Promise((r) => setTimeout(r, 2000))
+        }
+      } else if (!res.ok) {
+        throw new Error(json?.error ?? `Generation failed (${res.status})`)
+      }
 
       const r = (json?.result ?? null) as PlanResult | null
       if (!r) throw new Error('Server returned no result')
@@ -605,7 +624,7 @@ function Inner() {
               {materials.map((m, i) => (
                 <div key={m.id}>
                   File {i + 1}: {m.status}
-                  {m.status === 'failed' && m.error ? ` — ${m.error}` : ''}
+                  {m.status === 'failed' && m.processing_error ? ` — ${m.processing_error}` : ''}
                 </div>
               ))}
             </div>

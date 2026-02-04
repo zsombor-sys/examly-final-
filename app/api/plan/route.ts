@@ -340,12 +340,20 @@ export async function POST(req: Request) {
           const sb = supabaseAdmin()
           const { data } = await sb
             .from('materials')
-            .select('file_path')
+            .select('file_path, status')
             .eq('user_id', user.id)
             .eq('plan_id', planId)
-            .eq('status', 'processed')
           if (Array.isArray(data)) {
-            for (const m of data) fileNames.push(String(m.file_path || '').split('/').pop() || 'file')
+            const total = data.length
+            const processed = data.filter((m: any) => m.status === 'processed').length
+            if (total > 0 && processed === 0) {
+              console.log('plan.generate materials processing', { planId, total, processed })
+              return NextResponse.json({ status: 'processing', processed: 0, total }, { status: 202 })
+            }
+            for (const m of data) {
+              if (m.status !== 'processed') continue
+              fileNames.push(String(m.file_path || '').split('/').pop() || 'file')
+            }
           }
         } catch {}
       }
@@ -367,19 +375,28 @@ export async function POST(req: Request) {
       const sb = supabaseAdmin()
       const { data, error } = await sb
         .from('materials')
-        .select('file_path, extracted_text')
+        .select('file_path, extracted_text, status')
         .eq('user_id', user.id)
         .eq('plan_id', planId)
-        .eq('status', 'processed')
       if (error) throw error
       if (Array.isArray(data)) {
+        const total = data.length
+        const processed = data.filter((m: any) => m.status === 'processed').length
+        if (total > 0 && processed === 0) {
+          console.log('plan.generate materials processing', { planId, total, processed })
+          return NextResponse.json({ status: 'processing', processed: 0, total }, { status: 202 })
+        }
         const parts: string[] = []
         for (const m of data) {
+          if (m.status !== 'processed') continue
           const name = String(m.file_path || '').split('/').pop() || 'file'
           fileNames.push(name)
           if (m.extracted_text) parts.push(`--- ${name} ---\n${String(m.extracted_text)}`)
         }
         textFromFiles = parts.join('\n\n').slice(0, 120_000)
+        if (textFromFiles.trim()) {
+          console.log('plan.generate materials included', { planId, files: fileNames.length, chars: textFromFiles.length })
+        }
       }
     }
     const model = process.env.OPENAI_MODEL || 'gpt-5.1-instant'

@@ -343,21 +343,22 @@ function Inner() {
     for (const f of list) {
       const file = f.type.startsWith('image/') ? await compressImage(f) : f
       const path = buildMaterialObjectKey(userId, file)
-      const { error: upErr } = await bucket.upload(path, file, {
+      const { data: upData, error: upErr } = await bucket.upload(path, file, {
         upsert: false,
         contentType: file.type || undefined,
         cacheControl: '3600',
       })
       if (upErr) throw new Error(upErr.message)
+      const storedPath = upData?.path || path
       const kind = file.type.startsWith('image/') ? 'image' : file.type === 'application/pdf' ? 'pdf' : 'file'
       console.log('Uploaded material', {
         name: file.name,
         size: file.size,
         mime: file.type,
-        path,
+        path: storedPath,
       })
       uploaded.push({
-        file_path: path,
+        file_path: storedPath,
         mime_type: file.type || 'application/octet-stream',
         original_name: f.name || null,
         type: kind,

@@ -34,27 +34,27 @@ export async function confirmStripeSession(sessionId: string) {
   }
 
   const sb = supabaseAdmin()
-  const { data: inserted, error: insErr } = await sb
+  const { data: existing, error: existsErr } = await sb
     .from('credit_purchases')
-    .insert(
-      {
-        user_id: userId,
-        stripe_session_id: sessionId,
-        credits,
-        amount_total: session.amount_total ?? null,
-        currency: session.currency ?? null,
-      },
-      { onConflict: 'stripe_session_id', ignoreDuplicates: true },
-    )
     .select('id')
+    .eq('stripe_session_id', sessionId)
+    .maybeSingle()
 
-  if (insErr) throw insErr
-
-  const didInsert = Array.isArray(inserted) && inserted.length > 0
-  if (!didInsert) {
+  if (existsErr) throw existsErr
+  if (existing) {
     console.log('stripe.confirm already_processed', { session_id: sessionId })
     return { ok: true, already_processed: true, credits_added: 0 }
   }
+
+  const { error: insErr } = await sb.from('credit_purchases').insert({
+    user_id: userId,
+    stripe_session_id: sessionId,
+    credits,
+    amount_total: session.amount_total ?? null,
+    currency: session.currency ?? null,
+  })
+
+  if (insErr) throw insErr
 
   const { data: row } = await sb.from('profiles').select('credits').eq('id', userId).maybeSingle()
   const next = Number(row?.credits ?? 0) + credits

@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server'
 import Stripe from 'stripe'
-import { confirmStripeSession } from '@/lib/stripeCredits'
+import { supabaseAdmin } from '@/lib/supabaseAdmin'
 
 export const runtime = 'nodejs'
 
@@ -28,13 +28,41 @@ export async function POST(req: Request) {
 
     if (event.type === 'checkout.session.completed') {
       const session = event.data.object as Stripe.Checkout.Session
-      const lineItems = await stripe.checkout.sessions.listLineItems(session.id, { limit: 10 })
-      const priceId = lineItems.data.find((item) => item.price?.id)?.price?.id || null
-      const devPriceId = (process.env.DEV_STRIPE_PRICE_ID || '').trim()
-      const normalCreditsRaw = Number.parseInt(process.env.STRIPE_CREDITS_PER_PURCHASE ?? '30', 10)
-      const normalCredits = Number.isFinite(normalCreditsRaw) ? normalCreditsRaw : 30
-      const creditsToGrant = devPriceId && priceId === devPriceId ? 30 : normalCredits
-      await confirmStripeSession(session.id, creditsToGrant)
+      if (session.payment_status && session.payment_status !== 'paid') {
+        return NextResponse.json({ error: 'Payment not completed' }, { status: 402 })
+      }
+
+      const userId = session.client_reference_id ? String(session.client_reference_id) : ''
+      if (!userId) {
+        return NextResponse.json({ error: 'Missing client_reference_id' }, { status: 400 })
+      }
+
+      const creditsRaw = Number.parseInt(process.env.STRIPE_CREDITS_PER_PURCHASE ?? '30', 10)
+      const credits = Number.isFinite(creditsRaw) ? Math.trunc(creditsRaw) : 30
+
+      const sb = supabaseAdmin()
+      const { error: insErr } = await sb.from('credit_purchases').insert({
+        user_id: userId,
+        stripe_session_id: session.id,
+        credits,
+        amount_total: session.amount_total ?? null,
+        currency: session.currency ?? null,
+      })
+
+      if (insErr) {
+        if ((insErr as any).code === '23505') {
+          return NextResponse.json({ ok: true, already_processed: true })
+        }
+        throw insErr
+      }
+
+      const { error: rpcErr } = await sb.rpc('add_credits', {
+        p_user_id: userId,
+        p_credits: credits,
+      })
+      if (rpcErr) throw rpcErr
+
+      return NextResponse.json({ ok: true, credits_added: credits })
     }
 
     return NextResponse.json({ received: true })

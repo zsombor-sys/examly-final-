@@ -41,6 +41,12 @@ export async function POST(req: Request) {
       const credits = Number.isFinite(creditsRaw) ? Math.trunc(creditsRaw) : 30
 
       const sb = supabaseAdmin()
+      console.log('stripe webhook processed', {
+        session_id: session.id,
+        user_id: userId,
+        credits,
+        action: 'insert',
+      })
       const { error: insErr } = await sb.from('credit_purchases').insert({
         user_id: userId,
         stripe_session_id: session.id,
@@ -51,6 +57,12 @@ export async function POST(req: Request) {
 
       if (insErr) {
         if ((insErr as any).code === '23505') {
+          console.log('stripe webhook processed', {
+            session_id: session.id,
+            user_id: userId,
+            credits,
+            action: 'skipped_duplicate',
+          })
           return NextResponse.json({ ok: true, already_processed: true })
         }
         throw insErr
@@ -62,6 +74,12 @@ export async function POST(req: Request) {
       })
       if (rpcErr) throw rpcErr
 
+      console.log('stripe webhook processed', {
+        session_id: session.id,
+        user_id: userId,
+        credits,
+        action: 'credited',
+      })
       return NextResponse.json({ ok: true, credits_added: credits })
     }
 

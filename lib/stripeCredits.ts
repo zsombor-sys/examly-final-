@@ -7,14 +7,19 @@ function stripeClient() {
   return new Stripe(key, { apiVersion: '2024-06-20' })
 }
 
-export async function confirmStripeSession(sessionId: string) {
+export async function confirmStripeSession(sessionId: string, creditsOverride?: number) {
   const stripe = stripeClient()
   const session = await stripe.checkout.sessions.retrieve(sessionId)
   const paymentStatus = session.payment_status
   const userId =
     (session.client_reference_id ? String(session.client_reference_id) : '') ||
     (session.metadata?.user_id ? String(session.metadata.user_id) : '')
-  const creditsRaw = session.metadata?.credits ? Number(session.metadata.credits) : 30
+  const creditsRaw =
+    typeof creditsOverride === 'number' && Number.isFinite(creditsOverride)
+      ? creditsOverride
+      : session.metadata?.credits
+      ? Number(session.metadata.credits)
+      : 30
   const credits = Number.isFinite(creditsRaw) ? Math.trunc(creditsRaw) : 30
 
   console.log('stripe.confirm start', {
@@ -54,7 +59,13 @@ export async function confirmStripeSession(sessionId: string) {
     currency: session.currency ?? null,
   })
 
-  if (insErr) throw insErr
+  if (insErr) {
+    if ((insErr as any).code === '23505') {
+      console.log('stripe.confirm already_processed', { session_id: sessionId })
+      return { ok: true, already_processed: true, credits_added: 0 }
+    }
+    throw insErr
+  }
 
   const { data: row } = await sb.from('profiles').select('credits').eq('id', userId).maybeSingle()
   const next = Number(row?.credits ?? 0) + credits

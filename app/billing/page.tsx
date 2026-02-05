@@ -1,10 +1,10 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import AuthGate from '@/components/AuthGate'
 import { Button, Card } from '@/components/ui'
 import { Loader2, Lock, Zap } from 'lucide-react'
-import { authedFetch } from '@/lib/authClient'
+import { supabase } from '@/lib/supabaseClient'
 
 export default function BillingPage() {
   return (
@@ -19,6 +19,18 @@ function Inner() {
   const [msg, setMsg] = useState<string | null>(null)
   const [canceled, setCanceled] = useState(false)
 
+  const paymentLink = useMemo(() => {
+    const isProd = process.env.NODE_ENV === 'production'
+    const raw = isProd ? process.env.NEXT_PUBLIC_STRIPE_PAYMENT_LINK : process.env.NEXT_PUBLIC_STRIPE_PAYMENT_LINK_DEV
+    return (raw || '').trim()
+  }, [])
+
+  useEffect(() => {
+    if (!paymentLink) {
+      setMsg('Billing is not configured (missing Stripe payment link).')
+    }
+  }, [paymentLink])
+
   useEffect(() => {
     if (typeof window === 'undefined') return
     const p = new URLSearchParams(window.location.search)
@@ -29,15 +41,30 @@ function Inner() {
     setMsg(null)
     setLoading(true)
     try {
-      const res = await authedFetch('/api/stripe/checkout', { method: 'POST' })
-      const json = await res.json().catch(() => ({} as any))
-      if (!res.ok) {
-        throw new Error(json?.error ?? 'Failed to start checkout')
+      if (!paymentLink) throw new Error('Billing is not configured (missing Stripe payment link).')
+
+      let email: string | null = null
+      let userId: string | null = null
+      try {
+        const { data } = await supabase.auth.getUser()
+        email = data?.user?.email ?? null
+        userId = data?.user?.id ?? null
+      } catch {
+        // ignore
       }
-      if (!json?.url) {
-        throw new Error('Missing Stripe checkout URL')
+      if (!email) {
+        throw new Error('Missing email for payment.')
       }
-      window.location.href = json.url
+
+      const url = new URL(paymentLink)
+      if (!url.searchParams.get('prefilled_email')) {
+        url.searchParams.set('prefilled_email', email)
+      }
+      if (userId && !url.searchParams.get('client_reference_id')) {
+        url.searchParams.set('client_reference_id', userId)
+      }
+
+      window.location.href = url.toString()
     } catch (e: any) {
       setMsg(e?.message ?? 'Billing error')
     } finally {
@@ -59,7 +86,7 @@ function Inner() {
         </p>
 
         <div className="mt-6 flex flex-wrap items-center gap-3">
-          <Button onClick={go} disabled={loading} className="gap-2">
+          <Button onClick={go} disabled={loading || !paymentLink} className="gap-2">
             {loading ? <Loader2 className="animate-spin" size={16} /> : <Lock size={16} />}
             Continue to payment
           </Button>

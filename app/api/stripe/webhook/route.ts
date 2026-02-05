@@ -28,7 +28,13 @@ export async function POST(req: Request) {
 
     if (event.type === 'checkout.session.completed') {
       const session = event.data.object as Stripe.Checkout.Session
-      await confirmStripeSession(session.id)
+      const lineItems = await stripe.checkout.sessions.listLineItems(session.id, { limit: 10 })
+      const priceId = lineItems.data.find((item) => item.price?.id)?.price?.id || null
+      const devPriceId = (process.env.DEV_STRIPE_PRICE_ID || '').trim()
+      const normalCreditsRaw = Number.parseInt(process.env.STRIPE_CREDITS_PER_PURCHASE ?? '30', 10)
+      const normalCredits = Number.isFinite(normalCreditsRaw) ? normalCreditsRaw : 30
+      const creditsToGrant = devPriceId && priceId === devPriceId ? 30 : normalCredits
+      await confirmStripeSession(session.id, creditsToGrant)
     }
 
     return NextResponse.json({ received: true })

@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server'
 import Stripe from 'stripe'
-import { supabaseAdmin } from '@/lib/supabaseServer'
+import { confirmStripeSession } from '@/lib/stripeCredits'
 
 export const runtime = 'nodejs'
 
@@ -28,40 +28,7 @@ export async function POST(req: Request) {
 
     if (event.type === 'checkout.session.completed') {
       const session = event.data.object as Stripe.Checkout.Session
-      const email =
-        session.customer_details?.email ||
-        (typeof session.customer_email === 'string' ? session.customer_email : null)
-
-      const sb = supabaseAdmin()
-
-      // Idempotency by Stripe event id
-      const { error: eventErr } = await sb.from('stripe_events').insert({ id: event.id })
-      if (eventErr) {
-        if (eventErr.code === '23505') return NextResponse.json({ received: true })
-        throw eventErr
-      }
-
-      if (!email) {
-        console.error('Stripe webhook: missing customer email', { eventId: event.id, sessionId: session.id })
-        return NextResponse.json({ received: true })
-      }
-
-      const { data: profile, error: profErr } = await sb
-        .from('profiles')
-        .select('id')
-        .ilike('email', email)
-        .maybeSingle()
-      if (profErr) throw profErr
-      if (!profile?.id) {
-        console.error('Stripe webhook: no profile for email', { eventId: event.id, email })
-        return NextResponse.json({ received: true })
-      }
-
-      const rawAmount = Number(process.env.STRIPE_CREDITS_PER_PURCHASE ?? 30)
-      const amount = Number.isFinite(rawAmount) ? Math.trunc(rawAmount) : 30
-
-      const { error } = await sb.rpc('add_credits', { p_user_id: profile.id, p_amount: amount })
-      if (error) throw error
+      await confirmStripeSession(session.id)
     }
 
     return NextResponse.json({ received: true })

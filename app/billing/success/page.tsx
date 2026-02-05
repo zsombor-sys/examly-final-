@@ -35,19 +35,31 @@ function Inner() {
           }
           return
         }
-        const res = await authedFetch('/api/billing/fulfill', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ session_id: sessionId }),
-        })
-        const json = await res.json()
-        if (!res.ok) throw new Error(json?.error ?? 'Error')
+        const delays = [500, 1500, 3000, 5000, 8000]
+        let lastErr: string | null = null
+        for (let i = 0; i < delays.length; i++) {
+          const res = await authedFetch('/api/stripe/confirm', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ session_id: sessionId }),
+          })
+          const json = await res.json().catch(() => ({} as any))
+          if (res.ok && json?.ok) {
+            if (active) {
+              if (json?.already_processed) setStatus('already')
+              else setStatus('ok')
+              timeoutId = window.setTimeout(() => {
+                router.push('/billing')
+              }, 2000)
+            }
+            return
+          }
+          lastErr = json?.error ?? 'Error'
+          await new Promise((r) => setTimeout(r, delays[i]))
+        }
         if (active) {
-          if (json?.already) setStatus('already')
-          else setStatus('ok')
-          timeoutId = window.setTimeout(() => {
-            router.push('/billing')
-          }, 2000)
+          setError(lastErr ?? 'Error')
+          setStatus('error')
         }
       } catch (e: any) {
         if (active) {

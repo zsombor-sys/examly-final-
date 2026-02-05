@@ -17,34 +17,43 @@ export async function confirmStripeSession(sessionId: string) {
   const creditsRaw = session.metadata?.credits ? Number(session.metadata.credits) : 30
   const credits = Number.isFinite(creditsRaw) ? Math.trunc(creditsRaw) : 30
 
-  console.log('stripe.confirm', {
+  console.log('stripe.confirm start', {
     session_id: sessionId,
     payment_status: paymentStatus,
     user_id: userId || null,
+    metadata: session.metadata || null,
   })
 
   if (paymentStatus !== 'paid') {
+    console.log('stripe.confirm unpaid', { session_id: sessionId, payment_status: paymentStatus })
     return { ok: false, already_processed: false, credits_added: 0, payment_status: paymentStatus }
   }
   if (!userId) {
+    console.log('stripe.confirm missing_user', { session_id: sessionId })
     return { ok: false, already_processed: false, credits_added: 0, payment_status: paymentStatus }
   }
 
   const sb = supabaseAdmin()
-  const { error: insErr } = await sb.from('credit_purchases').insert({
-    user_id: userId,
-    stripe_session_id: sessionId,
-    credits,
-    amount_total: session.amount_total ?? null,
-    currency: session.currency ?? null,
-    status: 'paid',
-  })
-  if (insErr) {
-    if (insErr.code === '23505') {
-      console.log('stripe.confirm already_processed', { session_id: sessionId })
-      return { ok: true, already_processed: true, credits_added: 0 }
-    }
-    throw insErr
+  const { data: inserted, error: insErr } = await sb
+    .from('credit_purchases')
+    .insert(
+      {
+        user_id: userId,
+        stripe_session_id: sessionId,
+        credits,
+        amount_total: session.amount_total ?? null,
+        currency: session.currency ?? null,
+      },
+      { onConflict: 'stripe_session_id', ignoreDuplicates: true },
+    )
+    .select('id')
+
+  if (insErr) throw insErr
+
+  const didInsert = Array.isArray(inserted) && inserted.length > 0
+  if (!didInsert) {
+    console.log('stripe.confirm already_processed', { session_id: sessionId })
+    return { ok: true, already_processed: true, credits_added: 0 }
   }
 
   const { data: row } = await sb.from('profiles').select('credits').eq('id', userId).maybeSingle()

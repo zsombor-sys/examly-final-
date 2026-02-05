@@ -5,6 +5,5 @@ create table if not exists public.credit_purchases (
   credits int not null,
   amount_total int,
   currency text,
-  status text not null default 'paid',
   created_at timestamptz not null default now()
 );

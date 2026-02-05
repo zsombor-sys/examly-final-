@@ -35,7 +35,7 @@ function Inner() {
           }
           return
         }
-        const delays = [500, 1500, 3000, 5000, 8000]
+        const delays = [500, 1000, 2000, 4000, 8000]
         let lastErr: string | null = null
         for (let i = 0; i < delays.length; i++) {
           const res = await authedFetch('/api/stripe/confirm', {

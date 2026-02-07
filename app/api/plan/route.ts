@@ -475,22 +475,27 @@ export async function POST(req: Request) {
     let parsed: any
     try {
       parsed = parseJsonLoose(raw)
+      const requiredKeys = [
+        'title',
+        'language',
+        'exam_date',
+        'confidence',
+        'quick_summary',
+        'study_notes_markdown',
+        'plan_markdown',
+      ]
+      for (const k of requiredKeys) {
+        if (!(k in parsed)) throw new Error('AI_JSON_SCHEMA_INVALID')
+      }
     } catch (err: any) {
-      console.error('[plan.ai_parse_failed]', { requestId, snippet: String(raw || '').slice(0, 800) })
-      throw new Error('AI_JSON_PARSE_FAILED')
-    }
-
-    const requiredKeys = [
-      'title',
-      'language',
-      'exam_date',
-      'confidence',
-      'quick_summary',
-      'study_notes_markdown',
-      'plan_markdown',
-    ]
-    for (const k of requiredKeys) {
-      if (!(k in parsed)) throw new Error('AI_JSON_SCHEMA_INVALID')
+      console.error('[plan.parse_failed]', {
+        error: err?.message ?? 'AI_JSON_INVALID',
+        rawSnippet: String(raw || '').slice(0, 800),
+      })
+      return NextResponse.json(
+        { error: 'PLAN_GENERATE_FAILED', reason: 'AI_JSON_INVALID' },
+        { status: 400, headers: { 'cache-control': 'no-store' } }
+      )
     }
 
     const plan = normalizePlan({

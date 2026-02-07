@@ -139,6 +139,57 @@ function normalizePlan(obj: any) {
   return out
 }
 
+function parseJsonLoose(raw: string) {
+  let s = String(raw ?? '').trim()
+  if (!s) throw new Error('AI_JSON_EMPTY')
+
+  if (s.startsWith('```')) {
+    s = s.replace(/^```[a-zA-Z]*\s*/, '').replace(/```$/s, '').trim()
+  }
+
+  const start = s.indexOf('{')
+  if (start === -1) throw new Error('AI_JSON_NO_OBJECT')
+
+  let inString = false
+  let escaped = false
+  let depth = 0
+  let end = -1
+
+  for (let i = start; i < s.length; i++) {
+    const ch = s[i]
+    if (inString) {
+      if (escaped) {
+        escaped = false
+        continue
+      }
+      if (ch === '\\') {
+        escaped = true
+        continue
+      }
+      if (ch === '"') {
+        inString = false
+      }
+      continue
+    }
+    if (ch === '"') {
+      inString = true
+      continue
+    }
+    if (ch === '{') depth++
+    if (ch === '}') {
+      depth--
+      if (depth === 0) {
+        end = i + 1
+        break
+      }
+    }
+  }
+
+  if (end === -1) throw new Error('AI_JSON_UNBALANCED')
+  const extracted = s.slice(start, end)
+  return JSON.parse(extracted)
+}
+
 function buildSystemPrompt() {
   return `
 You are Umenify.
@@ -300,6 +351,7 @@ export async function GET(req: Request) {
 
 /** POST /api/plan : generate + SAVE + set current */
 export async function POST(req: Request) {
+  const requestId = crypto.randomUUID()
   try {
     const user = await requireUser(req)
 
@@ -419,16 +471,28 @@ export async function POST(req: Request) {
     })
 
     const raw = await callModel(client, textModel, prompt, textFromFiles, [], maxTokens)
+    console.log('[plan.ai]', { requestId, raw_len: raw.length })
     let parsed: any
     try {
-      parsed = JSON.parse(raw)
-    } catch {
-      const snippet = String(raw || '').slice(0, 500)
-      return NextResponse.json(
-        { error: 'AI_JSON_PARSE_FAILED', snippet },
-        { status: 500, headers: { 'cache-control': 'no-store' } }
-      )
+      parsed = parseJsonLoose(raw)
+    } catch (err: any) {
+      console.error('[plan.ai_parse_failed]', { requestId, snippet: String(raw || '').slice(0, 800) })
+      throw new Error('AI_JSON_PARSE_FAILED')
     }
+
+    const requiredKeys = [
+      'title',
+      'language',
+      'exam_date',
+      'confidence',
+      'quick_summary',
+      'study_notes_markdown',
+      'plan_markdown',
+    ]
+    for (const k of requiredKeys) {
+      if (!(k in parsed)) throw new Error('AI_JSON_SCHEMA_INVALID')
+    }
+
     const plan = normalizePlan({
       title: parsed?.title,
       language: parsed?.language,
@@ -447,7 +511,16 @@ export async function POST(req: Request) {
 
     return NextResponse.json({ id: saved.id, result: plan }, { headers: { 'cache-control': 'no-store', 'x-examly-plan': 'ok' } })
   } catch (e: any) {
-    return NextResponse.json({ error: e?.message ?? 'Server error' }, { status: e?.status ?? 400, headers: { 'cache-control': 'no-store' } })
+    console.error('[plan.error]', {
+      requestId,
+      name: e?.name,
+      message: e?.message,
+      stack: e?.stack,
+    })
+    return NextResponse.json(
+      { error: 'PLAN_GENERATE_FAILED', requestId, message: e?.message ?? 'Server error' },
+      { status: 500, headers: { 'cache-control': 'no-store' } }
+    )
   }
 }
 

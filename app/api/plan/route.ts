@@ -85,6 +85,7 @@ const practiceSchema = z.object({
       z.object({
         question: z.string(),
         answer: z.string(),
+        type: z.enum(['mcq', 'short', 'true_false']),
       })
     ),
   }),
@@ -106,8 +107,9 @@ const practiceJsonSchema = {
             properties: {
               question: { type: 'string' },
               answer: { type: 'string' },
+              type: { type: 'string', enum: ['mcq', 'short', 'true_false'] },
             },
-            required: ['question', 'answer'],
+            required: ['question', 'answer', 'type'],
           },
         },
       },
@@ -278,6 +280,12 @@ function detectHungarian(text: string) {
   return /\bhu\b|magyar|szia|tétel|vizsga|érettségi/i.test(text)
 }
 
+function inferExamDate(prompt: string) {
+  const p = String(prompt || '').toLowerCase()
+  if (p.includes('holnap') || p.includes('tomorrow')) return 'tomorrow'
+  return 'tomorrow'
+}
+
 function extractJsonObject(text: string) {
   const raw = String(text ?? '').trim()
   if (!raw) throw new Error('AI_JSON_EMPTY')
@@ -290,7 +298,7 @@ function extractJsonObject(text: string) {
   return JSON.parse(m[0])
 }
 
-async function runJsonStep<T>(
+async function callJson<T>(
   client: OpenAI,
   model: string,
   system: string,
@@ -422,8 +430,10 @@ async function generateNotesStep(
 ) {
   const system = [
     'Return ONLY valid JSON matching the schema. No markdown or extra text.',
-    'Write high quality study notes.',
-    'Focus on clear structure, concise explanations, and accurate terminology.',
+    'study_notes must be at least 2200 characters.',
+    'Use headings with "##" and bullet lists.',
+    'Include sections: Definitions, Key Ideas, Examples, Typical Mistakes, Quick Recap.',
+    'If info is insufficient, make reasonable assumptions and still produce a full study_notes body.',
   ].join('\n')
 
   const user = [
@@ -432,42 +442,56 @@ async function generateNotesStep(
     `Text from images (OCR):\n${ocrText || '(none)'}`,
   ].join('\n\n')
 
-  return runJsonStep(client, model, system, user, notesSchema, notesJsonSchema, 1)
+  let notes = await callJson(client, model, system, user, notesSchema, notesJsonSchema, 2)
+  if (!validateNotes(notes)) {
+    const fixUser = `${user}\n\nFix to satisfy schema/rules. Return ONLY JSON.`
+    notes = await callJson(client, model, system, fixUser, notesSchema, notesJsonSchema, 0)
+  }
+  if (!validateNotes(notes)) {
+    throw new Error('NOTES_JSON_FAILED')
+  }
+  return notes
 }
 
-async function generateDailyStep(client: OpenAI, model: string, notes: z.infer<typeof notesSchema>) {
+async function generateDailyStep(
+  client: OpenAI,
+  model: string,
+  notes: z.infer<typeof notesSchema>,
+  examDate: string
+) {
   const system = [
     'Return ONLY valid JSON matching the schema. No markdown or extra text.',
-    'Always include at least 1 block.',
+    'blocks length must be >= 4.',
+    'Include at least 2 study, 1 review, 1 break.',
     'total_minutes must equal the sum of block durations.',
   ].join('\n')
   const user = [
+    `Exam date: ${examDate}`,
     `Subject: ${notes.subject}`,
     `Title: ${notes.title}`,
     `Key topics: ${notes.key_topics.join(', ')}`,
     `Study notes:\n${notes.study_notes}`,
   ].join('\n\n')
 
-  const parsed = await runJsonStep(client, model, system, user, dailySchema, dailyJsonSchema, 0)
-  const blocks = Array.isArray(parsed.daily_plan.blocks) ? parsed.daily_plan.blocks : []
-  const normalizedBlocks = blocks
-    .map((b) => ({
-      title: String(b.title || '').trim() || 'Study',
-      duration_minutes: Math.max(1, Math.round(Number(b.duration_minutes) || 0)),
-      type: b.type === 'break' ? 'break' : b.type === 'review' ? 'review' : 'study',
-    }))
-    .filter((b) => b.duration_minutes > 0)
-  const finalBlocks = normalizedBlocks.length
-    ? normalizedBlocks
-    : [{ title: 'Study', duration_minutes: 25, type: 'study' as const }]
-  const totalMinutes = finalBlocks.reduce((sum, b) => sum + b.duration_minutes, 0)
-  return { daily_plan: { total_minutes: totalMinutes, blocks: finalBlocks } }
+  try {
+    let daily = await callJson(client, model, system, user, dailySchema, dailyJsonSchema, 1)
+    if (!validateDaily(daily)) {
+      const fixUser = `${user}\n\nFix to satisfy schema/rules. Return ONLY JSON.`
+      daily = await callJson(client, model, system, fixUser, dailySchema, dailyJsonSchema, 0)
+    }
+    if (validateDaily(daily)) return normalizeDaily(daily)
+  } catch {}
+
+  return fallbackDaily(notes)
 }
 
 async function generatePracticeStep(client: OpenAI, model: string, notes: z.infer<typeof notesSchema>) {
   const system = [
     'Return ONLY valid JSON matching the schema. No markdown or extra text.',
-    'Generate at least 5 questions with clear, school-level answers.',
+    'Generate at least 12 questions total.',
+    'Include at least 4 mcq, 4 short, 4 true_false.',
+    'Answers must be 1-3 sentences max.',
+    'Questions must be based on key_topics.',
   ].join('\n')
   const user = [
     `Subject: ${notes.subject}`,
@@ -476,25 +500,149 @@ async function generatePracticeStep(client: OpenAI, model: string, notes: z.infe
     `Study notes:\n${notes.study_notes}`,
   ].join('\n\n')
 
-  const parsed = await runJsonStep(client, model, system, user, practiceSchema, practiceJsonSchema, 0)
-  const questions = Array.isArray(parsed.practice.questions) ? parsed.practice.questions : []
-  const cleaned = questions
-    .map((q) => ({
-      question: String(q.question || '').trim(),
-      answer: String(q.answer || '').trim(),
-    }))
-    .filter((q) => q.question && q.answer)
-  if (cleaned.length >= 5) return { practice: { questions: cleaned } }
+  try {
+    let practice = await callJson(client, model, system, user, practiceSchema, practiceJsonSchema, 1)
+    if (!validatePractice(practice)) {
+      const fixUser = `${user}\n\nFix to satisfy schema/rules. Return ONLY JSON.`
+      practice = await callJson(client, model, system, fixUser, practiceSchema, practiceJsonSchema, 0)
+    }
+    if (validatePractice(practice)) return normalizePractice(practice)
+  } catch {}
 
-  const pad = notes.key_topics.filter(Boolean).slice(0, 5 - cleaned.length)
-  const padded = [
-    ...cleaned,
-    ...pad.map((t) => ({
-      question: `Explain: ${t}`,
-      answer: `Use the study notes to explain ${t}.`,
-    })),
+  return fallbackPractice(notes)
+}
+
+function validateNotes(notes: z.infer<typeof notesSchema>) {
+  const text = String(notes?.study_notes || '')
+  if (text.length < 2200) return false
+  if (!/##\s+/.test(text)) return false
+  if (!/(^|\n)\s*[-*]\s+/.test(text)) return false
+  const required = ['Definitions', 'Key Ideas', 'Examples', 'Typical Mistakes', 'Quick Recap']
+  for (const r of required) {
+    const re = new RegExp(`##\\s*${r}\\b`, 'i')
+    if (!re.test(text)) return false
+  }
+  return true
+}
+
+function validateDaily(daily: z.infer<typeof dailySchema>) {
+  const blocks = Array.isArray(daily?.daily_plan?.blocks) ? daily.daily_plan.blocks : []
+  if (blocks.length < 4) return false
+  const sum = blocks.reduce((s, b) => s + Number(b.duration_minutes || 0), 0)
+  if (Number(daily.daily_plan.total_minutes) !== sum) return false
+  const counts = blocks.reduce(
+    (acc, b) => {
+      acc[b.type] += 1
+      return acc
+    },
+    { study: 0, review: 0, break: 0 }
+  )
+  if (counts.study < 2 || counts.review < 1 || counts.break < 1) return false
+  return true
+}
+
+function normalizeDaily(daily: z.infer<typeof dailySchema>) {
+  const blocks = daily.daily_plan.blocks.map((b) => ({
+    title: String(b.title || '').trim() || 'Study',
+    duration_minutes: Math.max(1, Math.round(Number(b.duration_minutes) || 0)),
+    type: b.type,
+  }))
+  const total = blocks.reduce((s, b) => s + b.duration_minutes, 0)
+  return { daily_plan: { total_minutes: total, blocks } }
+}
+
+function validatePractice(practice: z.infer<typeof practiceSchema>) {
+  const questions = Array.isArray(practice?.practice?.questions) ? practice.practice.questions : []
+  if (questions.length < 12) return false
+  const counts = questions.reduce(
+    (acc, q) => {
+      const t = q.type === 'mcq' || q.type === 'short' || q.type === 'true_false' ? q.type : 'short'
+      acc[t] += 1
+      return acc
+    },
+    { mcq: 0, short: 0, true_false: 0 }
+  )
+  if (counts.mcq < 4 || counts.short < 4 || counts.true_false < 4) return false
+  return true
+}
+
+function normalizePractice(practice: z.infer<typeof practiceSchema>) {
+  const questions = practice.practice.questions.map((q) => ({
+    question: String(q.question || '').trim(),
+    answer: limitAnswer(String(q.answer || '').trim()),
+    type: q.type === 'mcq' || q.type === 'true_false' ? q.type : 'short',
+  }))
+  return { practice: { questions } }
+}
+
+function fallbackDaily(notes: z.infer<typeof notesSchema>) {
+  const topics = pickTopics(notes)
+  const titles = [
+    topics[0] || 'Core concepts',
+    topics[1] || 'Key ideas',
+    'Break',
+    topics[2] || 'Review',
+    topics[3] || 'Practice',
   ]
-  return { practice: { questions: padded } }
+  const blocks = [
+    { title: titles[0], duration_minutes: 30, type: 'study' as const },
+    { title: titles[1], duration_minutes: 25, type: 'study' as const },
+    { title: titles[2], duration_minutes: 10, type: 'break' as const },
+    { title: titles[3], duration_minutes: 25, type: 'review' as const },
+    { title: titles[4], duration_minutes: 30, type: 'study' as const },
+  ]
+  return { daily_plan: { total_minutes: 120, blocks } }
+}
+
+function fallbackPractice(notes: z.infer<typeof notesSchema>) {
+  const topics = pickTopics(notes)
+  const sourceText = String(notes.study_notes || '')
+  const questions = []
+  for (let i = 0; i < 12; i += 1) {
+    const type = i < 4 ? 'mcq' : i < 8 ? 'short' : 'true_false'
+    const topic = topics[i % topics.length] || `Topic ${i + 1}`
+    const answer = extractAnswerFromNotes(sourceText, topic)
+    const question =
+      type === 'true_false'
+        ? `True or False: ${topic} is correctly explained in the notes.`
+        : type === 'mcq'
+          ? `Which option best describes ${topic}?`
+          : `Explain ${topic} in your own words.`
+    questions.push({ question, answer, type })
+  }
+  return { practice: { questions } }
+}
+
+function pickTopics(notes: z.infer<typeof notesSchema>) {
+  const fromKey = Array.isArray(notes.key_topics) ? notes.key_topics.map((t) => String(t).trim()).filter(Boolean) : []
+  if (fromKey.length >= 4) return fromKey
+  const headings = extractHeadings(notes.study_notes)
+  const combined = [...fromKey, ...headings].map((t) => String(t).trim()).filter(Boolean)
+  return combined.length ? combined : ['Core concepts', 'Key ideas', 'Examples', 'Typical mistakes']
+}
+
+function extractHeadings(text: string) {
+  const lines = String(text || '').split('\n')
+  const headings: string[] = []
+  for (const line of lines) {
+    const m = line.match(/^##\s+(.+)/)
+    if (m?.[1]) headings.push(m[1].trim())
+  }
+  return headings
+}
+
+function extractAnswerFromNotes(notesText: string, topic: string) {
+  const sentences = notesText.split(/(?<=[.!?])\s+/).filter(Boolean)
+  const match = sentences.find((s) => s.toLowerCase().includes(topic.toLowerCase()))
+  const pick = match || sentences[0] || `Use the notes to define ${topic}.`
+  const cleaned = pick.replace(/\s+/g, ' ').trim()
+  return limitAnswer(cleaned)
+}
+
+function limitAnswer(text: string) {
+  const sentences = text.split(/(?<=[.!?])\s+/).filter(Boolean)
+  const limited = sentences.slice(0, 3).join(' ')
+  return limited.length > 260 ? limited.slice(0, 260) : limited
 }
 
 async function setCurrentPlanBestEffort(userId: string, planId: string) {
@@ -604,109 +752,42 @@ export async function POST(req: Request) {
         extracted_chars: materials.textFromFiles.length,
         prompt_chars: prompt.length,
       })
-      const plan = mock(prompt, materials.fileNames)
-      const saved = savePlan(user.id, plan.title, plan)
+      const result = mock(prompt, materials.fileNames)
+      const saved = savePlan(user.id, result.notes.title || result.notes.subject || 'Untitled plan', result)
       await savePlanToDbBestEffort({ ...saved, userId: user.id })
       await setCurrentPlanBestEffort(user.id, saved.id)
 
       await consumeGeneration(user.id)
 
-      return NextResponse.json({ id: saved.id, result: plan }, { headers: { 'cache-control': 'no-store', 'x-examly-plan': 'mock' } })
+      return NextResponse.json(result, { headers: { 'cache-control': 'no-store', 'x-examly-plan': 'mock' } })
     }
 
     const client = new OpenAI({ apiKey: openAiKey })
-    const visionModel = 'gpt-4.1-mini'
-    const textModel = 'gpt-4.1'
-    const ocrText = materials.images.length ? await extractTextFromImages(client, visionModel, materials.images) : ''
+    const model = 'gpt-4.1'
+    const ocrText = materials.images.length ? await extractTextFromImages(client, model, materials.images) : ''
 
-    console.log('plan.generate request', {
-      planId,
-      files: materials.fileNames.length,
-      images: materials.imageCount,
-      extracted_chars: materials.textFromFiles.length,
-      ocr_chars: ocrText.length,
-      prompt_chars: prompt.length,
-    })
+    console.log('plan.step.notes.start', { requestId })
+    const notesStep = await generateNotesStep(client, model, prompt, materials.textFromFiles, ocrText)
+    console.log('plan.step.notes.end', { requestId, chars: notesStep.study_notes.length, topics: notesStep.key_topics.length })
 
-    let notesStep: z.infer<typeof notesSchema>
-    try {
-      notesStep = await generateNotesStep(client, textModel, prompt, materials.textFromFiles, ocrText)
-    } catch (err: any) {
-      console.error('[plan.notes_failed]', {
-        requestId,
-        error: err?.message ?? 'AI_JSON_INVALID',
-        stack: err?.stack,
-      })
-      return NextResponse.json(
-        { error: 'PLAN_GENERATE_FAILED', details: 'NOTES_STEP_FAILED' },
-        { status: 500, headers: { 'cache-control': 'no-store' } }
-      )
-    }
+    const examDate = inferExamDate(prompt)
+    console.log('plan.step.daily.start', { requestId })
+    const dailyStep = await generateDailyStep(client, model, notesStep, examDate)
+    console.log('plan.step.daily.end', { requestId, blocks: dailyStep.daily_plan.blocks.length })
 
-    let dailyStep = { daily_plan: { total_minutes: 0, blocks: [] as Array<{ title: string; duration_minutes: number; type: 'study' | 'review' | 'break' }> } }
-    try {
-      dailyStep = await generateDailyStep(client, visionModel, notesStep)
-    } catch {}
+    console.log('plan.step.practice.start', { requestId })
+    const practiceStep = await generatePracticeStep(client, model, notesStep)
+    console.log('plan.step.practice.end', { requestId, questions: practiceStep.practice.questions.length })
 
-    let practiceStep = { practice: { questions: [] as Array<{ question: string; answer: string }> } }
-    try {
-      practiceStep = await generatePracticeStep(client, visionModel, notesStep)
-    } catch {}
+    const result = { notes: notesStep, daily: dailyStep, practice: practiceStep }
 
-    const language = detectHungarian(`${prompt}\n${notesStep.study_notes}`) ? 'Hungarian' : 'English'
-    const blocks = dailyStep.daily_plan.blocks
-    const dailyPlan =
-      blocks.length > 0
-        ? [
-            {
-              day: 'Day 1',
-              focus: notesStep.subject || notesStep.title,
-              minutes: dailyStep.daily_plan.total_minutes,
-              tasks: blocks.filter((b) => b.type !== 'break').map((b) => b.title),
-              blocks: blocks.map((b) => ({
-                type: b.type === 'break' ? 'break' : 'study',
-                minutes: b.duration_minutes,
-                label: b.title,
-              })),
-            },
-          ]
-        : []
-
-    const practiceQuestions = practiceStep.practice.questions.map((q, i) => ({
-      id: `q${i + 1}`,
-      type: 'short' as const,
-      question: q.question,
-      options: null,
-      answer: q.answer,
-      explanation: null,
-    }))
-
-    const quickSummary =
-      notesStep.key_topics && notesStep.key_topics.length
-        ? `Key topics: ${notesStep.key_topics.slice(0, 8).join(', ')}`
-        : notesStep.study_notes.split('\n').filter(Boolean)[0] || 'Study plan generated.'
-
-    const combined = { notes: notesStep, daily: dailyStep, practice: practiceStep }
-    const plan = normalizePlan({
-      title: notesStep.title || notesStep.subject || 'Untitled plan',
-      language,
-      exam_date: null,
-      confidence: notesStep.confidence,
-      quick_summary: quickSummary,
-      study_notes: notesStep.study_notes,
-      daily_plan: dailyPlan,
-      practice_questions: practiceQuestions,
-      combined,
-    })
-
-    const saved = savePlan(user.id, plan.title, plan)
+    const saved = savePlan(user.id, notesStep.title || notesStep.subject || 'Untitled plan', result)
     await savePlanToDbBestEffort({ ...saved, userId: user.id })
     await setCurrentPlanBestEffort(user.id, saved.id)
 
-    // ✅ SUCCESS -> consume only now
     await consumeGeneration(user.id)
 
-    return NextResponse.json({ id: saved.id, result: plan }, { headers: { 'cache-control': 'no-store', 'x-examly-plan': 'ok' } })
+    return NextResponse.json(result, { headers: { 'cache-control': 'no-store', 'x-examly-plan': 'ok' } })
   } catch (e: any) {
     console.error('[plan.error]', {
       requestId,
@@ -726,42 +807,44 @@ export async function POST(req: Request) {
 }
 
 function mock(prompt: string, fileNames: string[]) {
-  const lang = /\bhu\b|magyar|szia|tétel|vizsga|érettségi/i.test(prompt) ? 'Hungarian' : 'English'
+  const base = [
+    '## Definitions',
+    '- Core term: a foundational idea.',
+    '- Scope: what the topic includes and excludes.',
+    '',
+    '## Key Ideas',
+    '- Central principle and why it matters.',
+    '- Cause and effect relationships.',
+    '- Common patterns to recognize.',
+    '',
+    '## Examples',
+    '- Walk through a representative example step by step.',
+    '- Highlight why each step is taken.',
+    '',
+    '## Typical Mistakes',
+    '- Mixing up closely related terms.',
+    '- Skipping required steps.',
+    '- Overgeneralizing from a single example.',
+    '',
+    '## Quick Recap',
+    '- Summarize the main points in 4-6 bullets.',
+  ].join('\n')
+  let studyNotes = `${base}\n\nPrompt: ${prompt || '(empty)'}\nUploads: ${fileNames.join(', ') || '(none)'}\n\n`
+  const filler = 'This section expands the explanation with assumptions, clarifications, and a concise recap of key points. '
+  while (studyNotes.length < 2300) {
+    studyNotes += filler
+  }
 
-  return normalizePlan({
+  const notes = {
     title: 'Mock plan (no OpenAI key yet)',
-    language: lang,
-    exam_date: null,
+    subject: 'General',
+    study_notes: studyNotes,
+    key_topics: ['Core concepts', 'Key ideas', 'Examples', 'Typical mistakes', 'Recap'],
     confidence: 6,
-    quick_summary: `Mock response so you can test the UI.\n\nPrompt: ${prompt || '(empty)'}\nUploads: ${fileNames.join(', ') || '(none)'}`,
-    study_notes:
-      lang === 'Hungarian'
-        ? `# FOGALMAK / DEFINITIONS
-- Másodfokú egyenlet: \\(ax^2+bx+c=0\\), \\(a\\neq 0\\)
+  }
 
-# KÉPLETEK / FORMULAS
-\\[D=b^2-4ac\\]
-\\[x_{1,2}=\\frac{-b\\pm\\sqrt{D}}{2a}\\]
-`
-        : `# DEFINITIONS
-- Quadratic: \\(ax^2+bx+c=0\\), \\(a\\neq0\\)
-`,
-    flashcards: [{ front: 'Diszkrimináns', back: 'D = b^2 - 4ac' }],
-    daily_plan: [
-      {
-        day: '1. nap',
-        focus: 'Képletek + alap',
-        minutes: 60,
-        tasks: ['Képletek bemagolása', '6 könnyű feladat', 'Ellenőrzés'],
-        blocks: [
-          { type: 'study', minutes: 25, label: 'Focus' },
-          { type: 'break', minutes: 5, label: 'Break' },
-          { type: 'study', minutes: 25, label: 'Focus' },
-          { type: 'break', minutes: 10, label: 'Break' },
-        ],
-      },
-    ],
-    practice_questions: [],
-    notes: ['Add OPENAI_API_KEY to enable real generation.'],
-  })
+  const daily = fallbackDaily(notes)
+  const practice = fallbackPractice(notes)
+
+  return { notes, daily, practice }
 }

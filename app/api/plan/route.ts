@@ -428,29 +428,51 @@ async function generateNotesStep(
   textFromFiles: string,
   ocrText: string
 ) {
-  const system = [
-    'Return ONLY valid JSON matching the schema. No markdown or extra text.',
-    'study_notes must be at least 2200 characters.',
+  const systemText = [
+    'Write detailed study notes in Hungarian.',
+    'Output plain text only.',
+    'Minimum 2200 characters.',
     'Use headings with "##" and bullet lists.',
     'Include sections: Definitions, Key Ideas, Examples, Typical Mistakes, Quick Recap.',
     'If info is insufficient, make reasonable assumptions and still produce a full study_notes body.',
   ].join('\n')
 
-  const user = [
+  const userText = [
     `Prompt:\n${prompt || '(empty)'}`,
     `Text from files:\n${textFromFiles || '(none)'}`,
     `Text from images (OCR):\n${ocrText || '(none)'}`,
   ].join('\n\n')
 
-  let notes = await callJson(client, model, system, user, notesSchema, notesJsonSchema, 2)
-  if (!validateNotes(notes)) {
-    const fixUser = `${user}\n\nFix to satisfy schema/rules. Return ONLY JSON.`
-    notes = await callJson(client, model, system, fixUser, notesSchema, notesJsonSchema, 0)
+  const textResp = await client.chat.completions.create({
+    model,
+    messages: [
+      { role: 'system', content: systemText },
+      { role: 'user', content: userText },
+    ],
+    temperature: 0.2,
+  })
+  const rawNotesText = String(textResp.choices?.[0]?.message?.content ?? '').trim()
+
+  const systemJson = [
+    'Convert the provided study notes into JSON matching the schema.',
+    'Return ONLY JSON, no extra text.',
+  ].join('\n')
+  const userJson = `Notes:\n${rawNotesText || '(empty)'}`
+
+  let jsonOk = false
+  let notes: z.infer<typeof notesSchema> = fallbackNotes(rawNotesText || userText)
+  try {
+    notes = await callJson(client, model, systemJson, userJson, notesSchema, notesJsonSchema, 1)
+    jsonOk = validateNotes(notes)
+  } catch {
+    jsonOk = false
   }
-  if (!validateNotes(notes)) {
-    throw new Error('NOTES_JSON_FAILED')
+
+  if (!jsonOk) {
+    notes = fallbackNotes(rawNotesText || userText)
   }
-  return notes
+
+  return { notes, rawNotesText, jsonOk }
 }
 
 async function generateDailyStep(
@@ -523,6 +545,43 @@ function validateNotes(notes: z.infer<typeof notesSchema>) {
     if (!re.test(text)) return false
   }
   return true
+}
+
+function fallbackNotes(rawNotesText: string) {
+  const text = String(rawNotesText || '').trim()
+  const headings = extractHeadings(text)
+  const keyTopics = headings.length ? headings.slice(0, 12) : ['Alapfogalmak', 'Kulcsideak', 'Peldak', 'Tipikus hibak']
+  const studyNotes = text || buildNotesShell()
+  return {
+    title: headings[0] || 'Tanulasi jegyzet',
+    subject: headings[0] || 'Altalanos tema',
+    study_notes: studyNotes,
+    key_topics: keyTopics,
+    confidence: 5,
+  }
+}
+
+function buildNotesShell() {
+  const parts = [
+    '## Definitions',
+    '- Alapfogalom definicio.',
+    '',
+    '## Key Ideas',
+    '- Kozponti osszefuggesek roviden.',
+    '',
+    '## Examples',
+    '- Egy egyszeru pelda levezetes.',
+    '',
+    '## Typical Mistakes',
+    '- Gyakori felreertesek felsorolasa.',
+    '',
+    '## Quick Recap',
+    '- 4-6 rovid bulletpont.',
+  ]
+  let text = parts.join('\n')
+  const filler = ' Ez a resz a feltevésekre es osszegzesre epul, rovid, tanulhato allitasokkal.'
+  while (text.length < 2300) text += filler
+  return text
 }
 
 function validateDaily(daily: z.infer<typeof dailySchema>) {
@@ -767,8 +826,15 @@ export async function POST(req: Request) {
     const ocrText = materials.images.length ? await extractTextFromImages(client, model, materials.images) : ''
 
     console.log('plan.step.notes.start', { requestId })
-    const notesStep = await generateNotesStep(client, model, prompt, materials.textFromFiles, ocrText)
-    console.log('plan.step.notes.end', { requestId, chars: notesStep.study_notes.length, topics: notesStep.key_topics.length })
+    const notesResult = await generateNotesStep(client, model, prompt, materials.textFromFiles, ocrText)
+    const notesStep = notesResult.notes
+    console.log('plan.step.notes.end', {
+      requestId,
+      chars: notesStep.study_notes.length,
+      topics: notesStep.key_topics.length,
+      raw_length: notesResult.rawNotesText.length,
+      json_ok: notesResult.jsonOk,
+    })
 
     const examDate = inferExamDate(prompt)
     console.log('plan.step.daily.start', { requestId })

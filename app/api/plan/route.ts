@@ -298,6 +298,25 @@ function extractJsonObject(text: string) {
   return JSON.parse(m[0])
 }
 
+function extractFirstJsonObject(text: string) {
+  const raw = String(text ?? '').trim()
+  if (!raw) return null
+  const cleaned = raw.startsWith('```') ? raw.replace(/^```[a-zA-Z]*\s*/, '').replace(/```$/s, '').trim() : raw
+  const m = cleaned.match(/\{[\s\S]*\}/)
+  return m?.[0] ?? null
+}
+
+function safeJsonParse(text: string) {
+  const raw = String(text ?? '').trim()
+  if (!raw) throw new Error('AI_JSON_EMPTY')
+  try {
+    return JSON.parse(raw)
+  } catch {}
+  const first = extractFirstJsonObject(raw)
+  if (!first) throw new Error('AI_JSON_INVALID')
+  return JSON.parse(first)
+}
+
 async function callJson<T>(
   client: OpenAI,
   model: string,
@@ -462,7 +481,24 @@ async function generateNotesStep(
   let jsonOk = false
   let notes: z.infer<typeof notesSchema> = fallbackNotes(rawNotesText || userText)
   try {
-    notes = await callJson(client, model, systemJson, userJson, notesSchema, notesJsonSchema, 1)
+    const jsonResp = await client.chat.completions.create({
+      model,
+      messages: [
+        { role: 'system', content: systemJson },
+        { role: 'user', content: userJson },
+      ],
+      temperature: 0.2,
+      response_format: {
+        type: 'json_schema',
+        json_schema: {
+          name: 'notes_json',
+          schema: notesJsonSchema,
+        },
+      },
+    })
+    const jsonText = String(jsonResp.choices?.[0]?.message?.content ?? '').trim()
+    const parsed = safeJsonParse(jsonText)
+    notes = notesSchema.parse(parsed)
     jsonOk = validateNotes(notes)
   } catch {
     jsonOk = false

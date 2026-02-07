@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { Play, Pause, RotateCcw, SkipForward, Sparkles } from 'lucide-react'
 import { Button } from '@/components/ui'
 import HScroll from '@/components/HScroll'
+import { useTimer } from '@/components/TimerStore'
 
 type Block = { type: 'study' | 'break'; minutes: number; label: string }
 type DayPlan = { day: string; focus: string; tasks: string[]; minutes: number; blocks?: Block[] }
@@ -198,9 +199,8 @@ export default function Pomodoro({ dailyPlan }: { dailyPlan: DayPlan[] }) {
 
   const [activeDayIndex, setActiveDayIndex] = useState(0)
   const [activeBlockIndex, setActiveBlockIndex] = useState(0)
-  const [running, setRunning] = useState(false)
-  const [secondsLeft, setSecondsLeft] = useState(25 * 60)
-  const tickRef = useRef<number | null>(null)
+  const { status, elapsedMs, start, pause, stop } = useTimer()
+  const running = status === 'running'
 
   const { canvasRef, blast } = useConfettiOverlay()
 
@@ -213,45 +213,29 @@ export default function Pomodoro({ dailyPlan }: { dailyPlan: DayPlan[] }) {
   useEffect(() => {
     setActiveDayIndex(0)
     setActiveBlockIndex(0)
-    setRunning(false)
-
-    const firstDay = days[0]
-    const b = normalizeBlocks(firstDay?.blocks ?? [])
-    const first = b[0]
-    setSecondsLeft(first ? first.minutes * 60 : 25 * 60)
+    stop()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [days.length])
 
   // when day changes, reset block index and seconds
   useEffect(() => {
     setActiveBlockIndex(0)
-    setRunning(false)
-    const d = days[activeDayIndex]
-    const b = normalizeBlocks(d?.blocks ?? [])
-    const first = b[0]
-    setSecondsLeft(first ? first.minutes * 60 : 25 * 60)
+    stop()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeDayIndex])
 
   // when block changes, reset seconds
   useEffect(() => {
-    if (!activeBlock) return
-    setSecondsLeft(activeBlock.minutes * 60)
-    setRunning(false)
+    stop()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeBlockIndex])
 
-  // ticking
-  useEffect(() => {
-    if (!running) return
-    tickRef.current = window.setInterval(() => {
-      setSecondsLeft((s) => (s <= 1 ? 0 : s - 1))
-    }, 1000)
-    return () => {
-      if (tickRef.current) window.clearInterval(tickRef.current)
-      tickRef.current = null
-    }
-  }, [running])
+  const blockDurationMs = activeBlock ? activeBlock.minutes * 60 * 1000 : 0
+  const secondsLeft = useMemo(() => {
+    if (!activeBlock) return 0
+    const leftMs = Math.max(0, blockDurationMs - elapsedMs)
+    return Math.ceil(leftMs / 1000)
+  }, [activeBlock, blockDurationMs, elapsedMs])
 
   // on finish: CONFETTI + auto-advance block/day
   useEffect(() => {
@@ -261,7 +245,7 @@ export default function Pomodoro({ dailyPlan }: { dailyPlan: DayPlan[] }) {
     // 🎉 Always confetti on ANY block end (study OR break)
     blast(activeBlock?.type === 'break' ? 'small' : 'big')
 
-    setRunning(false)
+    stop()
 
     // auto advance after a tiny beat
     const t = window.setTimeout(() => {
@@ -290,29 +274,13 @@ export default function Pomodoro({ dailyPlan }: { dailyPlan: DayPlan[] }) {
 
   const progress = useMemo(() => {
     if (!activeBlock) return 0
-    const total = activeBlock.minutes * 60
+    const total = activeBlock.minutes * 60 * 1000
     if (total <= 0) return 0
-    return clamp(100 - (secondsLeft / total) * 100, 0, 100)
-  }, [activeBlock, secondsLeft])
+    return clamp((elapsedMs / total) * 100, 0, 100)
+  }, [activeBlock, elapsedMs])
 
   const title = activeBlock?.label || 'No blocks'
   const isBreak = activeBlock?.type === 'break'
-
-  // Persist a tiny "now running" snapshot so the timer can stay visible across tabs/pages
-  useEffect(() => {
-    if (typeof window === "undefined") return
-    try {
-      const payload = {
-        running: running,
-        secondsLeft: secondsLeft,
-        label: activeBlock?.label ?? null,
-        focus: (dailyPlan?.[0]?.focus ?? null),
-        updatedAt: Date.now(),
-      }
-      window.localStorage.setItem("examly_pomodoro_state_v1", JSON.stringify(payload))
-      window.dispatchEvent(new Event("examly_pomodoro_update"))
-    } catch {}
-  }, [running, secondsLeft, activeBlock?.label])
 
   return (
     <>
@@ -369,7 +337,7 @@ export default function Pomodoro({ dailyPlan }: { dailyPlan: DayPlan[] }) {
 
           <HScroll className="mt-4 -mx-1 px-1 max-w-full">
             <Button
-              onClick={() => setRunning((v) => !v)}
+              onClick={running ? pause : start}
               disabled={!activeBlock}
               className="shrink-0 gap-2"
             >
@@ -381,8 +349,7 @@ export default function Pomodoro({ dailyPlan }: { dailyPlan: DayPlan[] }) {
               variant="ghost"
               onClick={() => {
                 if (!activeBlock) return
-                setRunning(false)
-                setSecondsLeft(activeBlock.minutes * 60)
+                stop()
               }}
               className="shrink-0 gap-2"
               disabled={!activeBlock}

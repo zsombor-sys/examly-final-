@@ -3,6 +3,7 @@ import { requireUser } from '@/lib/authServer'
 import { supabaseAdmin } from '@/lib/supabaseServer'
 import OpenAI from 'openai'
 import pdfParse from 'pdf-parse'
+import { getOpenAIModels } from '@/lib/openaiModels'
 
 export const runtime = 'nodejs'
 
@@ -38,11 +39,8 @@ async function withRetries<T>(fn: () => Promise<T>) {
   throw lastErr
 }
 
-async function extractImageText(buf: Buffer, mime: string) {
-  const apiKey = process.env.OPENAI_API_KEY
-  if (!apiKey) return ''
-  const openai = new OpenAI({ apiKey })
-  const model = process.env.OPENAI_MODEL || 'gpt-5.1-instant'
+async function extractImageText(openai: OpenAI | null, model: string, buf: Buffer, mime: string) {
+  if (!openai) return ''
   const b64 = buf.toString('base64')
   const resp = await openai.chat.completions.create({
     model,
@@ -83,6 +81,10 @@ export async function POST(req: Request) {
 
     await sb.from('materials').update({ status: 'processing' }).eq('id', item.id)
 
+    const { visionModel } = getOpenAIModels()
+    const apiKey = process.env.OPENAI_API_KEY
+    const openai = apiKey ? new OpenAI({ apiKey }) : null
+
     try {
       const extracted = await withRetries(async () => {
         const { data, error: dlErr } = await sb.storage.from('uploads').download(item.file_path)
@@ -95,7 +97,7 @@ export async function POST(req: Request) {
           out = String(parsed.text ?? '').trim()
         } else if (isImage(item.file_path, item.mime_type)) {
           const mime = item.mime_type || 'image/png'
-          out = await extractImageText(buf, mime)
+          out = await extractImageText(openai, visionModel, buf, mime)
         } else {
           out = buf.toString('utf8')
         }

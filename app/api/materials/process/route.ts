@@ -3,6 +3,7 @@ import { requireUser } from '@/lib/authServer'
 import { supabaseAdmin } from '@/lib/supabaseServer'
 import OpenAI from 'openai'
 import pdfParse from 'pdf-parse'
+import { getOpenAIModels } from '@/lib/openaiModels'
 
 export const runtime = 'nodejs'
 
@@ -16,11 +17,8 @@ function isPdf(path: string, mime: string | null) {
   return /\.pdf$/i.test(path)
 }
 
-async function ocrImage(buf: Buffer, mime: string) {
-  const apiKey = process.env.OPENAI_API_KEY
-  if (!apiKey) return ''
-  const openai = new OpenAI({ apiKey })
-  const model = process.env.OPENAI_MODEL || 'gpt-5.1-instant'
+async function ocrImage(openai: OpenAI | null, model: string, buf: Buffer, mime: string) {
+  if (!openai) return ''
   const b64 = buf.toString('base64')
   const resp = await openai.chat.completions.create({
     model,
@@ -39,7 +37,12 @@ async function ocrImage(buf: Buffer, mime: string) {
   return String(resp.choices?.[0]?.message?.content ?? '').trim()
 }
 
-async function processOne(sb: ReturnType<typeof supabaseAdmin>, item: any) {
+async function processOne(
+  sb: ReturnType<typeof supabaseAdmin>,
+  openai: OpenAI | null,
+  visionModel: string,
+  item: any
+) {
   await sb.from('materials').update({ status: 'processing' }).eq('id', item.id)
   try {
     const { data, error: dlErr } = await sb.storage.from('uploads').download(item.file_path)
@@ -51,7 +54,7 @@ async function processOne(sb: ReturnType<typeof supabaseAdmin>, item: any) {
       extracted = String(parsed.text ?? '').trim()
     } else if (isImage(item.file_path, item.mime_type)) {
       const mime = item.mime_type || 'image/png'
-      extracted = await ocrImage(buf, mime)
+      extracted = await ocrImage(openai, visionModel, buf, mime)
     } else {
       extracted = buf.toString('utf8')
     }
@@ -86,7 +89,25 @@ export async function POST(req: Request) {
     if (error) throw error
 
     const list = Array.isArray(items) ? items : []
-    console.log('materials.process start', { planId, count: list.length })
+    const maxImagesRaw = Number.parseInt(process.env.MAX_IMAGES_PER_REQUEST ?? '12', 10)
+    const maxImages = Number.isFinite(maxImagesRaw) ? maxImagesRaw : 12
+    const imageCount = list.filter((i) => isImage(i.file_path, i.mime_type)).length
+    if (imageCount > maxImages) {
+      return NextResponse.json(
+        { error: `Too many images. Max ${maxImages} per request.` },
+        { status: 400 }
+      )
+    }
+
+    const { visionModel } = getOpenAIModels()
+    console.log('materials.process start', {
+      planId,
+      count: list.length,
+      images: imageCount,
+      vision_model: visionModel,
+    })
+    const apiKey = process.env.OPENAI_API_KEY
+    const openai = apiKey ? new OpenAI({ apiKey }) : null
     const concurrency = 2
     for (let i = 0; i < list.length; i += concurrency) {
       const chunk = list.slice(i, i + concurrency)
@@ -94,9 +115,9 @@ export async function POST(req: Request) {
         chunk.map(async (item) => {
           // retry once
           try {
-            await processOne(sb, item)
+            await processOne(sb, openai as OpenAI, visionModel, item)
           } catch {
-            await processOne(sb, item)
+            await processOne(sb, openai as OpenAI, visionModel, item)
           }
         })
       )

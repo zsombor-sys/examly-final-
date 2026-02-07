@@ -393,7 +393,9 @@ function Inner() {
   }
 
   async function kickProcessing(nextPlanId: string) {
-    await authedFetch(`/api/materials/process?planId=${encodeURIComponent(nextPlanId)}`, { method: 'POST' })
+    const res = await authedFetch(`/api/materials/process?planId=${encodeURIComponent(nextPlanId)}`, { method: 'POST' })
+    const json = await res.json().catch(() => ({} as any))
+    if (!res.ok) throw new Error(json?.error ?? 'Failed to process materials')
   }
 
   async function generate() {
@@ -424,7 +426,10 @@ function Inner() {
       }
 
       const form = new FormData()
-      form.append('prompt', prompt || '')
+      const promptToSend =
+        prompt.trim() ||
+        (files.length > 0 ? 'Create structured study notes and a study plan based on the uploaded materials.' : '')
+      form.append('prompt', promptToSend)
       form.append('planId', nextPlanId)
 
       const res = await authedFetch('/api/plan', { method: 'POST', body: form })

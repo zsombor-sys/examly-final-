@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server'
 import { requireUser } from '@/lib/authServer'
 import { consumeGeneration, entitlementSnapshot, getProfileStrict } from '@/lib/creditsServer'
 import OpenAI from 'openai'
+import { getOpenAIModels } from '@/lib/openaiModels'
 import pdfParse from 'pdf-parse'
 import { getPlan, savePlan } from '@/app/api/plan/store'
 import { supabaseAdmin } from '@/lib/supabaseServer'
@@ -222,7 +223,8 @@ async function callModel(
   model: string,
   prompt: string,
   textFromFiles: string,
-  images: Array<{ name: string; b64: string; mime: string }>
+  images: Array<{ name: string; b64: string; mime: string }>,
+  maxTokens: number
 ) {
   const sys = buildSystemPrompt()
 
@@ -245,6 +247,7 @@ async function callModel(
     ],
     temperature: 0.3,
     response_format: { type: 'json_object' },
+    max_tokens: maxTokens,
   })
 
   return resp.choices?.[0]?.message?.content ?? ''
@@ -327,7 +330,7 @@ export async function POST(req: Request) {
     }
 
     const form = await req.formData()
-    const prompt = String(form.get('prompt') ?? '')
+    const promptRaw = String(form.get('prompt') ?? '')
 
     // Files are uploaded client-side to Supabase Storage; server downloads by path.
     const planId = String(form.get('planId') ?? '').trim()
@@ -335,6 +338,7 @@ export async function POST(req: Request) {
     const openAiKey = process.env.OPENAI_API_KEY
     if (!openAiKey) {
       const fileNames: string[] = []
+      let hasMaterials = false
       if (planId) {
         try {
           const sb = supabaseAdmin()
@@ -354,9 +358,13 @@ export async function POST(req: Request) {
               if (m.status !== 'processed') continue
               fileNames.push(String(m.file_path || '').split('/').pop() || 'file')
             }
+            hasMaterials = fileNames.length > 0
           }
         } catch {}
       }
+      const prompt =
+        promptRaw.trim() ||
+        (hasMaterials ? 'Create structured study notes and a study plan based on the uploaded materials.' : '')
       const plan = mock(prompt, fileNames)
       const saved = savePlan(user.id, plan.title, plan)
       await setCurrentPlanBestEffort(user.id, saved.id)
@@ -371,11 +379,13 @@ export async function POST(req: Request) {
 
     let textFromFiles = ''
     const fileNames: string[] = []
+    let hasMaterials = false
+    let imageCount = 0
     if (planId) {
       const sb = supabaseAdmin()
       const { data, error } = await sb
         .from('materials')
-        .select('file_path, extracted_text, status')
+        .select('file_path, extracted_text, status, mime_type')
         .eq('user_id', user.id)
         .eq('plan_id', planId)
       if (error) throw error
@@ -391,17 +401,40 @@ export async function POST(req: Request) {
           if (m.status !== 'processed') continue
           const name = String(m.file_path || '').split('/').pop() || 'file'
           fileNames.push(name)
+          hasMaterials = true
+          const mime = typeof m.mime_type === 'string' ? m.mime_type : null
+          if (mime?.startsWith('image/') || /\.(png|jpe?g|webp)$/i.test(String(m.file_path || ''))) {
+            imageCount += 1
+          }
           if (m.extracted_text) parts.push(`--- ${name} ---\n${String(m.extracted_text)}`)
         }
         textFromFiles = parts.join('\n\n').slice(0, 120_000)
         if (textFromFiles.trim()) {
-          console.log('plan.generate materials included', { planId, files: fileNames.length, chars: textFromFiles.length })
+          console.log('plan.generate materials included', {
+            planId,
+            files: fileNames.length,
+            chars: textFromFiles.length,
+          })
         }
       }
     }
-    const model = process.env.OPENAI_MODEL || 'gpt-5.1-instant'
+    const prompt =
+      promptRaw.trim() ||
+      (hasMaterials ? 'Create structured study notes and a study plan based on the uploaded materials.' : '')
 
-    const raw = await callModel(client, model, prompt, textFromFiles, [])
+    const { textModel, visionModel } = getOpenAIModels()
+    const maxTokensRaw = Number.parseInt(process.env.MAX_OUTPUT_TOKENS ?? '1200', 10)
+    const maxTokens = Number.isFinite(maxTokensRaw) ? maxTokensRaw : 1200
+    console.log('plan.generate models', {
+      text_model: textModel,
+      vision_model: visionModel,
+      planId,
+      files: fileNames.length,
+      images: imageCount,
+      extracted_chars: textFromFiles.length,
+    })
+
+    const raw = await callModel(client, textModel, prompt, textFromFiles, [], maxTokens)
     const parsed = safeParseJson(raw)
     const plan = normalizePlan(parsed)
 

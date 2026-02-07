@@ -36,6 +36,15 @@ export function getPlan(userId: string, id: string) {
   return row
 }
 
+export function updatePlan(userId: string, id: string, result: any) {
+  const store = getStore()
+  const row = store.get(id)
+  if (!row || row.userId !== userId) return null
+  const next: StoredPlan = { ...row, result }
+  store.set(id, next)
+  return next
+}
+
 export function clearPlans(userId: string) {
   const store = getStore()
   for (const [id, row] of store.entries()) {

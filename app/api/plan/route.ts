@@ -847,14 +847,29 @@ export async function POST(req: Request) {
         extracted_chars: materials.textFromFiles.length,
         prompt_chars: prompt.length,
       })
-      const result = mock(prompt, materials.fileNames)
-      const saved = savePlan(user.id, result.notes.title || result.notes.subject || 'Untitled plan', result)
+      const notesStep = mock(prompt, materials.fileNames)
+      const quickSummary =
+        notesStep.key_topics && notesStep.key_topics.length
+          ? `Key topics: ${notesStep.key_topics.slice(0, 8).join(', ')}`
+          : notesStep.study_notes.split('\n').filter(Boolean)[0] || 'Study notes generated.'
+      const plan = normalizePlan({
+        title: notesStep.title || notesStep.subject || 'Untitled plan',
+        language: detectHungarian(`${prompt}\n${notesStep.study_notes}`) ? 'Hungarian' : 'English',
+        exam_date: null,
+        confidence: notesStep.confidence,
+        quick_summary: quickSummary,
+        study_notes: notesStep.study_notes,
+        daily_plan: [],
+        practice_questions: [],
+        notes_payload: notesStep,
+      })
+      const saved = savePlan(user.id, plan.title || notesStep.subject || 'Untitled plan', plan)
       await savePlanToDbBestEffort({ ...saved, userId: user.id })
       await setCurrentPlanBestEffort(user.id, saved.id)
 
       await consumeGeneration(user.id)
 
-      return NextResponse.json(result, { headers: { 'cache-control': 'no-store', 'x-examly-plan': 'mock' } })
+      return NextResponse.json({ id: saved.id, result: plan }, { headers: { 'cache-control': 'no-store', 'x-examly-plan': 'mock' } })
     }
 
     const client = new OpenAI({ apiKey: openAiKey })
@@ -873,23 +888,31 @@ export async function POST(req: Request) {
     })
 
     const examDate = inferExamDate(prompt)
-    console.log('plan.step.daily.start', { requestId })
-    const dailyStep = await generateDailyStep(client, model, notesStep, examDate)
-    console.log('plan.step.daily.end', { requestId, blocks: dailyStep.daily_plan.blocks.length })
+    const language = detectHungarian(`${prompt}\n${notesStep.study_notes}`) ? 'Hungarian' : 'English'
+    const quickSummary =
+      notesStep.key_topics && notesStep.key_topics.length
+        ? `Key topics: ${notesStep.key_topics.slice(0, 8).join(', ')}`
+        : notesStep.study_notes.split('\n').filter(Boolean)[0] || 'Study notes generated.'
 
-    console.log('plan.step.practice.start', { requestId })
-    const practiceStep = await generatePracticeStep(client, model, notesStep)
-    console.log('plan.step.practice.end', { requestId, questions: practiceStep.practice.questions.length })
+    const plan = normalizePlan({
+      title: notesStep.title || notesStep.subject || 'Untitled plan',
+      language,
+      exam_date: null,
+      confidence: notesStep.confidence,
+      quick_summary: quickSummary,
+      study_notes: notesStep.study_notes,
+      daily_plan: [],
+      practice_questions: [],
+      notes_payload: notesStep,
+    })
 
-    const result = { notes: notesStep, daily: dailyStep, practice: practiceStep }
-
-    const saved = savePlan(user.id, notesStep.title || notesStep.subject || 'Untitled plan', result)
+    const saved = savePlan(user.id, plan.title || notesStep.subject || 'Untitled plan', plan)
     await savePlanToDbBestEffort({ ...saved, userId: user.id })
     await setCurrentPlanBestEffort(user.id, saved.id)
 
     await consumeGeneration(user.id)
 
-    return NextResponse.json(result, { headers: { 'cache-control': 'no-store', 'x-examly-plan': 'ok' } })
+    return NextResponse.json({ id: saved.id, result: plan }, { headers: { 'cache-control': 'no-store', 'x-examly-plan': 'ok' } })
   } catch (e: any) {
     console.error('[plan.error]', {
       requestId,
@@ -937,16 +960,11 @@ function mock(prompt: string, fileNames: string[]) {
     studyNotes += filler
   }
 
-  const notes = {
+  return {
     title: 'Mock plan (no OpenAI key yet)',
     subject: 'General',
     study_notes: studyNotes,
     key_topics: ['Core concepts', 'Key ideas', 'Examples', 'Typical mistakes', 'Recap'],
     confidence: 6,
   }
-
-  const daily = fallbackDaily(notes)
-  const practice = fallbackPractice(notes)
-
-  return { notes, daily, practice }
 }

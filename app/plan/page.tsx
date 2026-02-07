@@ -155,6 +155,8 @@ function Inner() {
   const [planId, setPlanId] = useState<string | null>(null)
   const pendingGenerateRef = useRef(false)
   const [error, setError] = useState<string | null>(null)
+  const fetchedDailyRef = useRef<Set<string>>(new Set())
+  const fetchedPracticeRef = useRef<Set<string>>(new Set())
 
   const [saved, setSaved] = useState<SavedPlan[]>([])
   const [selectedId, setSelectedId] = useState<string | null>(null)
@@ -533,12 +535,58 @@ function Inner() {
     }
   }
 
+  async function fetchDaily(id: string) {
+    try {
+      const res = await authedFetch('/api/daily', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ planId: id }),
+      })
+      const json = await res.json().catch(() => ({} as any))
+      if (!res.ok) throw new Error(json?.error ?? 'Failed to load daily plan')
+      const dailyPlan = Array.isArray(json?.daily_plan) ? json.daily_plan : []
+      setResult((prev) => (prev ? { ...prev, daily_plan: dailyPlan } : prev))
+    } catch (e: any) {
+      setError(e?.message ?? 'Error')
+    }
+  }
+
+  async function fetchPractice(id: string) {
+    try {
+      const res = await authedFetch('/api/practice', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ planId: id }),
+      })
+      const json = await res.json().catch(() => ({} as any))
+      if (!res.ok) throw new Error(json?.error ?? 'Failed to load practice questions')
+      const items = Array.isArray(json?.practice_questions) ? json.practice_questions : []
+      setResult((prev) => (prev ? { ...prev, practice_questions: items } : prev))
+    } catch (e: any) {
+      setError(e?.message ?? 'Error')
+    }
+  }
+
   const displayTitle = result?.title?.trim() ? result.title : 'Study plan'
   const displayInput = shortPrompt(prompt)
   const totalMaterials = materials.length
   const processedCount = materials.filter((m) => m.status === 'processed').length
   const failedCount = materials.filter((m) => m.status === 'failed').length
   const canGenerate = !loading && !isGenerating && (prompt.trim().length >= 6 || files.length > 0)
+
+  useEffect(() => {
+    if (!selectedId || selectedId.startsWith('local_')) return
+    if (!result) return
+    if (tab === 'daily' && (result.daily_plan?.length ?? 0) === 0 && !fetchedDailyRef.current.has(selectedId)) {
+      fetchedDailyRef.current.add(selectedId)
+      fetchDaily(selectedId)
+      return
+    }
+    if (tab === 'practice' && (result.practice_questions?.length ?? 0) === 0 && !fetchedPracticeRef.current.has(selectedId)) {
+      fetchedPracticeRef.current.add(selectedId)
+      fetchPractice(selectedId)
+    }
+  }, [tab, selectedId, result])
 
   return (
     <div className="mx-auto max-w-6xl px-4 py-10">

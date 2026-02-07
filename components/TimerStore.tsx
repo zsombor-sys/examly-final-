@@ -5,23 +5,27 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useReducer 
 type TimerStatus = 'running' | 'paused' | 'stopped'
 
 type TimerState = {
+  visible: boolean
   status: TimerStatus
-  startedAt: number | null
-  accumulatedMs: number
-  tick: number
+  label: string | null
+  durationMs: number
+  endsAt: number | null
+  pausedRemainingMs: number | null
+  remainingMs: number
 }
 
 type TimerContextValue = TimerState & {
-  elapsedMs: number
-  start: () => void
+  start: (durationMinutes: number, label?: string | null) => void
   pause: () => void
+  resume: () => void
   stop: () => void
 }
 
 type TimerAction =
-  | { type: 'restore'; state: Pick<TimerState, 'status' | 'startedAt' | 'accumulatedMs'> }
-  | { type: 'start'; now: number }
+  | { type: 'restore'; state: Partial<TimerState> }
+  | { type: 'start'; now: number; durationMs: number; label: string | null }
   | { type: 'pause'; now: number }
+  | { type: 'resume'; now: number }
   | { type: 'stop' }
   | { type: 'tick'; now: number }
 
@@ -29,40 +33,89 @@ const STORAGE_KEY = 'examly_timer_state_v1'
 
 const TimerContext = createContext<TimerContextValue | null>(null)
 
+function computeRemaining(endsAt: number | null, now: number) {
+  if (!endsAt) return 0
+  return Math.max(0, endsAt - now)
+}
+
 function reducer(state: TimerState, action: TimerAction): TimerState {
   switch (action.type) {
-    case 'restore':
+    case 'restore': {
+      const next = { ...state, ...action.state }
+      return next
+    }
+    case 'start': {
+      const endsAt = action.now + action.durationMs
       return {
-        ...state,
-        status: action.state.status,
-        startedAt: action.state.startedAt,
-        accumulatedMs: action.state.accumulatedMs,
+        visible: true,
+        status: 'running',
+        label: action.label,
+        durationMs: action.durationMs,
+        endsAt,
+        pausedRemainingMs: null,
+        remainingMs: action.durationMs,
       }
-    case 'start':
-      if (state.status === 'running') return state
-      return { ...state, status: 'running', startedAt: action.now }
-    case 'pause':
-      if (state.status !== 'running' || state.startedAt == null) return state
+    }
+    case 'pause': {
+      if (state.status !== 'running' || !state.endsAt) return state
+      const remainingMs = computeRemaining(state.endsAt, action.now)
       return {
         ...state,
         status: 'paused',
-        accumulatedMs: state.accumulatedMs + (action.now - state.startedAt),
-        startedAt: null,
+        endsAt: null,
+        pausedRemainingMs: remainingMs,
+        remainingMs,
       }
+    }
+    case 'resume': {
+      if (state.status !== 'paused' || !state.pausedRemainingMs) return state
+      const endsAt = action.now + state.pausedRemainingMs
+      return {
+        ...state,
+        status: 'running',
+        endsAt,
+        pausedRemainingMs: null,
+      }
+    }
     case 'stop':
-      return { ...state, status: 'stopped', accumulatedMs: 0, startedAt: null }
-    case 'tick':
-      return { ...state, tick: action.now }
+      return {
+        visible: false,
+        status: 'stopped',
+        label: null,
+        durationMs: 0,
+        endsAt: null,
+        pausedRemainingMs: null,
+        remainingMs: 0,
+      }
+    case 'tick': {
+      if (state.status !== 'running' || !state.endsAt) return state
+      const remainingMs = computeRemaining(state.endsAt, action.now)
+      if (remainingMs <= 0) {
+        return {
+          visible: false,
+          status: 'stopped',
+          label: null,
+          durationMs: 0,
+          endsAt: null,
+          pausedRemainingMs: null,
+          remainingMs: 0,
+        }
+      }
+      return { ...state, remainingMs }
+    }
     default:
       return state
   }
 }
 
 const initialState: TimerState = {
+  visible: false,
   status: 'stopped',
-  startedAt: null,
-  accumulatedMs: 0,
-  tick: 0,
+  label: null,
+  durationMs: 0,
+  endsAt: null,
+  pausedRemainingMs: null,
+  remainingMs: 0,
 }
 
 export function TimerProvider({ children }: { children: React.ReactNode }) {
@@ -75,10 +128,30 @@ export function TimerProvider({ children }: { children: React.ReactNode }) {
       if (!raw) return
       const parsed = JSON.parse(raw)
       const status: TimerStatus = parsed?.status
-      const startedAt = typeof parsed?.startedAt === 'number' ? parsed.startedAt : null
-      const accumulatedMs = typeof parsed?.accumulatedMs === 'number' ? parsed.accumulatedMs : 0
+      const label = typeof parsed?.label === 'string' ? parsed.label : null
+      const durationMs = typeof parsed?.durationMs === 'number' ? parsed.durationMs : 0
+      const endsAt = typeof parsed?.endsAt === 'number' ? parsed.endsAt : null
+      const pausedRemainingMs = typeof parsed?.pausedRemainingMs === 'number' ? parsed.pausedRemainingMs : null
       if (status === 'running' || status === 'paused' || status === 'stopped') {
-        dispatch({ type: 'restore', state: { status, startedAt, accumulatedMs } })
+        const now = Date.now()
+        const remainingMs =
+          status === 'running' && endsAt ? computeRemaining(endsAt, now) : pausedRemainingMs ?? 0
+        if (status === 'running' && endsAt && remainingMs <= 0) {
+          dispatch({ type: 'stop' })
+          return
+        }
+        dispatch({
+          type: 'restore',
+          state: {
+            visible: status !== 'stopped',
+            status,
+            label,
+            durationMs,
+            endsAt: status === 'running' ? endsAt : null,
+            pausedRemainingMs: status === 'paused' ? pausedRemainingMs : null,
+            remainingMs,
+          },
+        })
       }
     } catch {
       // ignore storage errors
@@ -91,46 +164,44 @@ export function TimerProvider({ children }: { children: React.ReactNode }) {
       window.localStorage.setItem(
         STORAGE_KEY,
         JSON.stringify({
+          visible: state.visible,
           status: state.status,
-          startedAt: state.startedAt,
-          accumulatedMs: state.accumulatedMs,
+          label: state.label,
+          durationMs: state.durationMs,
+          endsAt: state.endsAt,
+          pausedRemainingMs: state.pausedRemainingMs,
         }),
       )
     } catch {
       // ignore storage errors
     }
-  }, [state.status, state.startedAt, state.accumulatedMs])
+  }, [state.visible, state.status, state.label, state.durationMs, state.endsAt, state.pausedRemainingMs])
 
   useEffect(() => {
     if (state.status !== 'running') return
-    dispatch({ type: 'tick', now: Date.now() })
     const t = window.setInterval(() => {
       dispatch({ type: 'tick', now: Date.now() })
     }, 1000)
     return () => window.clearInterval(t)
   }, [state.status])
 
-  const elapsedMs = useMemo(() => {
-    if (state.status === 'running' && state.startedAt != null) {
-      const now = state.tick || Date.now()
-      return Math.max(0, state.accumulatedMs + (now - state.startedAt))
-    }
-    return Math.max(0, state.accumulatedMs)
-  }, [state.status, state.startedAt, state.accumulatedMs, state.tick])
-
-  const start = useCallback(() => dispatch({ type: 'start', now: Date.now() }), [])
+  const start = useCallback((durationMinutes: number, label?: string | null) => {
+    const durationMs = Math.max(0, Math.round(durationMinutes * 60 * 1000))
+    dispatch({ type: 'start', now: Date.now(), durationMs, label: label ?? null })
+  }, [])
   const pause = useCallback(() => dispatch({ type: 'pause', now: Date.now() }), [])
+  const resume = useCallback(() => dispatch({ type: 'resume', now: Date.now() }), [])
   const stop = useCallback(() => dispatch({ type: 'stop' }), [])
 
   const value = useMemo(
     () => ({
       ...state,
-      elapsedMs,
       start,
       pause,
+      resume,
       stop,
     }),
-    [state, elapsedMs, start, pause, stop],
+    [state, start, pause, resume, stop],
   )
 
   return <TimerContext.Provider value={value}>{children}</TimerContext.Provider>

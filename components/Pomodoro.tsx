@@ -199,7 +199,7 @@ export default function Pomodoro({ dailyPlan }: { dailyPlan: DayPlan[] }) {
 
   const [activeDayIndex, setActiveDayIndex] = useState(0)
   const [activeBlockIndex, setActiveBlockIndex] = useState(0)
-  const { status, elapsedMs, start, pause, stop } = useTimer()
+  const { status, label, durationMs, remainingMs, start, pause, resume, stop } = useTimer()
   const running = status === 'running'
 
   const { canvasRef, blast } = useConfettiOverlay()
@@ -231,11 +231,12 @@ export default function Pomodoro({ dailyPlan }: { dailyPlan: DayPlan[] }) {
   }, [activeBlockIndex])
 
   const blockDurationMs = activeBlock ? activeBlock.minutes * 60 * 1000 : 0
+  const usingActiveBlock = !!activeBlock && durationMs === blockDurationMs && (label ?? '') === (activeBlock.label || '')
   const secondsLeft = useMemo(() => {
     if (!activeBlock) return 0
-    const leftMs = Math.max(0, blockDurationMs - elapsedMs)
+    const leftMs = usingActiveBlock ? remainingMs : blockDurationMs
     return Math.ceil(leftMs / 1000)
-  }, [activeBlock, blockDurationMs, elapsedMs])
+  }, [activeBlock, blockDurationMs, remainingMs, usingActiveBlock])
 
   // on finish: CONFETTI + auto-advance block/day
   useEffect(() => {
@@ -276,8 +277,9 @@ export default function Pomodoro({ dailyPlan }: { dailyPlan: DayPlan[] }) {
     if (!activeBlock) return 0
     const total = activeBlock.minutes * 60 * 1000
     if (total <= 0) return 0
-    return clamp((elapsedMs / total) * 100, 0, 100)
-  }, [activeBlock, elapsedMs])
+    const elapsed = usingActiveBlock ? Math.max(0, total - remainingMs) : 0
+    return clamp((elapsed / total) * 100, 0, 100)
+  }, [activeBlock, remainingMs, usingActiveBlock])
 
   const title = activeBlock?.label || 'No blocks'
   const isBreak = activeBlock?.type === 'break'
@@ -337,7 +339,18 @@ export default function Pomodoro({ dailyPlan }: { dailyPlan: DayPlan[] }) {
 
           <HScroll className="mt-4 -mx-1 px-1 max-w-full">
             <Button
-              onClick={running ? pause : start}
+              onClick={() => {
+                if (!activeBlock) return
+                if (running && usingActiveBlock) {
+                  pause()
+                  return
+                }
+                if (status === 'paused' && usingActiveBlock) {
+                  resume()
+                  return
+                }
+                start(activeBlock.minutes, activeBlock.label)
+              }}
               disabled={!activeBlock}
               className="shrink-0 gap-2"
             >

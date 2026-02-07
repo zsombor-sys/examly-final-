@@ -6,6 +6,7 @@ import { getOpenAIModels } from '@/lib/openaiModels'
 import pdfParse from 'pdf-parse'
 import { getPlan, savePlan } from '@/app/api/plan/store'
 import { supabaseAdmin } from '@/lib/supabaseServer'
+import { parseAiBlocks } from '@/lib/parseAiBlocks'
 
 export const runtime = 'nodejs'
 
@@ -174,19 +175,25 @@ function buildSystemPrompt() {
   return `
 You are Umenify.
 
-Return ONLY a JSON object that matches this shape:
+Output EXACTLY in this format and nothing else:
+<JSON>
 {
   "title": string,
   "language": "Hungarian"|"English",
   "exam_date": string|null,
   "confidence": number,
   "quick_summary": string,
-  "study_notes": string,
   "flashcards": [{"front": string, "back": string}],
   "daily_plan": [{"day": string, "focus": string, "minutes": number, "tasks": string[], "blocks": [{"type":"study"|"break","minutes":number,"label":string}]}],
   "practice_questions": [{"id": string, "type":"mcq"|"short", "question": string, "options": string[]|null, "answer": string|null, "explanation": string|null}],
   "notes": string[]
 }
+<\/JSON>
+<CONTENT>
+(markdown study notes here)
+<\/CONTENT>
+
+JSON MUST be strict: double quotes only, no trailing commas.
 
 LANGUAGE:
 - If the user prompt is Hungarian, output Hungarian and set language="Hungarian". Otherwise English.
@@ -435,8 +442,15 @@ export async function POST(req: Request) {
     })
 
     const raw = await callModel(client, textModel, prompt, textFromFiles, [], maxTokens)
-    const parsed = safeParseJson(raw)
-    const plan = normalizePlan(parsed)
+    const { error: parseErr, meta, content } = parseAiBlocks(raw)
+    if (parseErr || !meta || !content) {
+      const snippet = String(raw || '').slice(0, 300)
+      return NextResponse.json(
+        { error: parseErr || 'Invalid AI response format', snippet },
+        { status: 500, headers: { 'cache-control': 'no-store' } }
+      )
+    }
+    const plan = normalizePlan({ ...(meta || {}), study_notes: content })
 
     const saved = savePlan(user.id, plan.title, plan)
     await setCurrentPlanBestEffort(user.id, saved.id)

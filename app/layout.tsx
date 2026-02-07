@@ -1,6 +1,7 @@
 import './globals.css'
 import 'katex/dist/katex.min.css'
 import type { Metadata } from 'next'
+import Script from 'next/script'
 import PomodoroDock from "@/components/PomodoroDock"
 import Navbar from '@/components/Navbar'
 import { BRAND_NAME, BRAND_TAGLINE } from '@/lib/brand'
@@ -29,6 +30,14 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
             </div>
           </div>
         </footer>
+
+        <Script
+          strategy="afterInteractive"
+          src="https://plausible.io/js/pa-iaW_HdUIHs9BEThk16j5Z.js"
+        />
+        <Script id="plausible-init" strategy="afterInteractive">
+          {"window.plausible=window.plausible||function(){(plausible.q=plausible.q||[]).push(arguments)},plausible.init=plausible.init||function(i){plausible.o=i||{}};\nplausible.init()"}
+        </Script>
       </body>
     </html>
   )

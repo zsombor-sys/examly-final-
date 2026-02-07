@@ -444,13 +444,17 @@ function Inner() {
           if (processed > 0) {
             const retry = await authedFetch('/api/plan', { method: 'POST', body: form })
             json = await retry.json().catch(() => ({} as any))
-            if (!retry.ok) throw new Error(json?.error ?? `Generation failed (${retry.status})`)
+            if (!retry.ok) {
+              const message = json?.details || json?.error || json?.message
+              throw new Error(message ?? `Generation failed (${retry.status})`)
+            }
             break
           }
           await new Promise((r) => setTimeout(r, 2000))
         }
       } else if (!res.ok) {
-        throw new Error(json?.error ?? `Generation failed (${res.status})`)
+        const message = json?.details || json?.error || json?.message
+        throw new Error(message ?? `Generation failed (${res.status})`)
       }
 
       const r = (json?.result ?? null) as PlanResult | null

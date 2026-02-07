@@ -1,4 +1,5 @@
 import { NextResponse } from 'next/server'
+import { z } from 'zod'
 import { requireUser } from '@/lib/authServer'
 import { consumeGeneration, entitlementSnapshot, getProfileStrict } from '@/lib/creditsServer'
 import OpenAI from 'openai'
@@ -10,6 +11,36 @@ import { supabaseAdmin } from '@/lib/supabaseServer'
 export const runtime = 'nodejs'
 
 const BUCKET = 'uploads'
+
+const planRequestSchema = z.object({
+  prompt: z.string().max(12_000).optional().default(''),
+  planId: z.string().max(128).optional().default(''),
+})
+
+const planAiSchema = z.object({
+  title: z.string(),
+  language: z.string(),
+  exam_date: z.string().nullable(),
+  confidence: z.number(),
+  quick_summary: z.string(),
+  study_notes_markdown: z.string(),
+  plan_markdown: z.string().nullable(),
+})
+
+const planAiJsonSchema = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    title: { type: 'string' },
+    language: { type: 'string' },
+    exam_date: { type: ['string', 'null'] },
+    confidence: { type: 'number' },
+    quick_summary: { type: 'string' },
+    study_notes_markdown: { type: 'string' },
+    plan_markdown: { type: ['string', 'null'] },
+  },
+  required: ['title', 'language', 'exam_date', 'confidence', 'quick_summary', 'study_notes_markdown', 'plan_markdown'],
+}
 
 function isBucketMissingError(err: any) {
   const msg = String(err?.message || err?.error?.message || '').toLowerCase()
@@ -139,55 +170,75 @@ function normalizePlan(obj: any) {
   return out
 }
 
-function parseJsonLoose(raw: string) {
-  let s = String(raw ?? '').trim()
-  if (!s) throw new Error('AI_JSON_EMPTY')
+async function parsePlanRequest(req: Request) {
+  const contentType = req.headers.get('content-type') || ''
+  let raw: any = null
 
-  if (s.startsWith('```')) {
-    s = s.replace(/^```[a-zA-Z]*\s*/, '').replace(/```$/s, '').trim()
-  }
-
-  const start = s.indexOf('{')
-  if (start === -1) throw new Error('AI_JSON_NO_OBJECT')
-
-  let inString = false
-  let escaped = false
-  let depth = 0
-  let end = -1
-
-  for (let i = start; i < s.length; i++) {
-    const ch = s[i]
-    if (inString) {
-      if (escaped) {
-        escaped = false
-        continue
-      }
-      if (ch === '\\') {
-        escaped = true
-        continue
-      }
-      if (ch === '"') {
-        inString = false
-      }
-      continue
-    }
-    if (ch === '"') {
-      inString = true
-      continue
-    }
-    if (ch === '{') depth++
-    if (ch === '}') {
-      depth--
-      if (depth === 0) {
-        end = i + 1
-        break
-      }
+  if (contentType.includes('application/json')) {
+    raw = await req.json().catch(() => null)
+  } else {
+    const form = await req.formData()
+    raw = {
+      prompt: form.get('prompt'),
+      planId: form.get('planId'),
     }
   }
 
-  if (end === -1) throw new Error('AI_JSON_UNBALANCED')
-  const extracted = s.slice(start, end)
-  return JSON.parse(extracted)
+  const input = {
+    prompt: raw?.prompt != null ? String(raw.prompt) : '',
+    planId: raw?.planId != null ? String(raw.planId) : '',
+  }
+
+  const parsed = planRequestSchema.safeParse(input)
+  if (!parsed.success) {
+    return { ok: false as const, error: parsed.error }
+  }
+
+  return {
+    ok: true as const,
+    value: {
+      prompt: parsed.data.prompt.trim(),
+      planId: parsed.data.planId.trim() || null,
+    },
+  }
+}
+
+function safeJsonParse(raw: string) {
+  const text = String(raw ?? '').trim()
+  if (!text) throw new Error('AI_JSON_EMPTY')
+  const cleaned = text.startsWith('```') ? text.replace(/^```[a-zA-Z]*\s*/, '').replace(/```$/s, '').trim() : text
+  return JSON.parse(cleaned)
+}
+
+async function repairAiJson(client: OpenAI, model: string, raw: string) {
+  const resp = await client.chat.completions.create({
+    model,
+    messages: [
+      { role: 'system', content: 'Fix the input into valid JSON that matches the schema. Return ONLY JSON.' },
+      { role: 'user', content: raw },
+    ],
+    temperature: 0,
+    response_format: {
+      type: 'json_schema',
+      json_schema: {
+        name: 'study_plan_response',
+        schema: planAiJsonSchema,
+      },
+    },
+  })
+
+  const fixed = resp.choices?.[0]?.message?.content ?? ''
+  const parsed = safeJsonParse(fixed)
+  return planAiSchema.parse(parsed)
+}
+
+async function parseAiResponse(client: OpenAI, model: string, raw: string) {
+  try {
+    const parsed = safeJsonParse(raw)
+    return planAiSchema.parse(parsed)
+  } catch (err) {
+    return await repairAiJson(client, model, raw)
+  }
 }
 
 function buildSystemPrompt() {
@@ -258,28 +309,7 @@ async function callModel(
       type: 'json_schema',
       json_schema: {
         name: 'study_plan_response',
-        schema: {
-          type: 'object',
-          additionalProperties: false,
-          properties: {
-            title: { type: 'string' },
-            language: { type: 'string' },
-            exam_date: { type: ['string', 'null'] },
-            confidence: { type: 'number' },
-            quick_summary: { type: 'string' },
-            study_notes_markdown: { type: 'string' },
-            plan_markdown: { type: ['string', 'null'] },
-          },
-          required: [
-            'title',
-            'language',
-            'exam_date',
-            'confidence',
-            'quick_summary',
-            'study_notes_markdown',
-            'plan_markdown',
-          ],
-        },
+        schema: planAiJsonSchema,
       },
     },
     max_tokens: maxTokens,
@@ -332,6 +362,29 @@ async function setCurrentPlanBestEffort(userId: string, planId: string) {
   }
 }
 
+async function savePlanToDbBestEffort(row: { id: string; title: string; created_at: string; result: any; userId: string }) {
+  try {
+    const sb = supabaseAdmin()
+    await sb
+      .from('plans')
+      .upsert(
+        {
+          id: row.id,
+          user_id: row.userId,
+          title: row.title,
+          created_at: row.created_at,
+          result: row.result,
+        },
+        { onConflict: 'id' }
+      )
+  } catch (err: any) {
+    console.warn('plan.save db failed', {
+      id: row.id,
+      message: err?.message ?? 'unknown',
+    })
+  }
+}
+
 /** GET /api/plan?id=... */
 export async function GET(req: Request) {
   try {
@@ -355,6 +408,17 @@ export async function POST(req: Request) {
   try {
     const user = await requireUser(req)
 
+    const parsedRequest = await parsePlanRequest(req)
+    if (!parsedRequest.ok) {
+      return NextResponse.json(
+        { error: 'INVALID_REQUEST', details: parsedRequest.error.issues },
+        { status: 400, headers: { 'cache-control': 'no-store' } }
+      )
+    }
+
+    const promptRaw = parsedRequest.value.prompt
+    const planId = parsedRequest.value.planId
+
     // ✅ PRECHECK: ne generáljunk ha nincs entitlement
     const profile = await getProfileStrict(user.id)
     const ent = entitlementSnapshot(profile as any)
@@ -365,11 +429,7 @@ export async function POST(req: Request) {
       )
     }
 
-    const form = await req.formData()
-    const promptRaw = String(form.get('prompt') ?? '')
-
     // Files are uploaded client-side to Supabase Storage; server downloads by path.
-    const planId = String(form.get('planId') ?? '').trim()
 
     const openAiKey = process.env.OPENAI_API_KEY
     if (!openAiKey) {
@@ -401,8 +461,15 @@ export async function POST(req: Request) {
       const prompt =
         promptRaw.trim() ||
         (hasMaterials ? 'Create structured study notes and a study plan based on the uploaded materials.' : '')
+      console.log('plan.generate request', {
+        planId,
+        files: fileNames.length,
+        extracted_chars: 0,
+        prompt_chars: prompt.length,
+      })
       const plan = mock(prompt, fileNames)
       const saved = savePlan(user.id, plan.title, plan)
+      await savePlanToDbBestEffort({ ...saved, userId: user.id })
       await setCurrentPlanBestEffort(user.id, saved.id)
 
       // ✅ SUCCESS -> consume only now
@@ -461,6 +528,12 @@ export async function POST(req: Request) {
     const { textModel, visionModel } = getOpenAIModels()
     const maxTokensRaw = Number.parseInt(process.env.MAX_OUTPUT_TOKENS ?? '1200', 10)
     const maxTokens = Number.isFinite(maxTokensRaw) ? maxTokensRaw : 1200
+    console.log('plan.generate request', {
+      planId,
+      files: fileNames.length,
+      extracted_chars: textFromFiles.length,
+      prompt_chars: prompt.length,
+    })
     console.log('plan.generate models', {
       text_model: textModel,
       vision_model: visionModel,
@@ -472,29 +545,19 @@ export async function POST(req: Request) {
 
     const raw = await callModel(client, textModel, prompt, textFromFiles, [], maxTokens)
     console.log('[plan.ai]', { requestId, raw_len: raw.length })
-    let parsed: any
+    let parsed: z.infer<typeof planAiSchema>
     try {
-      parsed = parseJsonLoose(raw)
-      const requiredKeys = [
-        'title',
-        'language',
-        'exam_date',
-        'confidence',
-        'quick_summary',
-        'study_notes_markdown',
-        'plan_markdown',
-      ]
-      for (const k of requiredKeys) {
-        if (!(k in parsed)) throw new Error('AI_JSON_SCHEMA_INVALID')
-      }
+      parsed = await parseAiResponse(client, textModel, raw)
     } catch (err: any) {
       console.error('[plan.parse_failed]', {
+        requestId,
         error: err?.message ?? 'AI_JSON_INVALID',
+        stack: err?.stack,
         rawSnippet: String(raw || '').slice(0, 800),
       })
       return NextResponse.json(
-        { error: 'PLAN_GENERATE_FAILED', reason: 'AI_JSON_INVALID' },
-        { status: 400, headers: { 'cache-control': 'no-store' } }
+        { error: 'PLAN_GENERATE_FAILED', details: 'AI_JSON_INVALID' },
+        { status: 500, headers: { 'cache-control': 'no-store' } }
       )
     }
 
@@ -509,6 +572,7 @@ export async function POST(req: Request) {
     })
 
     const saved = savePlan(user.id, plan.title, plan)
+    await savePlanToDbBestEffort({ ...saved, userId: user.id })
     await setCurrentPlanBestEffort(user.id, saved.id)
 
     // ✅ SUCCESS -> consume only now
@@ -522,8 +586,12 @@ export async function POST(req: Request) {
       message: e?.message,
       stack: e?.stack,
     })
+    if (Number(e?.status) === 401 || Number(e?.status) === 403) {
+      return NextResponse.json({ error: 'UNAUTHORIZED' }, { status: 401, headers: { 'cache-control': 'no-store' } })
+    }
+    const details = String(e?.message || 'Server error').slice(0, 300)
     return NextResponse.json(
-      { error: 'PLAN_GENERATE_FAILED', requestId, message: e?.message ?? 'Server error' },
+      { error: 'PLAN_GENERATE_FAILED', details },
       { status: 500, headers: { 'cache-control': 'no-store' } }
     )
   }

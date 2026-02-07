@@ -6,7 +6,6 @@ import { getOpenAIModels } from '@/lib/openaiModels'
 import pdfParse from 'pdf-parse'
 import { getPlan, savePlan } from '@/app/api/plan/store'
 import { supabaseAdmin } from '@/lib/supabaseServer'
-import { parseAiBlocks } from '@/lib/parseAiBlocks'
 
 export const runtime = 'nodejs'
 
@@ -84,37 +83,6 @@ const OUTPUT_TEMPLATE = {
   notes: [] as string[],
 }
 
-function safeParseJson(text: string) {
-  const raw = String(text ?? '')
-  if (!raw.trim()) throw new Error('Model returned empty response (no JSON).')
-
-  const extractJson = (s: string) => {
-    const m = s.match(/\{[\s\S]*\}/)
-    return m ? m[0] : s
-  }
-
-  const repairBackslashesForJson = (s: string) => {
-    return s.replace(/\\(?!["\\/bfnrtu])/g, '\\\\')
-  }
-
-  try {
-    return JSON.parse(raw)
-  } catch {}
-
-  const extracted = extractJson(raw)
-  try {
-    return JSON.parse(extracted)
-  } catch {}
-
-  const repaired = repairBackslashesForJson(extracted)
-  try {
-    return JSON.parse(repaired)
-  } catch {
-    const snippet = repaired.slice(0, 700)
-    throw new Error(`Model did not return valid JSON (after repair). Snippet:\n${snippet}`)
-  }
-}
-
 function normalizePlan(obj: any) {
   const out: any = { ...OUTPUT_TEMPLATE, ...(obj ?? {}) }
 
@@ -175,30 +143,12 @@ function buildSystemPrompt() {
   return `
 You are Umenify.
 
-Output EXACTLY in this format and nothing else:
-<JSON>
-{
-  "title": string,
-  "language": "Hungarian"|"English",
-  "exam_date": string|null,
-  "confidence": number,
-  "quick_summary": string,
-  "flashcards": [{"front": string, "back": string}],
-  "daily_plan": [{"day": string, "focus": string, "minutes": number, "tasks": string[], "blocks": [{"type":"study"|"break","minutes":number,"label":string}]}],
-  "practice_questions": [{"id": string, "type":"mcq"|"short", "question": string, "options": string[]|null, "answer": string|null, "explanation": string|null}],
-  "notes": string[]
-}
-<\/JSON>
-<CONTENT>
-(markdown study notes here)
-<\/CONTENT>
-
-JSON MUST be strict: double quotes only, no trailing commas.
+Return ONLY JSON matching the provided schema. No markdown fences.
 
 LANGUAGE:
 - If the user prompt is Hungarian, output Hungarian and set language="Hungarian". Otherwise English.
 
-STYLE (study_notes):
+STYLE (study_notes_markdown):
 - "Iskolai jegyzet" stílus.
 - Strukturált Markdown: cím, alcímek, bulletpontok.
 - Rövid definíciók.
@@ -253,7 +203,34 @@ async function callModel(
       { role: 'user', content: userContent as any },
     ],
     temperature: 0.3,
-    response_format: { type: 'json_object' },
+    response_format: {
+      type: 'json_schema',
+      json_schema: {
+        name: 'study_plan_response',
+        schema: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            title: { type: 'string' },
+            language: { type: 'string' },
+            exam_date: { type: ['string', 'null'] },
+            confidence: { type: 'number' },
+            quick_summary: { type: 'string' },
+            study_notes_markdown: { type: 'string' },
+            plan_markdown: { type: ['string', 'null'] },
+          },
+          required: [
+            'title',
+            'language',
+            'exam_date',
+            'confidence',
+            'quick_summary',
+            'study_notes_markdown',
+            'plan_markdown',
+          ],
+        },
+      },
+    },
     max_tokens: maxTokens,
   })
 
@@ -442,15 +419,25 @@ export async function POST(req: Request) {
     })
 
     const raw = await callModel(client, textModel, prompt, textFromFiles, [], maxTokens)
-    const { error: parseErr, meta, content } = parseAiBlocks(raw)
-    if (parseErr || !meta || !content) {
-      const snippet = String(raw || '').slice(0, 300)
+    let parsed: any
+    try {
+      parsed = JSON.parse(raw)
+    } catch {
+      const snippet = String(raw || '').slice(0, 500)
       return NextResponse.json(
-        { error: parseErr || 'Invalid AI response format', snippet },
+        { error: 'AI_JSON_PARSE_FAILED', snippet },
         { status: 500, headers: { 'cache-control': 'no-store' } }
       )
     }
-    const plan = normalizePlan({ ...(meta || {}), study_notes: content })
+    const plan = normalizePlan({
+      title: parsed?.title,
+      language: parsed?.language,
+      exam_date: parsed?.exam_date ?? null,
+      confidence: parsed?.confidence,
+      quick_summary: parsed?.quick_summary,
+      study_notes: parsed?.study_notes_markdown ?? '',
+      notes: parsed?.plan_markdown ? [String(parsed.plan_markdown)] : [],
+    })
 
     const saved = savePlan(user.id, plan.title, plan)
     await setCurrentPlanBestEffort(user.id, saved.id)

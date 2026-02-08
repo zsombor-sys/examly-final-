@@ -416,8 +416,6 @@ type SavePlanRow = {
   language?: string | null
   created_at: string
   result: any
-  credits_charged?: number | null
-  generation_id?: string | null
 }
 
 async function savePlanToDbBestEffort(row: SavePlanRow) {
@@ -431,19 +429,10 @@ async function savePlanToDbBestEffort(row: SavePlanRow) {
       language: row.language ?? null,
       created_at: row.created_at,
       result: row.result,
-      credits_charged: row.credits_charged ?? null,
     }
-    if (row.generation_id) payload.generation_id = row.generation_id
     const { error } = await sb.from(TABLE_PLANS).upsert(payload, { onConflict: 'id' })
     if (error) {
-      const msg = String(error?.message ?? '')
-      if (msg.includes('column') && msg.includes('generation_id')) {
-        delete payload.generation_id
-        const { error: retryErr } = await sb.from(TABLE_PLANS).upsert(payload, { onConflict: 'id' })
-        if (retryErr) throw retryErr
-      } else {
-        throw error
-      }
+      throw error
     }
   } catch (err: any) {
     logSupabaseError('plan.save', err)
@@ -568,7 +557,7 @@ export async function POST(req: Request) {
       (materials.fileNames.length ? 'Create structured study notes and a study plan based on the uploaded materials.' : '')
 
     try {
-      cost = calcCreditsFromFileCount(materials.total || 0)
+      cost = calcCreditsFromFileCount(materials.imageCount || 0)
     } catch {
       return NextResponse.json(
         { code: 'TOO_MANY_FILES', message: 'Too many files' },
@@ -588,41 +577,11 @@ export async function POST(req: Request) {
       files: materials.total,
       images: materials.imageCount,
       extracted_chars: materials.textFromFiles.length,
-      credits_needed: cost,
+      imageCount: materials.imageCount,
+      creditsRequired: cost,
     })
 
     const sb = supabaseAdmin()
-    let existingPlan: any = null
-    let existingErr: any = null
-    ;({ data: existingPlan, error: existingErr } = await sb
-      .from(TABLE_PLANS)
-      .select('id, generation_id, credits_charged')
-      .eq('user_id', user.id)
-      .eq('id', idToUse)
-      .maybeSingle())
-    if (existingErr) {
-      const msg = String(existingErr?.message ?? '')
-      if (msg.includes('column') && msg.includes('generation_id')) {
-        ;({ data: existingPlan, error: existingErr } = await sb
-          .from(TABLE_PLANS)
-          .select('id, credits_charged')
-          .eq('user_id', user.id)
-          .eq('id', idToUse)
-          .maybeSingle())
-      }
-    }
-    if (existingErr) {
-      logSupabaseError('plan.select_existing', existingErr)
-      throwIfMissingTable(existingErr, TABLE_PLANS)
-      throw existingErr
-    }
-    const existingGenerationId = existingPlan?.generation_id
-      ? String(existingPlan.generation_id)
-      : existingPlan?.id
-        ? String(existingPlan.id)
-        : null
-    const alreadyCharged = Number(existingPlan?.credits_charged ?? 0) >= cost && cost > 0
-    const generationId = existingGenerationId || crypto.randomUUID()
 
     await savePlanToDbBestEffort({
       id: idToUse,
@@ -632,11 +591,9 @@ export async function POST(req: Request) {
       language: null,
       created_at: new Date().toISOString(),
       result: null,
-      generation_id: generationId,
-      credits_charged: alreadyCharged ? cost : null,
     })
 
-    if (!alreadyCharged && cost > 0) {
+    if (cost > 0) {
       try {
         const { error } = await sb.rpc('consume_credits', { user_id: user.id, cost })
         if (error) {
@@ -649,8 +606,6 @@ export async function POST(req: Request) {
             language: null,
             created_at: new Date().toISOString(),
             result: null,
-            generation_id: generationId,
-            credits_charged: null,
           })
           return NextResponse.json(
             { code: 'INSUFFICIENT_CREDITS', message: 'Insufficient credits' },
@@ -665,8 +620,6 @@ export async function POST(req: Request) {
           language: null,
           created_at: new Date().toISOString(),
           result: null,
-          generation_id: generationId,
-          credits_charged: cost,
         })
         console.log('plan.generate credits_charged', {
           requestId,
@@ -682,21 +635,12 @@ export async function POST(req: Request) {
           language: null,
           created_at: new Date().toISOString(),
           result: null,
-          generation_id: generationId,
-          credits_charged: null,
         })
         return NextResponse.json(
           { code: 'INSUFFICIENT_CREDITS', message: 'Insufficient credits' },
           { status: 402, headers: { 'cache-control': 'no-store' } }
         )
       }
-    }
-    if (alreadyCharged && cost > 0) {
-      console.log('plan.generate credits_skipped', {
-        requestId,
-        planId: idToUse,
-        credits_charged: cost,
-      })
     }
 
     if (!openAiKey) {
@@ -709,8 +653,6 @@ export async function POST(req: Request) {
         language: fallback.language,
         created_at: new Date().toISOString(),
         result: fallback,
-        generation_id: generationId,
-        credits_charged: alreadyCharged ? cost : cost > 0 ? cost : 0,
       })
       await setCurrentPlanBestEffort(user.id, idToUse)
       return NextResponse.json({ id: idToUse }, { headers: { 'cache-control': 'no-store', 'x-examly-plan': 'mock' } })
@@ -781,8 +723,6 @@ export async function POST(req: Request) {
           language: null,
           created_at: new Date().toISOString(),
           result: null,
-          generation_id: generationId,
-          credits_charged: alreadyCharged ? cost : cost > 0 ? cost : 0,
         })
         return NextResponse.json(
           { code: 'NOTES_JSON_FAILED', message: 'Failed to parse AI JSON' },
@@ -820,8 +760,6 @@ export async function POST(req: Request) {
       language: plan.language,
       created_at: new Date().toISOString(),
       result: plan,
-      generation_id: generationId,
-      credits_charged: alreadyCharged ? cost : cost > 0 ? cost : 0,
     })
     await setCurrentPlanBestEffort(user.id, idToUse)
 

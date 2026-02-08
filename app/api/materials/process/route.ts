@@ -3,7 +3,7 @@ import { requireUser } from '@/lib/authServer'
 import { supabaseAdmin } from '@/lib/supabaseServer'
 import OpenAI from 'openai'
 import pdfParse from 'pdf-parse'
-import { getOpenAIModels } from '@/lib/openaiModels'
+const MODEL = 'gpt-4.1'
 
 export const runtime = 'nodejs'
 
@@ -58,7 +58,7 @@ async function processOne(
     } else {
       extracted = buf.toString('utf8')
     }
-    extracted = extracted.slice(0, 120_000)
+    extracted = extracted.slice(0, 10_000)
     await sb
       .from('materials')
       .update({ status: 'processed', extracted_text: extracted || null, processed_at: new Date().toISOString(), processing_error: null })
@@ -99,12 +99,11 @@ export async function POST(req: Request) {
       )
     }
 
-    const { visionModel } = getOpenAIModels()
     console.log('materials.process start', {
       planId,
       count: list.length,
       images: imageCount,
-      vision_model: visionModel,
+      vision_model: MODEL,
     })
     const apiKey = process.env.OPENAI_API_KEY
     const openai = apiKey ? new OpenAI({ apiKey }) : null
@@ -115,9 +114,9 @@ export async function POST(req: Request) {
         chunk.map(async (item) => {
           // retry once
           try {
-            await processOne(sb, openai as OpenAI, visionModel, item)
+            await processOne(sb, openai as OpenAI, MODEL, item)
           } catch {
-            await processOne(sb, openai as OpenAI, visionModel, item)
+            await processOne(sb, openai as OpenAI, MODEL, item)
           }
         })
       )

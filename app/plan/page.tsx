@@ -137,6 +137,24 @@ function shortPrompt(p: string) {
   return t.length > 120 ? t.slice(0, 120) + '…' : t
 }
 
+function countImages(list: File[]) {
+  return list.filter((f) => f.type.startsWith('image/') || /\.(png|jpe?g|webp)$/i.test(f.name)).length
+}
+
+function clampImages(list: File[], maxImages: number) {
+  const out: File[] = []
+  let images = 0
+  for (const f of list) {
+    const isImg = f.type.startsWith('image/') || /\.(png|jpe?g|webp)$/i.test(f.name)
+    if (isImg) {
+      if (images >= maxImages) continue
+      images += 1
+    }
+    out.push(f)
+  }
+  return out
+}
+
 export default function PlanPage() {
   return (
     <AuthGate requireEntitlement={true}>
@@ -416,11 +434,11 @@ function Inner() {
 
   async function generate() {
     setError(null)
-    if (files.length > 15) {
-      setError('You can upload up to 15 files.')
+    if (imageCount > 15) {
+      setError('You can upload up to 15 images.')
       return
     }
-    const cost = computePlanCost(files.length || 0)
+    const cost = computePlanCost(imageCount || 0)
     if (credits != null && credits < cost) {
       setError(`Not enough credits. This will cost ${cost} credits.`)
       return
@@ -456,6 +474,7 @@ function Inner() {
         (files.length > 0 ? 'Create structured study notes and a study plan based on the uploaded materials.' : '')
       form.append('prompt', promptToSend)
       form.append('planId', nextPlanId)
+      form.append('required_credits', String(cost))
 
       const res = await authedFetch('/api/plan', { method: 'POST', body: form })
       let json = await res.json().catch(() => ({} as any))
@@ -480,6 +499,10 @@ function Inner() {
       } else if (!res.ok) {
         const message = json?.details || json?.error || json?.message
         throw new Error(message ?? `Generation failed (${res.status})`)
+      }
+      if (json?.ok === false) {
+        setError(json?.error || 'Generation failed.')
+        return
       }
 
       const serverId = typeof json?.id === 'string' ? (json.id as string) : null
@@ -546,9 +569,10 @@ function Inner() {
   const processedCount = materials.filter((m) => m.status === 'processed').length
   const failedCount = materials.filter((m) => m.status === 'failed').length
   const canGenerate = !loading && !isGenerating && (prompt.trim().length >= 6 || files.length > 0)
+  const imageCount = countImages(files)
   const costEstimate = (() => {
     try {
-      return computePlanCost(files.length || 0)
+      return computePlanCost(imageCount || 0)
     } catch {
       return null
     }
@@ -627,9 +651,10 @@ function Inner() {
               multiple
               onChange={(e) => {
                 const next = Array.from(e.target.files ?? [])
-                if (next.length > 15) {
-                  setError('You can upload up to 15 files.')
-                  setFiles(next.slice(0, 15))
+                const nextImages = countImages(next)
+                if (nextImages > 15) {
+                  setError('You can upload up to 15 images.')
+                  setFiles(clampImages(next, 15))
                 } else {
                   setFiles(next)
                 }
@@ -644,7 +669,7 @@ function Inner() {
 
           {files.length ? <div className="mt-2 text-xs text-white/60">Selected: {files.length} file(s)</div> : null}
           <div className="mt-2 text-xs text-white/60">
-            {costEstimate == null ? 'Max 15 files.' : `This will cost ${costEstimate} credits.`}
+            {costEstimate == null ? 'Max 15 images.' : `This will cost ${costEstimate} credits.`}
           </div>
           {isGenerating && totalFiles > 0 ? (
             <div className="mt-2 text-xs text-white/60">

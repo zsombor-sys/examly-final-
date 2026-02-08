@@ -1,4 +1,4 @@
 export function getOpenAIModels() {
-  const model = process.env.OPENAI_MODEL || 'gpt-5.1-instant'
+  const model = 'gpt-4.1'
   return { visionModel: model, textModel: model }
 }

@@ -103,7 +103,7 @@ Rules:
       `User request:\n${prompt}\n\n` +
       `Guidelines:\n- 15-20 questions (minimum 15)\n- Mix MCQ and short answer\n- Provide answers and explanations\n- duration_minutes 15-25 unless user specifies`
 
-    const model = process.env.OPENAI_MODEL || 'gpt-5.1-instant'
+    const model = 'gpt-4.1'
 
     const resp = await openai.responses.create({
       model,

@@ -9,11 +9,15 @@ import { supabaseAdmin } from '@/lib/supabaseServer'
 
 export const runtime = 'nodejs'
 
+const MODEL = 'gpt-4.1'
+const MAX_OUTPUT_TOKENS = 1100
+
 const BUCKET = 'uploads'
 
 const planRequestSchema = z.object({
   prompt: z.string().max(12_000).optional().default(''),
   planId: z.string().max(128).optional().default(''),
+  required_credits: z.number().int().min(0).max(3).optional().nullable(),
 })
 
 const notesSchema = z.object({
@@ -290,6 +294,10 @@ async function parsePlanRequest(req: Request) {
   const input = {
     prompt: raw?.prompt != null ? String(raw.prompt) : '',
     planId: raw?.planId != null ? String(raw.planId) : '',
+    required_credits:
+      raw?.required_credits != null && String(raw.required_credits).trim() !== ''
+        ? Number(raw.required_credits)
+        : null,
   }
 
   const parsed = planRequestSchema.safeParse(input)
@@ -302,6 +310,7 @@ async function parsePlanRequest(req: Request) {
     value: {
       prompt: parsed.data.prompt.trim(),
       planId: parsed.data.planId.trim() || null,
+      requiredCredits: parsed.data.required_credits ?? null,
     },
   }
 }
@@ -347,6 +356,11 @@ function safeJsonParse(text: string) {
   return JSON.parse(first)
 }
 
+function isJsonParseFailure(err: any) {
+  const msg = String(err?.message || '')
+  return msg === 'AI_JSON_PARSE_FAILED' || msg === 'AI_JSON_INVALID' || msg === 'AI_JSON_EMPTY'
+}
+
 async function callJsonWithRetries<T>(
   client: OpenAI,
   model: string,
@@ -368,6 +382,7 @@ async function callJsonWithRetries<T>(
         { role: 'user', content: userMsg },
       ],
       temperature: 0.2,
+      max_tokens: MAX_OUTPUT_TOKENS,
       response_format: {
         type: 'json_schema',
         json_schema: {
@@ -415,6 +430,7 @@ async function callJson<T>(
           { role: 'user', content: user },
         ],
         temperature: 0.2,
+        max_tokens: MAX_OUTPUT_TOKENS,
         response_format: {
           type: 'json_schema',
           json_schema: {
@@ -459,6 +475,7 @@ async function extractTextFromImages(
         { role: 'user', content: content as any },
       ],
       temperature: 0,
+      max_tokens: MAX_OUTPUT_TOKENS,
     })
     const txt = String(resp.choices?.[0]?.message?.content ?? '').trim()
     if (txt) chunks.push(txt)
@@ -528,7 +545,7 @@ async function generateNotesStep(
 ) {
   const systemText = [
     'Irj reszletes, strukturalt tanulasi jegyzetet magyarul.',
-    'Legalabb 900 szo legyen.',
+    'Legyen kb. 450-650 szo, tomor de teljes.',
     'Hasznalj "##" cimsorokat es bullet listakat.',
     'Hasznald ezeket a szakaszokat pontosan:',
     '## Definiciok',
@@ -552,6 +569,7 @@ async function generateNotesStep(
       { role: 'user', content: userText },
     ],
     temperature: 0.2,
+    max_tokens: MAX_OUTPUT_TOKENS,
   })
   const rawNotesText = String(textResp.choices?.[0]?.message?.content ?? '').trim()
 
@@ -680,7 +698,7 @@ function validateNotes(notesJson: z.infer<typeof notesSchema>) {
   if (!String(notesJson?.plan?.title || '').trim()) return false
   if (!String(notesJson?.plan?.summary || '').trim()) return false
   const studyNotes = buildStudyNotesFromSections(sections)
-  if (countWords(studyNotes) < 900) return false
+  if (countWords(studyNotes) < 450) return false
   if (!/##\s+/.test(studyNotes)) return false
   if (!/(^|\n)\s*[-*]\s+/.test(studyNotes)) return false
   return true
@@ -727,7 +745,7 @@ function buildNotesShell() {
   ]
   let text = parts.join('\n')
   const filler = ' Ez a resz a feltevesekre es osszegzesre epul, rovid, tanulhato allitasokkal.'
-  while (countWords(text) < 930) text += filler
+  while (countWords(text) < 520) text += filler
   return text
 }
 
@@ -976,8 +994,12 @@ export async function GET(req: Request) {
 /** POST /api/plan : generate + SAVE + set current */
 export async function POST(req: Request) {
   const requestId = crypto.randomUUID()
+  let cost = 0
+  let creditsConsumed = false
+  let userId: string | null = null
   try {
     const user = await requireUser(req)
+    userId = user.id
 
     const parsedRequest = await parsePlanRequest(req)
     if (!parsedRequest.ok) {
@@ -989,6 +1011,7 @@ export async function POST(req: Request) {
 
     const promptRaw = parsedRequest.value.prompt
     const planId = parsedRequest.value.planId
+    const requiredCredits = parsedRequest.value.requiredCredits
     const idToUse = planId || crypto.randomUUID()
 
     // Files are uploaded client-side to Supabase Storage; server downloads by path.
@@ -1012,7 +1035,7 @@ export async function POST(req: Request) {
       materials = loaded
     }
 
-    if (materials.total > 15) {
+    if (materials.imageCount > 15) {
       return NextResponse.json({ error: 'MAX_FILES_EXCEEDED' }, { status: 400, headers: { 'cache-control': 'no-store' } })
     }
 
@@ -1020,7 +1043,24 @@ export async function POST(req: Request) {
       promptRaw.trim() ||
       (materials.fileNames.length ? 'Create structured study notes and a study plan based on the uploaded materials.' : '')
 
-    const cost = computePlanCost(materials.total || materials.fileNames.length || 0)
+    cost = computePlanCost(materials.imageCount || 0)
+    if (requiredCredits != null && requiredCredits !== cost) {
+      return NextResponse.json(
+        { error: 'REQUIRED_CREDITS_MISMATCH', required: cost },
+        { status: 400, headers: { 'cache-control': 'no-store' } }
+      )
+    }
+
+    const refundCredits = async () => {
+      if (!creditsConsumed) return
+      try {
+        const sb = supabaseAdmin()
+        await sb.rpc('add_credits', { p_user_id: user.id, p_credits: cost })
+        creditsConsumed = false
+      } catch {
+        // ignore
+      }
+    }
 
     await savePlanToDbBestEffort({
       id: idToUse,
@@ -1055,6 +1095,7 @@ export async function POST(req: Request) {
         })
         return NextResponse.json({ error: 'INSUFFICIENT_CREDITS' }, { status: 402, headers: { 'cache-control': 'no-store' } })
       }
+      creditsConsumed = true
     } catch {
       await savePlanToDbBestEffort({
         id: idToUse,
@@ -1120,7 +1161,7 @@ export async function POST(req: Request) {
     }
 
     const client = new OpenAI({ apiKey: openAiKey })
-    const model = process.env.OPENAI_MODEL || 'gpt-4.1'
+    const model = MODEL
     const ocrText = materials.images.length ? await extractTextFromImages(client, model, materials.images) : ''
     const extractedText = [materials.textFromFiles, ocrText].filter(Boolean).join('\n\n').slice(0, 140_000)
 
@@ -1134,6 +1175,27 @@ export async function POST(req: Request) {
       rawNotesJson = notesResult.rawNotesJson
       rawNotesText = notesResult.rawNotesText
     } catch (err: any) {
+      if (isJsonParseFailure(err)) {
+        await refundCredits()
+        await savePlanToDbBestEffort({
+          id: idToUse,
+          userId: user.id,
+          title: 'Plan generation failed',
+          created_at: new Date().toISOString(),
+          result: null,
+          notes_json: null,
+          daily_json: null,
+          practice_json: null,
+          generation_status: 'error',
+          error: 'AI_JSON_PARSE_FAILED',
+          raw_notes_output: String(err?.raw || rawNotesText || '').slice(0, 20000),
+        })
+        return NextResponse.json(
+          { ok: false, error: 'AI_JSON_PARSE_FAILED' },
+          { status: 200, headers: { 'cache-control': 'no-store' } }
+        )
+      }
+      await refundCredits()
       await savePlanToDbBestEffort({
         id: idToUse,
         userId: user.id,
@@ -1166,6 +1228,27 @@ export async function POST(req: Request) {
     try {
       dailyJson = await generateDailyStep(client, model, notesStep, examDate)
     } catch (err: any) {
+      if (isJsonParseFailure(err)) {
+        await refundCredits()
+        await savePlanToDbBestEffort({
+          id: idToUse,
+          userId: user.id,
+          title: notesStep.title || notesStep.subject || 'Untitled plan',
+          created_at: new Date().toISOString(),
+          result: null,
+          notes_json: notesJson,
+          daily_json: null,
+          practice_json: null,
+          generation_status: 'error',
+          error: 'AI_JSON_PARSE_FAILED',
+          raw_notes_output: String(err?.raw || rawNotesJson || '').slice(0, 20000),
+        })
+        return NextResponse.json(
+          { ok: false, error: 'AI_JSON_PARSE_FAILED' },
+          { status: 200, headers: { 'cache-control': 'no-store' } }
+        )
+      }
+      await refundCredits()
       await savePlanToDbBestEffort({
         id: idToUse,
         userId: user.id,
@@ -1191,6 +1274,27 @@ export async function POST(req: Request) {
     try {
       practiceJson = await generatePracticeStep(client, model, notesStep)
     } catch (err: any) {
+      if (isJsonParseFailure(err)) {
+        await refundCredits()
+        await savePlanToDbBestEffort({
+          id: idToUse,
+          userId: user.id,
+          title: notesStep.title || notesStep.subject || 'Untitled plan',
+          created_at: new Date().toISOString(),
+          result: null,
+          notes_json: notesJson,
+          daily_json: dailyJson,
+          practice_json: null,
+          generation_status: 'error',
+          error: 'AI_JSON_PARSE_FAILED',
+          raw_notes_output: String(err?.raw || rawNotesJson || '').slice(0, 20000),
+        })
+        return NextResponse.json(
+          { ok: false, error: 'AI_JSON_PARSE_FAILED' },
+          { status: 200, headers: { 'cache-control': 'no-store' } }
+        )
+      }
+      await refundCredits()
       await savePlanToDbBestEffort({
         id: idToUse,
         userId: user.id,
@@ -1270,6 +1374,15 @@ export async function POST(req: Request) {
 
     return NextResponse.json({ id: idToUse }, { headers: { 'cache-control': 'no-store', 'x-examly-plan': 'ok' } })
   } catch (e: any) {
+    if (creditsConsumed) {
+      try {
+        const sb = supabaseAdmin()
+        if (userId) await sb.rpc('add_credits', { p_user_id: userId, p_credits: cost })
+        creditsConsumed = false
+      } catch {
+        // ignore
+      }
+    }
     console.error('[plan.error]', {
       requestId,
       name: e?.name,

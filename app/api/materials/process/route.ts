@@ -6,6 +6,7 @@ import pdfParse from 'pdf-parse'
 const MODEL = 'gpt-4.1'
 
 export const runtime = 'nodejs'
+export const maxDuration = 300
 
 function isImage(path: string, mime: string | null) {
   if (mime && mime.startsWith('image/')) return true
@@ -63,11 +64,14 @@ async function processOne(
       .from('materials')
       .update({ status: 'processed', extracted_text: extracted || null, processed_at: new Date().toISOString(), processing_error: null })
       .eq('id', item.id)
+    return { id: item.id, status: 'processed' as const, processing_error: null }
   } catch (err: any) {
+    const message = String(err?.message ?? 'Processing failed')
     await sb
       .from('materials')
-      .update({ status: 'failed', processing_error: String(err?.message ?? 'Processing failed') })
+      .update({ status: 'failed', processing_error: message })
       .eq('id', item.id)
+    return { id: item.id, status: 'failed' as const, processing_error: message }
   }
 }
 
@@ -89,8 +93,8 @@ export async function POST(req: Request) {
     if (error) throw error
 
     const list = Array.isArray(items) ? items : []
-    const maxImagesRaw = Number.parseInt(process.env.MAX_IMAGES_PER_REQUEST ?? '12', 10)
-    const maxImages = Number.isFinite(maxImagesRaw) ? maxImagesRaw : 12
+    const maxImagesRaw = Number.parseInt(process.env.MAX_IMAGES_PER_REQUEST ?? '15', 10)
+    const maxImages = Number.isFinite(maxImagesRaw) ? maxImagesRaw : 15
     const imageCount = list.filter((i) => isImage(i.file_path, i.mime_type)).length
     if (imageCount > maxImages) {
       return NextResponse.json(
@@ -107,23 +111,19 @@ export async function POST(req: Request) {
     })
     const apiKey = process.env.OPENAI_API_KEY
     const openai = apiKey ? new OpenAI({ apiKey }) : null
-    const concurrency = 2
-    for (let i = 0; i < list.length; i += concurrency) {
-      const chunk = list.slice(i, i + concurrency)
-      await Promise.all(
-        chunk.map(async (item) => {
-          // retry once
-          try {
-            await processOne(sb, openai as OpenAI, MODEL, item)
-          } catch {
-            await processOne(sb, openai as OpenAI, MODEL, item)
-          }
-        })
-      )
+    const results: Array<{ id: string; status: 'processed' | 'failed'; processing_error: string | null }> = []
+    for (const item of list) {
+      try {
+        const result = await processOne(sb, openai as OpenAI, MODEL, item)
+        results.push(result)
+      } catch (err: any) {
+        const message = String(err?.message ?? 'Processing failed')
+        results.push({ id: item.id, status: 'failed', processing_error: message })
+      }
     }
 
     console.log('materials.process done', { planId, processed: list.length })
-    return NextResponse.json({ ok: true, processed: list.length })
+    return NextResponse.json({ ok: true, processed: list.length, results })
   } catch (e: any) {
     console.error('materials.process error', e?.message ?? e)
     return NextResponse.json({ error: e?.message ?? 'Server error' }, { status: e?.status ?? 500 })

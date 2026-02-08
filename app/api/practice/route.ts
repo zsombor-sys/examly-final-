@@ -140,17 +140,6 @@ function normalizePractice(practice: z.infer<typeof practiceSchema>) {
   return { practice: { questions } }
 }
 
-function toPracticeQuestions(practice: { practice: { questions: Array<{ question: string; answer: string; type: string }> } }) {
-  return practice.practice.questions.map((q, i) => ({
-    id: `q${i + 1}`,
-    type: q.type === 'mcq' ? 'mcq' : 'short',
-    question: q.question,
-    options: q.type === 'true_false' ? ['True', 'False'] : null,
-    answer: q.answer,
-    explanation: null,
-  }))
-}
-
 async function fetchPlanResult(userId: string, planId: string) {
   const local = getPlan(userId, planId)
   if (local?.result) return local.result
@@ -172,6 +161,16 @@ async function fetchPlanResult(userId: string, planId: string) {
 function extractNotes(result: any): NotesPayload | null {
   const payload = result?.notes_payload
   if (payload?.study_notes) return payload as NotesPayload
+  if (Array.isArray(result?.notes?.sections)) {
+    const content = result.notes.sections.map((s: any) => String(s?.content ?? '')).join('\n\n')
+    return {
+      title: String(result?.plan?.title || 'Study notes'),
+      subject: String(result?.plan?.title || 'General'),
+      study_notes: content,
+      key_topics: Array.isArray(result?.plan?.topics) ? result.plan.topics.map((t: any) => String(t)) : [],
+      confidence: 0.6,
+    }
+  }
   if (result?.study_notes) {
     return {
       title: String(result.title || 'Study notes'),
@@ -213,7 +212,7 @@ export async function POST(req: Request) {
     if (!apiKey) return NextResponse.json({ error: 'OPENAI_KEY_MISSING' }, { status: 500 })
 
     const client = new OpenAI({ apiKey })
-    const model = process.env.OPENAI_MODEL || 'gpt-4.1'
+    const model = 'gpt-4.1'
     const system = [
       'Return ONLY valid JSON matching the schema. No markdown or extra text.',
       'Generate at least 12 questions total.',
@@ -253,9 +252,12 @@ export async function POST(req: Request) {
     }
 
     const normalized = normalizePractice(practice)
-    const practiceQuestions = toPracticeQuestions(normalized)
+    const practiceQuestions = normalized.practice.questions.map((q) => ({
+      question: q.question,
+      answer: q.answer,
+    }))
 
-    const nextResult = { ...result, practice_questions: practiceQuestions }
+    const nextResult = { ...result, practice: { questions: practiceQuestions } }
     updatePlan(user.id, planId, nextResult)
     try {
       const sb = supabaseAdmin()
@@ -270,7 +272,7 @@ export async function POST(req: Request) {
       }
     } catch {}
 
-    return NextResponse.json({ practice_questions: practiceQuestions }, { headers: { 'cache-control': 'no-store' } })
+    return NextResponse.json({ practice: { questions: practiceQuestions } }, { headers: { 'cache-control': 'no-store' } })
   } catch (e: any) {
     return NextResponse.json({ error: e?.message || 'Server error' }, { status: e?.status ?? 500 })
   }

@@ -5,13 +5,11 @@ import { useEffect, useState } from 'react'
 import AuthGate from '@/components/AuthGate'
 import { authedFetch } from '@/lib/authClient'
 import { supabase } from '@/lib/supabaseClient'
-import MarkdownMath from '@/components/MarkdownMath'
 import { ArrowLeft, Loader2 } from 'lucide-react'
 
 type PlanResult = {
-  title: string
-  language: string
-  study_notes: string
+  plan: { title: string }
+  notes: { sections: Array<{ title: string; content: string }> }
 }
 
 function historyKeyForUser(userId: string | null) {
@@ -143,11 +141,18 @@ function Inner() {
         ) : plan ? (
           <>
             <div className="text-xs uppercase tracking-[0.18em] text-white/55">Notes</div>
-            <h1 className="mt-2 text-2xl font-semibold tracking-tight text-white break-words">{plan.title || 'Notes'}</h1>
+            <h1 className="mt-2 text-2xl font-semibold tracking-tight text-white break-words">
+              {plan.plan?.title || 'Notes'}
+            </h1>
             <div className="mt-4 rounded-3xl border border-white/10 bg-white/[0.02] p-5 min-w-0 overflow-hidden">
               <div className="text-xs uppercase tracking-[0.18em] text-white/55">Study notes</div>
-              <div className="mt-3 richtext min-w-0 max-w-full overflow-x-auto">
-                <MarkdownMath content={plan.study_notes ?? ''} />
+              <div className="mt-3 space-y-4 text-sm text-white/80">
+                {(plan.notes?.sections ?? []).map((section, idx) => (
+                  <div key={`${idx}-${section.title}`} className="rounded-2xl border border-white/10 bg-black/30 p-4">
+                    <div className="text-xs uppercase tracking-[0.18em] text-white/55">{section.title}</div>
+                    <div className="mt-2 text-sm text-white/80 whitespace-pre-wrap">{section.content}</div>
+                  </div>
+                ))}
               </div>
             </div>
           </>

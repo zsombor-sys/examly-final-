@@ -11,7 +11,7 @@ import { throwIfMissingTable } from '@/lib/supabaseErrors'
 export const runtime = 'nodejs'
 export const maxDuration = 300
 
-const MODEL = process.env.OPENAI_MODEL || 'gpt-4.1'
+const MODEL = 'gpt-4.1'
 const MAX_OUTPUT_TOKENS = 1100
 
 const planRequestSchema = z.object({
@@ -21,41 +21,72 @@ const planRequestSchema = z.object({
 })
 
 const planPayloadSchema = z.object({
-  title: z.string(),
-  language: z.string(),
-  exam_date: z.string().nullable(),
-  quick_summary: z.string(),
-  study_notes: z.string(),
-  daily_plan: z.object({
-    blocks: z.array(
+  plan: z.object({
+    title: z.string(),
+    overview: z.string(),
+    topics: z.array(z.string()),
+  }),
+  notes: z.object({
+    sections: z.array(
       z.object({
-        start: z.string(),
-        end: z.string(),
-        task: z.string(),
-        details: z.string(),
+        title: z.string(),
+        content: z.string(),
       })
     ),
   }),
-  practice_questions: z.array(
-    z.object({
-      question: z.string(),
-      options: z.array(z.string()).optional().nullable(),
-      answer: z.string(),
-      explanation: z.string().optional().nullable(),
-    })
-  ),
+  daily: z.object({
+    blocks: z.array(
+      z.object({
+        title: z.string(),
+        duration_minutes: z.number(),
+        description: z.string(),
+      })
+    ),
+  }),
+  practice: z.object({
+    questions: z.array(
+      z.object({
+        question: z.string(),
+        answer: z.string(),
+      })
+    ),
+  }),
 })
 
 const planPayloadJsonSchema = {
   type: 'object',
   additionalProperties: false,
   properties: {
-    title: { type: 'string' },
-    language: { type: 'string' },
-    exam_date: { type: ['string', 'null'] },
-    quick_summary: { type: 'string' },
-    study_notes: { type: 'string' },
-    daily_plan: {
+    plan: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        title: { type: 'string' },
+        overview: { type: 'string' },
+        topics: { type: 'array', items: { type: 'string' } },
+      },
+      required: ['title', 'overview', 'topics'],
+    },
+    notes: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        sections: {
+          type: 'array',
+          items: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              title: { type: 'string' },
+              content: { type: 'string' },
+            },
+            required: ['title', 'content'],
+          },
+        },
+      },
+      required: ['sections'],
+    },
+    daily: {
       type: 'object',
       additionalProperties: false,
       properties: {
@@ -65,41 +96,37 @@ const planPayloadJsonSchema = {
             type: 'object',
             additionalProperties: false,
             properties: {
-              start: { type: 'string' },
-              end: { type: 'string' },
-              task: { type: 'string' },
-              details: { type: 'string' },
+              title: { type: 'string' },
+              duration_minutes: { type: 'number' },
+              description: { type: 'string' },
             },
-            required: ['start', 'end', 'task', 'details'],
+            required: ['title', 'duration_minutes', 'description'],
           },
         },
       },
       required: ['blocks'],
     },
-    practice_questions: {
-      type: 'array',
-      items: {
-        type: 'object',
-        additionalProperties: false,
-        properties: {
-          question: { type: 'string' },
-          options: { type: ['array', 'null'], items: { type: 'string' } },
-          answer: { type: 'string' },
-          explanation: { type: ['string', 'null'] },
+    practice: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        questions: {
+          type: 'array',
+          items: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              question: { type: 'string' },
+              answer: { type: 'string' },
+            },
+            required: ['question', 'answer'],
+          },
         },
-        required: ['question', 'answer'],
       },
+      required: ['questions'],
     },
   },
-  required: [
-    'title',
-    'language',
-    'exam_date',
-    'quick_summary',
-    'study_notes',
-    'daily_plan',
-    'practice_questions',
-  ],
+  required: ['plan', 'notes', 'daily', 'practice'],
 }
 
 
@@ -166,84 +193,191 @@ function safeJsonParse(text: string) {
   return JSON.parse(raw)
 }
 
+function logSupabaseError(context: string, error: any) {
+  console.error('supabase.error', {
+    context,
+    code: error?.code ?? null,
+    message: error?.message ?? null,
+    details: error?.details ?? null,
+    hint: error?.hint ?? null,
+  })
+}
+
+function sanitizeText(text: string) {
+  return String(text || '')
+    .replace(/```[\s\S]*?```/g, '')
+    .replace(/`+/g, '')
+    .replace(/(^|\n)\s*#+\s*/g, '$1')
+    .replace(/(^|\n)\s*[-*+]\s+/g, '$1')
+    .replace(/\s+\n/g, '\n')
+    .trim()
+}
+
 type PlanPayload = z.infer<typeof planPayloadSchema>
 
 function normalizePlanPayload(input: any): PlanPayload {
-  const title = String(input?.title ?? '').trim() || 'Tanulasi terv'
-  const language = String(input?.language ?? '').trim() || 'Hungarian'
-  const examDate = input?.exam_date ? String(input.exam_date) : null
-  const quickSummary = String(input?.quick_summary ?? '').trim() || 'Rovid osszefoglalo.'
-  const studyNotes = String(input?.study_notes ?? '').trim() || '## Jegyzetek\n- Fo fogalmak\n- Kulcsotletek'
+  const planTitle = sanitizeText(String(input?.plan?.title ?? input?.plan_title ?? '').trim() || 'Tanulasi terv')
+  const overview = sanitizeText(String(input?.plan?.overview ?? '').trim() || 'Rovid attekintes a temarol.')
+  const topicsRaw = Array.isArray(input?.plan?.topics) ? input.plan.topics : []
+  const topics = topicsRaw.map((t: any) => sanitizeText(String(t).trim())).filter(Boolean)
 
-  const blocksRaw = Array.isArray(input?.daily_plan?.blocks) ? input.daily_plan.blocks : []
-  const blocks = blocksRaw.map((b: any) => ({
-    start: String(b?.start ?? '').trim() || '09:00',
-    end: String(b?.end ?? '').trim() || '09:30',
-    task: String(b?.task ?? '').trim() || 'Attekintes',
-    details: String(b?.details ?? '').trim() || 'Rovid jegyzet es feladatok.',
+  const sectionsRaw = Array.isArray(input?.notes?.sections) ? input.notes.sections : []
+  const sections = sectionsRaw.map((s: any) => ({
+    title: sanitizeText(String(s?.title ?? '').trim() || 'Altalanos attekintes'),
+    content: sanitizeText(String(s?.content ?? '').trim() || 'Rovid osszefoglalo es kulcspontok.'),
   }))
 
-  const questionsRaw = Array.isArray(input?.practice_questions) ? input.practice_questions : []
+  const blocksRaw = Array.isArray(input?.daily?.blocks) ? input.daily.blocks : []
+  const blocks = blocksRaw.map((b: any) => ({
+    title: sanitizeText(String(b?.title ?? '').trim() || 'Attekintes'),
+    duration_minutes: Number(b?.duration_minutes ?? 30) || 30,
+    description: sanitizeText(String(b?.description ?? '').trim() || 'Rovid feladat es jegyzeteles.'),
+  }))
+
+  const questionsRaw = Array.isArray(input?.practice?.questions) ? input.practice.questions : []
   const questions = questionsRaw.map((q: any) => ({
-    question: String(q?.question ?? '').trim() || 'Ismertesd a fo fogalmakat.',
-    options: Array.isArray(q?.options) ? q.options.map((o: any) => String(o)) : null,
-    answer: String(q?.answer ?? '').trim() || 'Rovid, pontos valasz.',
-    explanation: q?.explanation != null ? String(q.explanation).trim() : null,
+    question: sanitizeText(String(q?.question ?? '').trim() || 'Ismertesd a fo fogalmakat.'),
+    answer: sanitizeText(String(q?.answer ?? '').trim() || 'Rovid, pontos valasz.'),
   }))
 
   return {
-    title,
-    language,
-    exam_date: examDate,
-    quick_summary: quickSummary,
-    study_notes: studyNotes,
-    daily_plan: {
+    plan: {
+      title: planTitle,
+      overview,
+      topics: topics.length ? topics.slice(0, 12) : ['Alapfogalmak', 'Kulcsotletek', 'Peldak'],
+    },
+    notes: {
+      sections: sections.length
+        ? sections.slice(0, 12)
+        : [
+            { title: 'Definiciok', content: 'Alapfogalmak es fontos definiciok.' },
+            { title: 'Osszefuggesek', content: 'Fo kapcsolatok es kovetkeztetesek.' },
+          ],
+    },
+    daily: {
       blocks: blocks.length
         ? blocks.slice(0, 12)
         : [
-            { start: '09:00', end: '09:30', task: 'Attekintes', details: 'Fo temak atnezese.' },
-            { start: '09:30', end: '10:10', task: 'Jegyzeteles', details: 'Definiciok es peldak.' },
-            { start: '10:10', end: '10:40', task: 'Gyakorlas', details: 'Rovid feladatok megoldasa.' },
+            { title: 'Attekintes', duration_minutes: 30, description: 'Fo temak atnezese.' },
+            { title: 'Jegyzeteles', duration_minutes: 40, description: 'Definiciok es peldak rendszerezese.' },
+            { title: 'Gyakorlas', duration_minutes: 30, description: 'Rovid feladatok megoldasa.' },
+            { title: 'Ismetles', duration_minutes: 20, description: 'Fontos pontok atnezese.' },
           ],
     },
-    practice_questions: questions.length
-      ? questions.slice(0, 15)
-      : [
-          { question: 'Sorolj fel 3 kulcsfogalmat.', options: null, answer: 'Pelda valasz.', explanation: null },
-          { question: 'Adj egy tipikus peldat.', options: null, answer: 'Pelda valasz.', explanation: null },
-        ],
+    practice: {
+      questions: questions.length
+        ? questions.slice(0, 15)
+        : [
+            { question: 'Mi a legfontosabb definicio?', answer: 'Rovid valasz a kulcsfogalomrol.' },
+            { question: 'Sorolj fel kulcsotleteket.', answer: 'Rovid, pontokba szedett valasz.' },
+            { question: 'Adj egy tipikus peldat.', answer: 'Rovid, konkret pelda.' },
+            { question: 'Melyek a gyakori hibak?', answer: 'Rovid felsorolas.' },
+            { question: 'Hogyan kapcsolodnak a fogalmak?', answer: 'Rovid osszefugges.' },
+          ],
+    },
   }
 }
 
-function ensureNotesLength(text: string, min: number) {
-  if (text.length >= min) return text
-  const filler = '\n\n## Kiegeszites\n- Fontos reszletek\n- Tipikus hibak\n- Gyakori kerdesek'
-  let out = text || '## Jegyzetek\n- Fo fogalmak'
-  while (out.length < min) out += filler
-  return out
+function countWords(text: string) {
+  return String(text || '')
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean).length
 }
 
-function fallbackPlanPayload(prompt: string, fileNames: string[]) {
+function ensureNotesWordCount(
+  sections: Array<{ title: string; content: string }>,
+  minWords: number,
+  isHu: boolean
+) {
+  const totalWords = sections.reduce((sum, s) => sum + countWords(s.content), 0)
+  if (totalWords >= minWords) return sections
+  const fillerSentence = isHu
+    ? 'Ez a resz attekinti a temakor legfontosabb fogalmait, kulcsotleteit es gyakori osszefuggeseit.'
+    : 'This section summarizes the most important concepts, key ideas, and common connections in the topic.'
+  const needed = minWords - totalWords
+  const extraWords = Math.max(needed, 1)
+  const repeats = Math.ceil(extraWords / countWords(fillerSentence))
+  const filler = Array.from({ length: repeats }, () => fillerSentence).join(' ')
+  if (sections.length === 0) {
+    return [{ title: isHu ? 'Osszefoglalo' : 'Summary', content: filler }]
+  }
+  const last = sections[sections.length - 1]
+  const updated = sections.slice(0, -1)
+  updated.push({ ...last, content: `${last.content} ${filler}`.trim() })
+  return updated
+}
+
+function fallbackPlanPayload(prompt: string, fileNames: string[], isHu: boolean) {
   const titleBase = String(prompt || '').trim().slice(0, 80)
-  const title = titleBase || (fileNames.length ? `Tanulasi terv: ${fileNames[0]}` : 'Tanulasi terv')
+  const title = titleBase || (fileNames.length ? `Study plan: ${fileNames[0]}` : 'Study plan')
+  const planTitle = isHu && !titleBase ? 'Tanulasi terv' : title
   return normalizePlanPayload({
-    title,
-    language: 'Hungarian',
-    exam_date: null,
-    quick_summary: 'Rovid osszefoglalo a temarol.',
-    study_notes:
-      '## Definiciok\n- Alapfogalmak\n\n## Kulcsotletek\n- Fo osszefuggesek\n\n## Peldak\n- Rovid pelda\n\n## Tipikus hibak\n- Gyakori hibak',
-    daily_plan: {
-      blocks: [
-        { start: '09:00', end: '09:30', task: 'Attekintes', details: 'Fo temak atnezese.' },
-        { start: '09:30', end: '10:10', task: 'Jegyzeteles', details: 'Definiciok es peldak.' },
-        { start: '10:10', end: '10:40', task: 'Gyakorlas', details: 'Rovid feladatok megoldasa.' },
+    plan: {
+      title: planTitle,
+      overview: isHu ? 'Rovid osszefoglalo a temarol.' : 'A short overview of the topic.',
+      topics: isHu ? ['Alapfogalmak', 'Kulcsotletek', 'Peldak'] : ['Core concepts', 'Key ideas', 'Examples'],
+    },
+    notes: {
+      sections: [
+        {
+          title: isHu ? 'Definiciok' : 'Definitions',
+          content: isHu ? 'Alapfogalmak es fontos definiciok attekintese.' : 'Overview of core terms and definitions.',
+        },
+        {
+          title: isHu ? 'Osszefuggesek' : 'Connections',
+          content: isHu ? 'Fo kapcsolatok es kovetkeztetesek.' : 'Key relationships and conclusions.',
+        },
       ],
     },
-    practice_questions: [
-      { question: 'Mi a legfontosabb definicio?', options: null, answer: 'Pelda valasz.', explanation: null },
-      { question: 'Sorolj fel kulcsotleteket.', options: null, answer: 'Pelda valasz.', explanation: null },
-    ],
+    daily: {
+      blocks: [
+        {
+          title: isHu ? 'Attekintes' : 'Review',
+          duration_minutes: 30,
+          description: isHu ? 'Fo temak atnezese.' : 'Review the main topics.',
+        },
+        {
+          title: isHu ? 'Jegyzeteles' : 'Notes',
+          duration_minutes: 40,
+          description: isHu ? 'Definiciok es peldak rendszerezese.' : 'Organize definitions and examples.',
+        },
+        {
+          title: isHu ? 'Gyakorlas' : 'Practice',
+          duration_minutes: 30,
+          description: isHu ? 'Rovid feladatok megoldasa.' : 'Solve short practice tasks.',
+        },
+        {
+          title: isHu ? 'Ismetles' : 'Recap',
+          duration_minutes: 20,
+          description: isHu ? 'Fontos pontok atnezese.' : 'Recap key points.',
+        },
+      ],
+    },
+    practice: {
+      questions: [
+        {
+          question: isHu ? 'Mi a legfontosabb definicio?' : 'What is the most important definition?',
+          answer: isHu ? 'Rovid valasz a kulcsfogalomrol.' : 'A short answer about the key concept.',
+        },
+        {
+          question: isHu ? 'Sorolj fel kulcsotleteket.' : 'List the key ideas.',
+          answer: isHu ? 'Rovid, pontokba szedett valasz.' : 'A short, bullet-style answer.',
+        },
+        {
+          question: isHu ? 'Adj egy tipikus peldat.' : 'Give a typical example.',
+          answer: isHu ? 'Rovid, konkret pelda.' : 'A brief, concrete example.',
+        },
+        {
+          question: isHu ? 'Melyek a gyakori hibak?' : 'What are common mistakes?',
+          answer: isHu ? 'Rovid felsorolas.' : 'A short list of mistakes.',
+        },
+        {
+          question: isHu ? 'Hogyan kapcsolodnak a fogalmak?' : 'How are the concepts connected?',
+          answer: isHu ? 'Rovid osszefugges.' : 'A short connection summary.',
+        },
+      ],
+    },
   })
 }
 
@@ -265,20 +399,36 @@ function legacyToPlanPayload(
   const questions = Array.isArray(practiceJson?.practice?.questions)
     ? practiceJson.practice.questions.map((q: any) => ({
         question: String(q?.question ?? '').trim() || String(q?.q ?? '').trim(),
-        options: null,
         answer: String(q?.answer ?? '').trim(),
-        explanation: null,
       }))
     : []
 
   return normalizePlanPayload({
-    title,
-    language: 'Hungarian',
-    exam_date: null,
-    quick_summary: String(notesJson?.plan?.summary ?? '').trim() || 'Rovid attekintes.',
-    study_notes: String(notesJson?.plan?.summary ?? '').trim() || 'Rovid attekintes a felkeszuleshez.',
-    daily_plan: { blocks },
-    practice_questions: questions,
+    plan: {
+      title,
+      overview: String(notesJson?.plan?.summary ?? '').trim() || 'Rovid attekintes.',
+      topics: [],
+    },
+    notes: {
+      sections: [
+        {
+          title: 'Osszefoglalo',
+          content: String(notesJson?.plan?.summary ?? '').trim() || 'Rovid attekintes a felkeszuleshez.',
+        },
+      ],
+    },
+    daily: {
+      blocks: blocks.length
+        ? blocks.map((b) => ({
+            title: String(b.task || 'Fokusz'),
+            duration_minutes: 30,
+            description: String(b.details || 'Idokeret a blokk szerint.'),
+          }))
+        : [],
+    },
+    practice: {
+      questions,
+    },
   })
 }
 
@@ -346,27 +496,34 @@ type SavePlanRow = {
 async function savePlanToDbBestEffort(row: SavePlanRow) {
   try {
     const sb = supabaseAdmin()
-    await sb
-      .from(TABLE_PLANS)
-      .upsert(
-        {
-          id: row.id,
-          user_id: row.userId,
-          title: row.title,
-          created_at: row.created_at,
-          result: row.result,
-          notes_json: row.notes_json ?? null,
-          daily_json: row.daily_json ?? null,
-          practice_json: row.practice_json ?? null,
-          generation_status: row.generation_status ?? null,
-          generation_id: row.generation_id ?? null,
-          credits_charged: row.credits_charged ?? null,
-          error: row.error ?? null,
-          raw_notes_output: row.raw_notes_output ?? null,
-        },
-        { onConflict: 'id' }
-      )
+    const payload: Record<string, any> = {
+      id: row.id,
+      user_id: row.userId,
+      title: row.title,
+      created_at: row.created_at,
+      result: row.result,
+      notes_json: row.notes_json ?? null,
+      daily_json: row.daily_json ?? null,
+      practice_json: row.practice_json ?? null,
+      generation_status: row.generation_status ?? null,
+      credits_charged: row.credits_charged ?? null,
+      error: row.error ?? null,
+      raw_notes_output: row.raw_notes_output ?? null,
+    }
+    if (row.generation_id) payload.generation_id = row.generation_id
+    const { error } = await sb.from(TABLE_PLANS).upsert(payload, { onConflict: 'id' })
+    if (error) {
+      const msg = String(error?.message ?? '')
+      if (msg.includes('column') && msg.includes('generation_id')) {
+        delete payload.generation_id
+        const { error: retryErr } = await sb.from(TABLE_PLANS).upsert(payload, { onConflict: 'id' })
+        if (retryErr) throw retryErr
+      } else {
+        throw error
+      }
+    }
   } catch (err: any) {
+    logSupabaseError('plan.save', err)
     throwIfMissingTable(err, TABLE_PLANS)
     console.warn('plan.save db failed', {
       id: row.id,
@@ -381,7 +538,12 @@ export async function GET(req: Request) {
     const user = await requireUser(req)
     const { searchParams } = new URL(req.url)
     const id = searchParams.get('id')
-    if (!id) return NextResponse.json({ error: 'Missing id' }, { status: 400, headers: { 'cache-control': 'no-store' } })
+    if (!id) {
+      return NextResponse.json(
+        { code: 'MISSING_ID', message: 'Missing id' },
+        { status: 400, headers: { 'cache-control': 'no-store' } }
+      )
+    }
 
     const sb = supabaseAdmin()
     const { data, error } = await sb
@@ -391,13 +553,19 @@ export async function GET(req: Request) {
       .eq('id', id)
       .maybeSingle()
     if (error) {
+      logSupabaseError('plan.get', error)
       throwIfMissingTable(error, TABLE_PLANS)
       throw error
     }
 
     if (!data) {
       const row = getPlan(user.id, id)
-      if (!row) return NextResponse.json({ error: 'Not found' }, { status: 404, headers: { 'cache-control': 'no-store' } })
+      if (!row) {
+        return NextResponse.json(
+          { code: 'NOT_FOUND', message: 'Not found' },
+          { status: 404, headers: { 'cache-control': 'no-store' } }
+        )
+      }
       return NextResponse.json({ result: normalizePlanPayload(row.result) }, { headers: { 'cache-control': 'no-store' } })
     }
 
@@ -408,7 +576,10 @@ export async function GET(req: Request) {
     const plan = legacyToPlanPayload(data.notes_json, data.daily_json, data.practice_json, data.title || '')
     return NextResponse.json({ result: plan }, { headers: { 'cache-control': 'no-store' } })
   } catch (e: any) {
-    return NextResponse.json({ error: e?.message ?? 'Server error' }, { status: e?.status ?? 400, headers: { 'cache-control': 'no-store' } })
+    return NextResponse.json(
+      { code: 'PLAN_GET_FAILED', message: e?.message ?? 'Server error' },
+      { status: e?.status ?? 400, headers: { 'cache-control': 'no-store' } }
+    )
   }
 }
 
@@ -425,7 +596,7 @@ export async function POST(req: Request) {
     const parsedRequest = await parsePlanRequest(req)
     if (!parsedRequest.ok) {
       return NextResponse.json(
-        { error: 'INVALID_REQUEST', details: parsedRequest.error.issues },
+        { code: 'INVALID_REQUEST', message: 'Invalid request', details: parsedRequest.error.issues },
         { status: 400, headers: { 'cache-control': 'no-store' } }
       )
     }
@@ -461,7 +632,10 @@ export async function POST(req: Request) {
     }
 
     if (materials.total > MAX_IMAGES) {
-      return NextResponse.json({ error: 'TOO_MANY_FILES' }, { status: 400, headers: { 'cache-control': 'no-store' } })
+      return NextResponse.json(
+        { code: 'TOO_MANY_FILES', message: 'Too many files' },
+        { status: 400, headers: { 'cache-control': 'no-store' } }
+      )
     }
 
     const prompt =
@@ -471,11 +645,14 @@ export async function POST(req: Request) {
     try {
       cost = creditsForImages(materials.imageCount || 0)
     } catch {
-      return NextResponse.json({ error: 'TOO_MANY_FILES' }, { status: 400, headers: { 'cache-control': 'no-store' } })
+      return NextResponse.json(
+        { code: 'TOO_MANY_FILES', message: 'Too many files' },
+        { status: 400, headers: { 'cache-control': 'no-store' } }
+      )
     }
     if (requiredCredits != null && requiredCredits !== cost) {
       return NextResponse.json(
-        { error: 'REQUIRED_CREDITS_MISMATCH', required: cost },
+        { code: 'REQUIRED_CREDITS_MISMATCH', message: 'Required credits mismatch', required: cost },
         { status: 400, headers: { 'cache-control': 'no-store' } }
       )
     }
@@ -490,17 +667,35 @@ export async function POST(req: Request) {
     })
 
     const sb = supabaseAdmin()
-    const { data: existingPlan, error: existingErr } = await sb
+    let existingPlan: any = null
+    let existingErr: any = null
+    ;({ data: existingPlan, error: existingErr } = await sb
       .from(TABLE_PLANS)
-      .select('generation_id, credits_charged, generation_status')
+      .select('id, generation_id, credits_charged, generation_status')
       .eq('user_id', user.id)
       .eq('id', idToUse)
-      .maybeSingle()
+      .maybeSingle())
     if (existingErr) {
+      const msg = String(existingErr?.message ?? '')
+      if (msg.includes('column') && msg.includes('generation_id')) {
+        ;({ data: existingPlan, error: existingErr } = await sb
+          .from(TABLE_PLANS)
+          .select('id, credits_charged, generation_status')
+          .eq('user_id', user.id)
+          .eq('id', idToUse)
+          .maybeSingle())
+      }
+    }
+    if (existingErr) {
+      logSupabaseError('plan.select_existing', existingErr)
       throwIfMissingTable(existingErr, TABLE_PLANS)
       throw existingErr
     }
-    const existingGenerationId = existingPlan?.generation_id ? String(existingPlan.generation_id) : null
+    const existingGenerationId = existingPlan?.generation_id
+      ? String(existingPlan.generation_id)
+      : existingPlan?.id
+        ? String(existingPlan.id)
+        : null
     const alreadyCharged = Number(existingPlan?.credits_charged ?? 0) >= cost && cost > 0
     const generationId =
       existingPlan?.generation_status === 'processing' && existingGenerationId
@@ -542,7 +737,10 @@ export async function POST(req: Request) {
             error: 'INSUFFICIENT_CREDITS',
             raw_notes_output: null,
           })
-          return NextResponse.json({ error: 'INSUFFICIENT_CREDITS' }, { status: 402, headers: { 'cache-control': 'no-store' } })
+          return NextResponse.json(
+            { code: 'INSUFFICIENT_CREDITS', message: 'Insufficient credits' },
+            { status: 402, headers: { 'cache-control': 'no-store' } }
+          )
         }
         await savePlanToDbBestEffort({
           id: idToUse,
@@ -580,7 +778,10 @@ export async function POST(req: Request) {
           error: 'INSUFFICIENT_CREDITS',
           raw_notes_output: null,
         })
-        return NextResponse.json({ error: 'INSUFFICIENT_CREDITS' }, { status: 402, headers: { 'cache-control': 'no-store' } })
+        return NextResponse.json(
+          { code: 'INSUFFICIENT_CREDITS', message: 'Insufficient credits' },
+          { status: 402, headers: { 'cache-control': 'no-store' } }
+        )
       }
     }
     if (alreadyCharged && cost > 0) {
@@ -592,11 +793,11 @@ export async function POST(req: Request) {
     }
 
     if (!openAiKey) {
-      const fallback = fallbackPlanPayload(prompt, materials.fileNames)
+      const fallback = fallbackPlanPayload(prompt, materials.fileNames, detectHungarian(prompt))
       await savePlanToDbBestEffort({
         id: idToUse,
         userId: user.id,
-        title: fallback.title,
+        title: fallback.plan.title,
         created_at: new Date().toISOString(),
         result: fallback,
         notes_json: null,
@@ -616,14 +817,13 @@ export async function POST(req: Request) {
     const model = MODEL
     const extractedText = String(materials.textFromFiles || '').slice(0, 20_000)
     const isHu = detectHungarian(prompt) || detectHungarian(extractedText)
-    const minNotes = extractedText.length > 1000 ? 600 : 200
+    const minNotesWords = 400
 
     const systemText = [
       'Return ONLY valid JSON matching the schema. No markdown, no extra text.',
       `Language: ${isHu ? 'Hungarian' : 'English'}.`,
       'If information is missing, make reasonable assumptions and still fill all fields.',
-      'Quick summary should be 2-4 sentences.',
-      `Study notes must be detailed (target length >= ${minNotes} chars when enough material exists).`,
+      'Notes must be detailed and plain text (no markdown). Minimum 400 words total across sections.',
     ].join('\n')
     const userText = [
       `Prompt:\n${prompt || '(empty)'}`,
@@ -686,14 +886,26 @@ export async function POST(req: Request) {
           raw_notes_output: snippet,
         })
         return NextResponse.json(
-          { error: 'NOTES_JSON_FAILED' },
+          { code: 'NOTES_JSON_FAILED', message: 'Failed to parse AI JSON' },
           { status: 500, headers: { 'cache-control': 'no-store' } }
         )
       }
     }
 
-    if (planPayload.study_notes.length < minNotes) {
-      planPayload.study_notes = ensureNotesLength(planPayload.study_notes, minNotes)
+    planPayload.notes.sections = ensureNotesWordCount(planPayload.notes.sections, minNotesWords, isHu)
+    const fallback = fallbackPlanPayload(prompt, materials.fileNames, isHu)
+    if (!planPayload.plan.topics.length) {
+      planPayload.plan.topics = fallback.plan.topics
+    }
+    if (!planPayload.notes.sections.length) {
+      planPayload.notes.sections = fallback.notes.sections
+      planPayload.notes.sections = ensureNotesWordCount(planPayload.notes.sections, minNotesWords, isHu)
+    }
+    if (planPayload.daily.blocks.length < 4) {
+      planPayload.daily.blocks = fallback.daily.blocks
+    }
+    if (planPayload.practice.questions.length < 5) {
+      planPayload.practice.questions = fallback.practice.questions
     }
 
     const plan = planPayload
@@ -701,7 +913,7 @@ export async function POST(req: Request) {
     await savePlanToDbBestEffort({
       id: idToUse,
       userId: user.id,
-      title: plan.title,
+      title: plan.plan.title,
       created_at: new Date().toISOString(),
       result: plan,
       notes_json: null,
@@ -729,11 +941,14 @@ export async function POST(req: Request) {
       stack: e?.stack,
     })
     if (Number(e?.status) === 401 || Number(e?.status) === 403) {
-      return NextResponse.json({ error: 'UNAUTHORIZED' }, { status: 401, headers: { 'cache-control': 'no-store' } })
+      return NextResponse.json(
+        { code: 'UNAUTHORIZED', message: 'Unauthorized' },
+        { status: 401, headers: { 'cache-control': 'no-store' } }
+      )
     }
     const details = String(e?.message || 'Server error').slice(0, 300)
     return NextResponse.json(
-      { error: 'PLAN_GENERATE_FAILED', details },
+      { code: 'PLAN_GENERATE_FAILED', message: details },
       { status: 500, headers: { 'cache-control': 'no-store' } }
     )
   }

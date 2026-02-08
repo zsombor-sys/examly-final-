@@ -63,7 +63,7 @@ Language:
 - If language is Hungarian, answer in Hungarian.
 - If language is English, answer in English.`
 
-    const model = process.env.OPENAI_MODEL || 'gpt-4.1'
+    const model = 'gpt-4.1'
 
     const resp = await openai.chat.completions.create({
       model,

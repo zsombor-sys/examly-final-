@@ -166,6 +166,16 @@ async function fetchPlanResult(userId: string, planId: string) {
 function extractNotes(result: any): NotesPayload | null {
   const payload = result?.notes_payload
   if (payload?.study_notes) return payload as NotesPayload
+  if (Array.isArray(result?.notes?.sections)) {
+    const content = result.notes.sections.map((s: any) => String(s?.content ?? '')).join('\n\n')
+    return {
+      title: String(result?.plan?.title || 'Study notes'),
+      subject: String(result?.plan?.title || 'General'),
+      study_notes: content,
+      key_topics: Array.isArray(result?.plan?.topics) ? result.plan.topics.map((t: any) => String(t)) : [],
+      confidence: 0.6,
+    }
+  }
   if (result?.study_notes) {
     return {
       title: String(result.title || 'Study notes'),
@@ -207,7 +217,7 @@ export async function POST(req: Request) {
     if (!apiKey) return NextResponse.json({ error: 'OPENAI_KEY_MISSING' }, { status: 500 })
 
     const client = new OpenAI({ apiKey })
-    const model = process.env.OPENAI_MODEL || 'gpt-4.1'
+    const model = 'gpt-4.1'
     const system = [
       'Return ONLY valid JSON matching the schema. No markdown or extra text.',
       'blocks length must be >= 4.',
@@ -247,7 +257,12 @@ export async function POST(req: Request) {
       daily = fallbackDaily(notes)
     }
 
-    const nextResult = { ...result, daily_plan: daily.daily_plan }
+    const blocks = daily.daily_plan.blocks.map((b) => ({
+      title: b.title,
+      duration_minutes: b.duration_minutes,
+      description: b.type === 'break' ? 'Rovid szunet es felfrissules.' : 'Tanulasi blokk es rovid feladatok.',
+    }))
+    const nextResult = { ...result, daily: { blocks } }
     updatePlan(user.id, planId, nextResult)
     const sb = supabaseAdmin()
     const { error: upErr } = await sb
@@ -260,7 +275,7 @@ export async function POST(req: Request) {
       throw upErr
     }
 
-    return NextResponse.json({ daily_plan: daily.daily_plan }, { headers: { 'cache-control': 'no-store' } })
+    return NextResponse.json({ daily: { blocks } }, { headers: { 'cache-control': 'no-store' } })
   } catch (e: any) {
     return NextResponse.json({ error: e?.message || 'Server error' }, { status: e?.status ?? 500 })
   }

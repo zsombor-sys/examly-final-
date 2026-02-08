@@ -6,7 +6,7 @@ import pdfParse from 'pdf-parse'
 import { z } from 'zod'
 import { MAX_IMAGES } from '@/lib/credits'
 
-const MODEL = process.env.OPENAI_MODEL || 'gpt-4.1'
+const MODEL = 'gpt-4.1'
 const BATCH_SIZE = 5
 const TIME_BUDGET_MS = 220_000
 

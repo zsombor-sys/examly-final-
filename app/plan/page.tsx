@@ -16,13 +16,10 @@ import { MAX_IMAGES, creditsForImages } from '@/lib/credits'
 type Block = { type: 'study' | 'break'; minutes: number; label: string }
 type DayPlan = { day: string; focus: string; tasks: string[]; minutes: number; blocks?: Block[] }
 type PlanResult = {
-  title: string
-  language: string
-  exam_date: string | null
-  quick_summary: string
-  study_notes: string
-  daily_plan: { blocks: Array<{ start: string; end: string; task: string; details: string }> }
-  practice_questions: Array<{ question: string; options?: string[] | null; answer: string; explanation?: string | null }>
+  plan: { title: string; overview: string; topics: string[] }
+  notes: { sections: Array<{ title: string; content: string }> }
+  daily: { blocks: Array<{ title: string; duration_minutes: number; description: string }> }
+  practice: { questions: Array<{ question: string; answer: string }> }
 }
 
 type SavedPlan = { id: string; title: string; created_at: string }
@@ -549,15 +546,15 @@ function Inner() {
     }
   }
 
-  const displayTitle = result?.title?.trim() ? result.title : 'Study plan'
+  const displayTitle = result?.plan?.title?.trim() ? result.plan.title : 'Study plan'
   const displayInput = shortPrompt(prompt)
   const failedCount = materials.filter((m) => m.status === 'failed').length
   const canGenerate = !loading && !isGenerating && (prompt.trim().length >= 6 || files.length > 0)
   const imageCount = countImages(files)
-  const summaryText = result?.quick_summary?.trim()
-    ? result.quick_summary
-    : result?.study_notes
-      ? result.study_notes
+  const summaryText = result?.plan?.overview?.trim()
+    ? result.plan.overview
+    : result?.notes?.sections?.[0]?.content
+      ? result.notes.sections[0].content
       : ''
   const costEstimate = (() => {
     try {
@@ -568,20 +565,12 @@ function Inner() {
   })()
   const pomodoroPlan = useMemo<DayPlan[]>(() => {
     if (!result) return []
-    const blocksRaw = Array.isArray(result.daily_plan?.blocks) ? result.daily_plan.blocks : []
+    const blocksRaw = Array.isArray(result.daily?.blocks) ? result.daily.blocks : []
     const blocks: Block[] = blocksRaw.map((b) => {
-      const toMinutes = (val: string) => {
-        const m = String(val || '').match(/^(\d{1,2}):(\d{2})/)
-        if (!m) return 25
-        return Math.max(5, Math.min(180, Number(m[1]) * 60 + Number(m[2])))
-      }
-      const startMin = toMinutes(b.start)
-      const endMin = toMinutes(b.end)
-      const minutes = endMin > startMin ? endMin - startMin : 25
       return {
-        type: /break|pihen/i.test(b.task) ? 'break' : 'study',
-        minutes,
-        label: String(b.task || 'Fokusz'),
+        type: /break|pihen/i.test(b.title) ? 'break' : 'study',
+        minutes: Math.max(5, Math.min(180, Number(b.duration_minutes) || 25)),
+        label: String(b.title || 'Fokusz'),
       }
     })
     const minutes = blocks.reduce((sum, b) => sum + b.minutes, 0)
@@ -778,8 +767,8 @@ function Inner() {
                     {summaryText.slice(0, 300)}
                     {summaryText.length > 300 ? '…' : ''}
                   </div>
-                  {result.exam_date ? (
-                    <div className="mt-3 text-xs text-white/60">Exam date: {result.exam_date}</div>
+                  {result?.plan?.topics?.length ? (
+                    <div className="mt-3 text-xs text-white/60">Topics: {result.plan.topics.join(', ')}</div>
                   ) : null}
                 </div>
               )}
@@ -788,8 +777,13 @@ function Inner() {
               {tab === 'notes' && result && (
                 <div className="rounded-3xl border border-white/10 bg-white/[0.02] p-5 min-w-0 overflow-hidden">
                   <div className="text-xs uppercase tracking-[0.18em] text-white/55">Notes</div>
-                  <div className="mt-3 richtext min-w-0 max-w-full overflow-x-auto">
-                    <MarkdownMath content={result.study_notes || ''} />
+                  <div className="mt-3 space-y-4 text-sm text-white/80">
+                    {(result.notes?.sections ?? []).map((section, idx) => (
+                      <div key={`${idx}-${section.title}`} className="rounded-2xl border border-white/10 bg-black/30 p-4">
+                        <div className="text-xs uppercase tracking-[0.18em] text-white/55">{section.title}</div>
+                        <div className="mt-2 text-sm text-white/80 whitespace-pre-wrap">{section.content}</div>
+                      </div>
+                    ))}
                   </div>
                 </div>
               )}
@@ -805,15 +799,13 @@ function Inner() {
                     <section className="w-full rounded-3xl border border-white/10 bg-white/[0.02] p-5 min-w-0 overflow-hidden">
                       <div className="text-xs uppercase tracking-[0.18em] text-white/55">Daily schedule</div>
                       <div className="mt-3 space-y-3 text-sm text-white/80">
-                        {(result.daily_plan?.blocks ?? []).map((b, i) => (
+                        {(result.daily?.blocks ?? []).map((b, i) => (
                           <div key={i} className="rounded-2xl border border-white/10 bg-black/30 px-4 py-3">
                             <div className="flex items-center justify-between gap-3">
-                              <div className="text-white/90">{b.task}</div>
-                              <div className="text-white/60">
-                                {b.start}–{b.end}
-                              </div>
+                              <div className="text-white/90">{b.title}</div>
+                              <div className="text-white/60">{Math.round(Number(b.duration_minutes) || 0)} min</div>
                             </div>
-                            {b.details ? <div className="mt-2 text-white/70">{b.details}</div> : null}
+                            {b.description ? <div className="mt-2 text-white/70">{b.description}</div> : null}
                           </div>
                         ))}
                       </div>
@@ -825,7 +817,7 @@ function Inner() {
               {/* PRACTICE */}
               {tab === 'practice' && result && (
                 <div className="space-y-6 min-w-0">
-                  {(result.practice_questions ?? []).map((q, qi) => (
+                  {(result.practice?.questions ?? []).map((q, qi) => (
                     <section
                       key={`${qi}-${q.question}`}
                       className="rounded-3xl border border-white/10 bg-white/[0.02] p-5 min-w-0 overflow-hidden"
@@ -833,31 +825,10 @@ function Inner() {
                       <div className="text-sm font-semibold text-white/90 min-w-0 break-words">
                         {qi + 1}. {q.question}
                       </div>
-
-                      {Array.isArray(q.options) && q.options.length ? (
-                        <div className="mt-4 grid gap-2">
-                          {q.options.map((o, i) => (
-                            <div
-                              key={i}
-                              className="rounded-2xl border border-white/10 bg-black/30 px-4 py-3 text-sm text-white/80"
-                            >
-                              {o}
-                            </div>
-                          ))}
-                        </div>
-                      ) : null}
-
                       {q.answer ? (
                         <div className="mt-4 rounded-2xl border border-white/10 bg-black/30 p-4">
                           <div className="text-xs uppercase tracking-[0.18em] text-white/55">Answer</div>
                           <div className="mt-2 text-sm text-white/80 break-words">{q.answer}</div>
-                        </div>
-                      ) : null}
-
-                      {q.explanation ? (
-                        <div className="mt-4 rounded-2xl border border-white/10 bg-black/30 p-4">
-                          <div className="text-xs uppercase tracking-[0.18em] text-white/55">Explanation</div>
-                          <div className="mt-2 text-sm text-white/70">{q.explanation}</div>
                         </div>
                       ) : null}
                     </section>

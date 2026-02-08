@@ -11,8 +11,8 @@ import Pomodoro from '@/components/Pomodoro'
 type Block = { type: 'study' | 'break'; minutes: number; label: string }
 type DayPlan = { day: string; focus: string; tasks: string[]; minutes: number; blocks?: Block[] }
 type PlanResult = {
-  title: string
-  daily_plan: { blocks: Array<{ start: string; end: string; task: string; details: string }> }
+  plan: { title: string }
+  daily: { blocks: Array<{ title: string; duration_minutes: number; description: string }> }
 }
 
 function historyKeyForUser(userId: string | null) {
@@ -127,19 +127,19 @@ function Inner() {
 
   const pomodoroPlan = useMemo<DayPlan[]>(() => {
     if (!plan) return []
-    const blocksRaw = Array.isArray(plan.daily_plan?.blocks) ? plan.daily_plan.blocks : []
+    const blocksRaw = Array.isArray(plan.daily?.blocks) ? plan.daily.blocks : []
     const blocks: Block[] = blocksRaw.map((b) => ({
-      type: /break|pihen/i.test(b.task) ? 'break' : 'study',
-      minutes: 25,
-      label: String(b.task || 'Fokusz'),
+      type: /break|pihen/i.test(b.title) ? 'break' : 'study',
+      minutes: Math.max(5, Math.min(180, Number(b.duration_minutes) || 25)),
+      label: String(b.title || 'Fokusz'),
     }))
     const minutes = blocks.reduce((sum, b) => sum + b.minutes, 0)
     return [
       {
         day: 'Today',
-        focus: plan.title || 'Focus',
+        focus: plan.plan?.title || 'Focus',
         minutes,
-        tasks: blocksRaw.map((b) => String(b.task || '')).filter(Boolean),
+        tasks: blocksRaw.map((b) => String(b.title || '')).filter(Boolean),
         blocks,
       },
     ]
@@ -165,7 +165,7 @@ function Inner() {
           <>
             <div className="text-xs uppercase tracking-[0.18em] text-white/55">Daily</div>
             <h1 className="mt-2 text-2xl font-semibold tracking-tight text-white break-words">
-              {plan.title || 'Daily'}
+              {plan.plan?.title || 'Daily'}
             </h1>
 
             <div className="mt-6 grid gap-6 min-w-0 2xl:grid-cols-[minmax(0,1fr)_360px]">
@@ -179,15 +179,13 @@ function Inner() {
                 <section className="w-full rounded-3xl border border-white/10 bg-white/[0.02] p-5 min-w-0 overflow-hidden">
                   <div className="text-xs uppercase tracking-[0.18em] text-white/55">Schedule</div>
                   <div className="mt-4 space-y-3 text-sm text-white/80">
-                    {(plan?.daily_plan?.blocks ?? []).map((b, i) => (
+                    {(plan?.daily?.blocks ?? []).map((b, i) => (
                       <div key={i} className="rounded-2xl border border-white/10 bg-black/30 px-4 py-3">
                         <div className="flex items-center justify-between gap-3">
-                          <div className="text-white/90">{b.task}</div>
-                          <div className="text-white/60">
-                            {b.start}–{b.end}
-                          </div>
+                          <div className="text-white/90">{b.title}</div>
+                          <div className="text-white/60">{Math.round(Number(b.duration_minutes) || 0)} min</div>
                         </div>
-                        {b.details ? <div className="mt-2 text-white/70">{b.details}</div> : null}
+                        {b.description ? <div className="mt-2 text-white/70">{b.description}</div> : null}
                       </div>
                     ))}
                   </div>

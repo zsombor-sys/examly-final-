@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server'
 import { z } from 'zod'
 import { requireUser } from '@/lib/authServer'
-import { consumeGeneration, entitlementSnapshot, getProfileStrict } from '@/lib/creditsServer'
+import { computePlanCost } from '@/lib/planCost'
 import OpenAI from 'openai'
 import pdfParse from 'pdf-parse'
 import { getPlan, savePlan } from '@/app/api/plan/store'
@@ -17,24 +17,54 @@ const planRequestSchema = z.object({
 })
 
 const notesSchema = z.object({
-  title: z.string(),
-  subject: z.string(),
-  study_notes: z.string(),
-  key_topics: z.array(z.string()),
-  confidence: z.number(),
+  plan: z.object({
+    title: z.string(),
+    summary: z.string(),
+  }),
+  notes: z.object({
+    sections: z.array(
+      z.object({
+        title: z.string(),
+        bullets: z.array(z.string()),
+      })
+    ),
+  }),
 })
 
 const notesJsonSchema = {
   type: 'object',
   additionalProperties: false,
   properties: {
-    title: { type: 'string' },
-    subject: { type: 'string' },
-    study_notes: { type: 'string' },
-    key_topics: { type: 'array', items: { type: 'string' } },
-    confidence: { type: 'number' },
+    plan: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        title: { type: 'string' },
+        summary: { type: 'string' },
+      },
+      required: ['title', 'summary'],
+    },
+    notes: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        sections: {
+          type: 'array',
+          items: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              title: { type: 'string' },
+              bullets: { type: 'array', items: { type: 'string' } },
+            },
+            required: ['title', 'bullets'],
+          },
+        },
+      },
+      required: ['sections'],
+    },
   },
-  required: ['title', 'subject', 'study_notes', 'key_topics', 'confidence'],
+  required: ['plan', 'notes'],
 }
 
 const dailySchema = z.object({
@@ -330,11 +360,12 @@ async function callJsonWithRetries<T>(
   let lastRaw = ''
   for (let attempt = 0; attempt <= retries; attempt += 1) {
     const sys = attempt === 0 ? system : 'Return ONLY JSON matching the schema. No extra text.'
+    const userMsg = attempt === 0 ? user : user.slice(0, 4000)
     const resp = await client.chat.completions.create({
       model,
       messages: [
         { role: 'system', content: sys },
-        { role: 'user', content: user },
+        { role: 'user', content: userMsg },
       ],
       temperature: 0.2,
       response_format: {
@@ -485,7 +516,7 @@ async function loadMaterialsForPlan(userId: string, planId: string) {
   }
 
   const textFromFiles = textParts.join('\n\n').slice(0, 120_000)
-  return { status: 'ready' as const, textFromFiles, images, fileNames, imageCount }
+  return { status: 'ready' as const, textFromFiles, images, fileNames, imageCount, total }
 }
 
 async function generateNotesStep(
@@ -544,17 +575,12 @@ async function generateNotesStep(
   return { notes: data, rawNotesText, rawNotesJson: raw }
 }
 
-async function generateDailyStep(
-  client: OpenAI,
-  model: string,
-  notes: z.infer<typeof notesSchema>,
-  examDate: string
-) {
+async function generateDailyStep(client: OpenAI, model: string, notes: NotesPayload, examDate: string) {
   const system = [
     'Return ONLY valid JSON matching the schema. No markdown or extra text.',
-    'blocks length must be >= 4.',
-    'Include at least 2 study, 1 review, 1 break.',
+    'blocks length must be >= 3.',
     'total_minutes must equal the sum of block durations.',
+    'Language: Hungarian.',
   ].join('\n')
   const user = [
     `Exam date: ${examDate}`,
@@ -578,13 +604,13 @@ async function generateDailyStep(
   return normalizeDaily(data)
 }
 
-async function generatePracticeStep(client: OpenAI, model: string, notes: z.infer<typeof notesSchema>) {
+async function generatePracticeStep(client: OpenAI, model: string, notes: NotesPayload) {
   const system = [
     'Return ONLY valid JSON matching the schema. No markdown or extra text.',
-    'Generate at least 12 questions total.',
-    'Include at least 4 mcq, 4 short, 4 true_false.',
+    'Generate at least 5 questions total.',
     'Answers must be 1-3 sentences max.',
     'Questions must be based on key_topics.',
+    'Language: Hungarian.',
   ].join('\n')
   const user = [
     `Subject: ${notes.subject}`,
@@ -614,30 +640,71 @@ function countWords(text: string) {
     .filter(Boolean).length
 }
 
-function validateNotes(notes: z.infer<typeof notesSchema>) {
-  const text = String(notes?.study_notes || '')
-  if (countWords(text) < 900) return false
-  if (!/##\s+/.test(text)) return false
-  if (!/(^|\n)\s*[-*]\s+/.test(text)) return false
-  const required = ['Definiciok', 'Kulcsotletek', 'Peldak', 'Tipikus hibak', 'Gyors osszefoglalo']
-  for (const r of required) {
-    const re = new RegExp(`##\\s*${r}\\b`, 'i')
-    if (!re.test(text)) return false
+type NotesPayload = {
+  title: string
+  subject: string
+  study_notes: string
+  key_topics: string[]
+  confidence: number
+}
+
+function buildStudyNotesFromSections(sections: Array<{ title: string; bullets: string[] }>) {
+  return sections
+    .map((s) => {
+      const title = String(s.title || '').trim() || 'Szekcio'
+      const bullets = Array.isArray(s.bullets) ? s.bullets : []
+      const lines = bullets.map((b) => `- ${String(b || '').trim()}`).filter((b) => b !== '-')
+      return `## ${title}\n${lines.join('\n')}`.trim()
+    })
+    .join('\n\n')
+}
+
+function notesJsonToPayload(notesJson: z.infer<typeof notesSchema>): NotesPayload {
+  const sections = Array.isArray(notesJson?.notes?.sections) ? notesJson.notes.sections : []
+  const studyNotes = buildStudyNotesFromSections(sections)
+  const title = String(notesJson?.plan?.title || '').trim() || 'Tanulasi jegyzet'
+  const summary = String(notesJson?.plan?.summary || '').trim()
+  const keyTopics = sections.map((s) => String(s.title || '').trim()).filter(Boolean).slice(0, 12)
+  return {
+    title,
+    subject: title,
+    study_notes: studyNotes,
+    key_topics: keyTopics,
+    confidence: 6,
   }
+}
+
+function validateNotes(notesJson: z.infer<typeof notesSchema>) {
+  const sections = Array.isArray(notesJson?.notes?.sections) ? notesJson.notes.sections : []
+  if (sections.length < 4) return false
+  if (!String(notesJson?.plan?.title || '').trim()) return false
+  if (!String(notesJson?.plan?.summary || '').trim()) return false
+  const studyNotes = buildStudyNotesFromSections(sections)
+  if (countWords(studyNotes) < 900) return false
+  if (!/##\s+/.test(studyNotes)) return false
+  if (!/(^|\n)\s*[-*]\s+/.test(studyNotes)) return false
   return true
 }
 
-function fallbackNotes(rawNotesText: string) {
+function fallbackNotes(rawNotesText: string): z.infer<typeof notesSchema> {
   const text = String(rawNotesText || '').trim()
   const headings = extractHeadings(text)
-  const keyTopics = headings.length ? headings.slice(0, 12) : ['Alapfogalmak', 'Kulcsideak', 'Peldak', 'Tipikus hibak']
-  const studyNotes = text || buildNotesShell()
+  const sections =
+    headings.length >= 4
+      ? headings.slice(0, 6).map((h) => ({ title: h, bullets: ['Rovid osszegzes.', 'Fontos reszletek.'] }))
+      : [
+          { title: 'Definiciok', bullets: ['Alapfogalom definicio.'] },
+          { title: 'Kulcsotletek', bullets: ['Kozponti osszefuggesek.'] },
+          { title: 'Peldak', bullets: ['Egy rovid pelda.'] },
+          { title: 'Tipikus hibak', bullets: ['Gyakori felreertesek.'] },
+          { title: 'Gyors osszefoglalo', bullets: ['Rovid, tanulhato pontok.'] },
+        ]
   return {
-    title: headings[0] || 'Tanulasi jegyzet',
-    subject: headings[0] || 'Altalanos tema',
-    study_notes: studyNotes,
-    key_topics: keyTopics,
-    confidence: 5,
+    plan: {
+      title: headings[0] || 'Tanulasi jegyzet',
+      summary: 'Osszefoglalo tanulasi jegyzet.',
+    },
+    notes: { sections },
   }
 }
 
@@ -666,17 +733,9 @@ function buildNotesShell() {
 
 function validateDaily(daily: z.infer<typeof dailySchema>) {
   const blocks = Array.isArray(daily?.daily_plan?.blocks) ? daily.daily_plan.blocks : []
-  if (blocks.length < 4) return false
+  if (blocks.length < 3) return false
   const sum = blocks.reduce((s, b) => s + Number(b.duration_minutes || 0), 0)
   if (Number(daily.daily_plan.total_minutes) !== sum) return false
-  const counts = blocks.reduce(
-    (acc, b) => {
-      acc[b.type] += 1
-      return acc
-    },
-    { study: 0, review: 0, break: 0 }
-  )
-  if (counts.study < 2 || counts.review < 1 || counts.break < 1) return false
   return true
 }
 
@@ -692,16 +751,7 @@ function normalizeDaily(daily: z.infer<typeof dailySchema>) {
 
 function validatePractice(practice: z.infer<typeof practiceSchema>) {
   const questions = Array.isArray(practice?.practice?.questions) ? practice.practice.questions : []
-  if (questions.length < 12) return false
-  const counts = questions.reduce(
-    (acc, q) => {
-      const t = q.type === 'mcq' || q.type === 'short' || q.type === 'true_false' ? q.type : 'short'
-      acc[t] += 1
-      return acc
-    },
-    { mcq: 0, short: 0, true_false: 0 }
-  )
-  if (counts.mcq < 4 || counts.short < 4 || counts.true_false < 4) return false
+  if (questions.length < 5) return false
   return true
 }
 
@@ -748,7 +798,7 @@ function practiceJsonToQuestions(practiceJson: any) {
   }))
 }
 
-function fallbackDaily(notes: z.infer<typeof notesSchema>) {
+function fallbackDaily(notes: NotesPayload) {
   const topics = pickTopics(notes)
   const titles = [
     topics[0] || 'Core concepts',
@@ -767,7 +817,7 @@ function fallbackDaily(notes: z.infer<typeof notesSchema>) {
   return { daily_plan: { total_minutes: 120, blocks } }
 }
 
-function fallbackPractice(notes: z.infer<typeof notesSchema>) {
+function fallbackPractice(notes: NotesPayload) {
   const topics = pickTopics(notes)
   const sourceText = String(notes.study_notes || '')
   const questions = []
@@ -786,7 +836,7 @@ function fallbackPractice(notes: z.infer<typeof notesSchema>) {
   return { practice: { questions } }
 }
 
-function pickTopics(notes: z.infer<typeof notesSchema>) {
+function pickTopics(notes: NotesPayload) {
   const fromKey = Array.isArray(notes.key_topics) ? notes.key_topics.map((t) => String(t).trim()).filter(Boolean) : []
   if (fromKey.length >= 4) return fromKey
   const headings = extractHeadings(notes.study_notes)
@@ -897,22 +947,24 @@ export async function GET(req: Request) {
       return NextResponse.json({ result: data.result }, { headers: { 'cache-control': 'no-store' } })
     }
 
-    const notes = data.notes_json || null
-    const dailyPlan = dailyJsonToPlan(data.daily_json, notes)
+    const notesJson = data.notes_json || null
+    const notesPayload = notesJson ? notesJsonToPayload(notesJson) : null
+    const dailyPlan = dailyJsonToPlan(data.daily_json, notesPayload)
     const practiceQuestions = practiceJsonToQuestions(data.practice_json)
     const plan = normalizePlan({
-      title: notes?.title || data.title || 'Untitled plan',
-      language: detectHungarian(String(notes?.study_notes || '')) ? 'Hungarian' : 'English',
+      title: notesPayload?.title || data.title || 'Untitled plan',
+      language: 'Hungarian',
       exam_date: null,
-      confidence: Number.isFinite(Number(notes?.confidence)) ? Number(notes.confidence) : 6,
+      confidence: notesPayload?.confidence ?? 6,
       quick_summary:
-        Array.isArray(notes?.key_topics) && notes.key_topics.length
-          ? `Key topics: ${notes.key_topics.slice(0, 8).join(', ')}`
-          : String(notes?.study_notes || '').split('\n').filter(Boolean)[0] || 'Study notes generated.',
-      study_notes: String(notes?.study_notes || ''),
+        notesJson?.plan?.summary?.trim() ||
+        (notesPayload?.key_topics?.length
+          ? `Kulcstopikok: ${notesPayload.key_topics.slice(0, 8).join(', ')}`
+          : String(notesPayload?.study_notes || '').split('\n').filter(Boolean)[0] || 'Tanulasi jegyzet keszult.'),
+      study_notes: String(notesPayload?.study_notes || ''),
       daily_plan: dailyPlan,
       practice_questions: practiceQuestions,
-      notes_payload: notes,
+      notes_payload: notesPayload,
     })
 
     return NextResponse.json({ result: plan }, { headers: { 'cache-control': 'no-store' } })
@@ -939,16 +991,6 @@ export async function POST(req: Request) {
     const planId = parsedRequest.value.planId
     const idToUse = planId || crypto.randomUUID()
 
-    // ✅ PRECHECK: ne generáljunk ha nincs entitlement
-    const profile = await getProfileStrict(user.id)
-    const ent = entitlementSnapshot(profile as any)
-    if (!ent.ok) {
-      return NextResponse.json(
-        { error: 'No credits left', code: 'NO_CREDITS', status: 402, where: 'api/plan:precheck' },
-        { status: 402, headers: { 'cache-control': 'no-store' } }
-      )
-    }
-
     // Files are uploaded client-side to Supabase Storage; server downloads by path.
 
     const openAiKey = process.env.OPENAI_API_KEY
@@ -959,6 +1001,7 @@ export async function POST(req: Request) {
       images: [] as Array<{ name: string; b64: string; mime: string }>,
       fileNames: [] as string[],
       imageCount: 0,
+      total: 0,
     }
     if (planId) {
       const loaded = await loadMaterialsForPlan(user.id, planId)
@@ -969,9 +1012,15 @@ export async function POST(req: Request) {
       materials = loaded
     }
 
+    if (materials.total > 15) {
+      return NextResponse.json({ error: 'MAX_FILES_EXCEEDED' }, { status: 400, headers: { 'cache-control': 'no-store' } })
+    }
+
     const prompt =
       promptRaw.trim() ||
       (materials.fileNames.length ? 'Create structured study notes and a study plan based on the uploaded materials.' : '')
+
+    const cost = computePlanCost(materials.total || materials.fileNames.length || 0)
 
     await savePlanToDbBestEffort({
       id: idToUse,
@@ -987,6 +1036,42 @@ export async function POST(req: Request) {
       raw_notes_output: null,
     })
 
+    try {
+      const sb = supabaseAdmin()
+      const { error } = await sb.rpc('consume_credits', { user_id: user.id, cost })
+      if (error) {
+        await savePlanToDbBestEffort({
+          id: idToUse,
+          userId: user.id,
+          title: 'Plan generation failed',
+          created_at: new Date().toISOString(),
+          result: null,
+          notes_json: null,
+          daily_json: null,
+          practice_json: null,
+          generation_status: 'error',
+          error: 'INSUFFICIENT_CREDITS',
+          raw_notes_output: null,
+        })
+        return NextResponse.json({ error: 'INSUFFICIENT_CREDITS' }, { status: 402, headers: { 'cache-control': 'no-store' } })
+      }
+    } catch {
+      await savePlanToDbBestEffort({
+        id: idToUse,
+        userId: user.id,
+        title: 'Plan generation failed',
+        created_at: new Date().toISOString(),
+        result: null,
+        notes_json: null,
+        daily_json: null,
+        practice_json: null,
+        generation_status: 'error',
+        error: 'INSUFFICIENT_CREDITS',
+        raw_notes_output: null,
+      })
+      return NextResponse.json({ error: 'INSUFFICIENT_CREDITS' }, { status: 402, headers: { 'cache-control': 'no-store' } })
+    }
+
     if (!openAiKey) {
       console.log('plan.generate request', {
         planId,
@@ -994,18 +1079,20 @@ export async function POST(req: Request) {
         extracted_chars: materials.textFromFiles.length,
         prompt_chars: prompt.length,
       })
-      const notesStep = mock(prompt, materials.fileNames)
+      const notesJson = mock(prompt, materials.fileNames)
+      const notesStep = notesJsonToPayload(notesJson)
       const quickSummary =
-        notesStep.key_topics && notesStep.key_topics.length
-          ? `Key topics: ${notesStep.key_topics.slice(0, 8).join(', ')}`
-          : notesStep.study_notes.split('\n').filter(Boolean)[0] || 'Study notes generated.'
+        notesJson.plan.summary?.trim() ||
+        (notesStep.key_topics && notesStep.key_topics.length
+          ? `Kulcstopikok: ${notesStep.key_topics.slice(0, 8).join(', ')}`
+          : notesStep.study_notes.split('\n').filter(Boolean)[0] || 'Tanulasi jegyzet keszult.')
       const dailyJson = fallbackDaily(notesStep)
       const practiceJson = fallbackPractice(notesStep)
       const dailyPlan = dailyJsonToPlan(dailyJson, notesStep)
       const practiceQuestions = practiceJsonToQuestions(practiceJson)
       const plan = normalizePlan({
         title: notesStep.title || notesStep.subject || 'Untitled plan',
-        language: detectHungarian(`${prompt}\n${notesStep.study_notes}`) ? 'Hungarian' : 'English',
+        language: 'Hungarian',
         exam_date: null,
         confidence: notesStep.confidence,
         quick_summary: quickSummary,
@@ -1020,7 +1107,7 @@ export async function POST(req: Request) {
         title: plan.title || notesStep.subject || 'Untitled plan',
         created_at: new Date().toISOString(),
         result: plan,
-        notes_json: notesStep,
+        notes_json: notesJson,
         daily_json: dailyJson,
         practice_json: practiceJson,
         generation_status: 'completed',
@@ -1029,24 +1116,21 @@ export async function POST(req: Request) {
       })
       await setCurrentPlanBestEffort(user.id, idToUse)
 
-      await consumeGeneration(user.id)
-
       return NextResponse.json({ id: idToUse }, { headers: { 'cache-control': 'no-store', 'x-examly-plan': 'mock' } })
     }
 
     const client = new OpenAI({ apiKey: openAiKey })
-    const textModel = process.env.OPENAI_TEXT_MODEL || 'gpt-4.1'
-    const visionModel = process.env.OPENAI_VISION_MODEL || textModel
-    const ocrText = materials.images.length ? await extractTextFromImages(client, visionModel, materials.images) : ''
+    const model = process.env.OPENAI_MODEL || 'gpt-4.1'
+    const ocrText = materials.images.length ? await extractTextFromImages(client, model, materials.images) : ''
     const extractedText = [materials.textFromFiles, ocrText].filter(Boolean).join('\n\n').slice(0, 140_000)
 
     console.log('plan.step.notes.start', { requestId })
-    let notesStep: z.infer<typeof notesSchema>
+    let notesJson: z.infer<typeof notesSchema>
     let rawNotesJson = ''
     let rawNotesText = ''
     try {
-      const notesResult = await generateNotesStep(client, textModel, prompt, extractedText, '')
-      notesStep = notesResult.notes
+      const notesResult = await generateNotesStep(client, model, prompt, extractedText, '')
+      notesJson = notesResult.notes
       rawNotesJson = notesResult.rawNotesJson
       rawNotesText = notesResult.rawNotesText
     } catch (err: any) {
@@ -1068,6 +1152,7 @@ export async function POST(req: Request) {
         { status: 500, headers: { 'cache-control': 'no-store' } }
       )
     }
+    const notesStep = notesJsonToPayload(notesJson)
     console.log('plan.step.notes.end', {
       requestId,
       words: countWords(notesStep.study_notes),
@@ -1079,20 +1164,20 @@ export async function POST(req: Request) {
     console.log('plan.step.daily.start', { requestId })
     let dailyJson: { daily_plan: { total_minutes: number; blocks: Array<{ title: string; duration_minutes: number; type: 'study' | 'review' | 'break' }> } }
     try {
-      dailyJson = await generateDailyStep(client, textModel, notesStep, examDate)
-    } catch {
+      dailyJson = await generateDailyStep(client, model, notesStep, examDate)
+    } catch (err: any) {
       await savePlanToDbBestEffort({
         id: idToUse,
         userId: user.id,
         title: notesStep.title || notesStep.subject || 'Untitled plan',
         created_at: new Date().toISOString(),
         result: null,
-        notes_json: notesStep,
+        notes_json: notesJson,
         daily_json: null,
         practice_json: null,
         generation_status: 'error',
         error: 'DAILY_JSON_FAILED',
-        raw_notes_output: rawNotesJson.slice(0, 20000),
+        raw_notes_output: String(err?.raw || rawNotesJson || '').slice(0, 20000),
       })
       return NextResponse.json(
         { error: 'DAILY_JSON_FAILED' },
@@ -1104,20 +1189,20 @@ export async function POST(req: Request) {
     console.log('plan.step.practice.start', { requestId })
     let practiceJson: { practice: { questions: Array<{ question: string; answer: string; type: 'mcq' | 'short' | 'true_false' }> } }
     try {
-      practiceJson = await generatePracticeStep(client, textModel, notesStep)
-    } catch {
+      practiceJson = await generatePracticeStep(client, model, notesStep)
+    } catch (err: any) {
       await savePlanToDbBestEffort({
         id: idToUse,
         userId: user.id,
         title: notesStep.title || notesStep.subject || 'Untitled plan',
         created_at: new Date().toISOString(),
         result: null,
-        notes_json: notesStep,
+        notes_json: notesJson,
         daily_json: dailyJson,
         practice_json: null,
         generation_status: 'error',
         error: 'PRACTICE_JSON_FAILED',
-        raw_notes_output: rawNotesJson.slice(0, 20000),
+        raw_notes_output: String(err?.raw || rawNotesJson || '').slice(0, 20000),
       })
       return NextResponse.json(
         { error: 'PRACTICE_JSON_FAILED' },
@@ -1126,11 +1211,12 @@ export async function POST(req: Request) {
     }
     console.log('plan.step.practice.end', { requestId, questions: practiceJson.practice.questions.length })
 
-    const language = detectHungarian(`${prompt}\n${notesStep.study_notes}`) ? 'Hungarian' : 'English'
+    const language = 'Hungarian'
     const quickSummary =
-      notesStep.key_topics && notesStep.key_topics.length
-        ? `Key topics: ${notesStep.key_topics.slice(0, 8).join(', ')}`
-        : notesStep.study_notes.split('\n').filter(Boolean)[0] || 'Study notes generated.'
+      notesJson?.plan?.summary?.trim() ||
+      (notesStep.key_topics && notesStep.key_topics.length
+        ? `Kulcstopikok: ${notesStep.key_topics.slice(0, 8).join(', ')}`
+        : notesStep.study_notes.split('\n').filter(Boolean)[0] || 'Tanulasi jegyzet keszult.')
 
     const dailyPlan = [
       {
@@ -1173,7 +1259,7 @@ export async function POST(req: Request) {
       title: plan.title,
       created_at: new Date().toISOString(),
       result: plan,
-      notes_json: notesStep,
+      notes_json: notesJson,
       daily_json: dailyJson,
       practice_json: practiceJson,
       generation_status: 'completed',
@@ -1181,8 +1267,6 @@ export async function POST(req: Request) {
       raw_notes_output: null,
     })
     await setCurrentPlanBestEffort(user.id, idToUse)
-
-    await consumeGeneration(user.id)
 
     return NextResponse.json({ id: idToUse }, { headers: { 'cache-control': 'no-store', 'x-examly-plan': 'ok' } })
   } catch (e: any) {
@@ -1204,39 +1288,19 @@ export async function POST(req: Request) {
 }
 
 function mock(prompt: string, fileNames: string[]) {
-  const base = [
-    '## Definitions',
-    '- Core term: a foundational idea.',
-    '- Scope: what the topic includes and excludes.',
-    '',
-    '## Key Ideas',
-    '- Central principle and why it matters.',
-    '- Cause and effect relationships.',
-    '- Common patterns to recognize.',
-    '',
-    '## Examples',
-    '- Walk through a representative example step by step.',
-    '- Highlight why each step is taken.',
-    '',
-    '## Typical Mistakes',
-    '- Mixing up closely related terms.',
-    '- Skipping required steps.',
-    '- Overgeneralizing from a single example.',
-    '',
-    '## Quick Recap',
-    '- Summarize the main points in 4-6 bullets.',
-  ].join('\n')
-  let studyNotes = `${base}\n\nPrompt: ${prompt || '(empty)'}\nUploads: ${fileNames.join(', ') || '(none)'}\n\n`
-  const filler = 'This section expands the explanation with assumptions, clarifications, and a concise recap of key points. '
-  while (studyNotes.length < 2300) {
-    studyNotes += filler
-  }
-
   return {
-    title: 'Mock plan (no OpenAI key yet)',
-    subject: 'General',
-    study_notes: studyNotes,
-    key_topics: ['Core concepts', 'Key ideas', 'Examples', 'Typical mistakes', 'Recap'],
-    confidence: 6,
+    plan: {
+      title: 'Mock plan (no OpenAI key yet)',
+      summary: `Mock summary. Prompt: ${prompt || '(empty)'}. Uploads: ${fileNames.join(', ') || '(none)'}`,
+    },
+    notes: {
+      sections: [
+        { title: 'Definiciok', bullets: ['Alapfogalom definicio.', 'Fogalmi keretek.'] },
+        { title: 'Kulcsotletek', bullets: ['Kozponti elvek.', 'Osszefuggesek.'] },
+        { title: 'Peldak', bullets: ['Rovid pelda levezetes.', 'Mintafeladat.'] },
+        { title: 'Tipikus hibak', bullets: ['Gyakori felreertesek.', 'Hibas kovetkeztetesek.'] },
+        { title: 'Gyors osszefoglalo', bullets: ['Fontos pontok roviden.', 'Mit kell tudni.'] },
+      ],
+    },
   }
 }

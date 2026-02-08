@@ -12,6 +12,7 @@ import { supabase } from '@/lib/supabaseClient'
 import { buildMaterialObjectKey } from '@/lib/uploadClient'
 import HScroll from '@/components/HScroll'
 import Pomodoro from '@/components/Pomodoro'
+import { computePlanCost } from '@/lib/planCost'
 
 type Block = { type: 'study' | 'break'; minutes: number; label: string }
 type DayPlan = { day: string; focus: string; tasks: string[]; minutes: number; blocks?: Block[] }
@@ -169,6 +170,7 @@ function Inner() {
   const [askError, setAskError] = useState<string | null>(null)
 
   const [userId, setUserId] = useState<string | null>(null)
+  const [credits, setCredits] = useState<number | null>(null)
 
   useEffect(() => {
     let active = true
@@ -185,6 +187,20 @@ function Inner() {
       data.subscription.unsubscribe()
     }
   }, [])
+
+  useEffect(() => {
+    if (!userId) {
+      setCredits(null)
+      return
+    }
+    authedFetch('/api/me')
+      .then((res) => res.json())
+      .then((json) => {
+        const c = Number(json?.entitlement?.credits)
+        setCredits(Number.isFinite(c) ? c : null)
+      })
+      .catch(() => setCredits(null))
+  }, [userId])
 
   async function loadHistory(uid: string | null) {
     if (!uid) {
@@ -400,6 +416,15 @@ function Inner() {
 
   async function generate() {
     setError(null)
+    if (files.length > 15) {
+      setError('You can upload up to 15 files.')
+      return
+    }
+    const cost = computePlanCost(files.length || 0)
+    if (credits != null && credits < cost) {
+      setError(`Not enough credits. This will cost ${cost} credits.`)
+      return
+    }
     setLoading(true)
     setIsGenerating(true)
     try {
@@ -521,6 +546,13 @@ function Inner() {
   const processedCount = materials.filter((m) => m.status === 'processed').length
   const failedCount = materials.filter((m) => m.status === 'failed').length
   const canGenerate = !loading && !isGenerating && (prompt.trim().length >= 6 || files.length > 0)
+  const costEstimate = (() => {
+    try {
+      return computePlanCost(files.length || 0)
+    } catch {
+      return null
+    }
+  })()
 
 
   return (
@@ -594,7 +626,13 @@ function Inner() {
               accept="application/pdf,image/*"
               multiple
               onChange={(e) => {
-                setFiles(Array.from(e.target.files ?? []))
+                const next = Array.from(e.target.files ?? [])
+                if (next.length > 15) {
+                  setError('You can upload up to 15 files.')
+                  setFiles(next.slice(0, 15))
+                } else {
+                  setFiles(next)
+                }
                 setMaterials([])
                 setProcessedFiles(0)
                 setTotalFiles(0)
@@ -605,6 +643,9 @@ function Inner() {
           </label>
 
           {files.length ? <div className="mt-2 text-xs text-white/60">Selected: {files.length} file(s)</div> : null}
+          <div className="mt-2 text-xs text-white/60">
+            {costEstimate == null ? 'Max 15 files.' : `This will cost ${costEstimate} credits.`}
+          </div>
           {isGenerating && totalFiles > 0 ? (
             <div className="mt-2 text-xs text-white/60">
               Processing {processedFiles}/{totalFiles}…

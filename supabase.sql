@@ -34,6 +34,23 @@ create trigger tr_profiles_touch
 before update on public.profiles
 for each row execute function public.touch_updated_at();
 
+-- 1b) PLANS
+create table if not exists public.plans (
+  id uuid primary key,
+  user_id uuid not null,
+  title text,
+  created_at timestamptz not null default now(),
+  result jsonb,
+  notes_json jsonb,
+  daily_json jsonb,
+  practice_json jsonb,
+  generation_status text,
+  error text,
+  raw_notes_output text
+);
+
+create index if not exists plans_user_created_idx on public.plans(user_id, created_at desc);
+
 -- 2) STRIPE EVENT IDEMPOTENCY
 create table if not exists public.stripe_events (
   id bigserial primary key,
@@ -122,6 +139,7 @@ $$;
 
 -- 6) RLS
 alter table public.profiles enable row level security;
+alter table public.plans enable row level security;
 
 drop policy if exists "profiles: read own" on public.profiles;
 create policy "profiles: read own" on public.profiles
@@ -132,5 +150,15 @@ drop policy if exists "profiles: update own" on public.profiles;
 create policy "profiles: update own" on public.profiles
 for update
 using (auth.uid() = id);
+
+drop policy if exists "plans: read own" on public.plans;
+create policy "plans: read own" on public.plans
+for select
+using (auth.uid() = user_id);
+
+drop policy if exists "plans: update own" on public.plans;
+create policy "plans: update own" on public.plans
+for update
+using (auth.uid() = user_id);
 
 -- Inserts are done by service role (server) via SUPABASE_SERVICE_ROLE_KEY.

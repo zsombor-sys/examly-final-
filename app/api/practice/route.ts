@@ -194,6 +194,7 @@ export async function POST(req: Request) {
     if (!apiKey) return NextResponse.json({ error: 'OPENAI_KEY_MISSING' }, { status: 500 })
 
     const client = new OpenAI({ apiKey })
+    const model = process.env.OPENAI_TEXT_MODEL || 'gpt-4.1'
     const system = [
       'Return ONLY valid JSON matching the schema. No markdown or extra text.',
       'Generate at least 12 questions total.',
@@ -211,7 +212,7 @@ export async function POST(req: Request) {
     let practice: z.infer<typeof practiceSchema>
     try {
       const resp = await client.chat.completions.create({
-        model: 'gpt-4.1',
+        model,
         messages: [
           { role: 'system', content: system },
           { role: 'user', content: userMsg },

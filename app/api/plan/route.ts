@@ -317,6 +317,54 @@ function safeJsonParse(text: string) {
   return JSON.parse(first)
 }
 
+async function callJsonWithRetries<T>(
+  client: OpenAI,
+  model: string,
+  system: string,
+  user: string,
+  schema: z.ZodSchema<T>,
+  jsonSchema: any,
+  retries: number,
+  validate?: (data: T) => boolean
+) {
+  let lastRaw = ''
+  for (let attempt = 0; attempt <= retries; attempt += 1) {
+    const sys = attempt === 0 ? system : 'Return ONLY JSON matching the schema. No extra text.'
+    const resp = await client.chat.completions.create({
+      model,
+      messages: [
+        { role: 'system', content: sys },
+        { role: 'user', content: user },
+      ],
+      temperature: 0.2,
+      response_format: {
+        type: 'json_schema',
+        json_schema: {
+          name: 'plan_step',
+          schema: jsonSchema,
+        },
+      },
+    })
+    const raw = String(resp.choices?.[0]?.message?.content ?? '').trim()
+    lastRaw = raw
+    try {
+      const parsed = safeJsonParse(raw)
+      const data = schema.parse(parsed)
+      if (validate && !validate(data)) throw new Error('AI_JSON_INVALID')
+      return { data, raw }
+    } catch (err) {
+      if (attempt >= retries) {
+        const e: any = new Error('AI_JSON_PARSE_FAILED')
+        e.raw = lastRaw
+        throw e
+      }
+    }
+  }
+  const e: any = new Error('AI_JSON_PARSE_FAILED')
+  e.raw = lastRaw
+  throw e
+}
+
 async function callJson<T>(
   client: OpenAI,
   model: string,
@@ -448,12 +496,16 @@ async function generateNotesStep(
   ocrText: string
 ) {
   const systemText = [
-    'Write detailed study notes in Hungarian.',
-    'Output plain text only.',
-    'Minimum 2200 characters.',
-    'Use headings with "##" and bullet lists.',
-    'Include sections: Definitions, Key Ideas, Examples, Typical Mistakes, Quick Recap.',
-    'If info is insufficient, make reasonable assumptions and still produce a full study_notes body.',
+    'Irj reszletes, strukturalt tanulasi jegyzetet magyarul.',
+    'Legalabb 900 szo legyen.',
+    'Hasznalj "##" cimsorokat es bullet listakat.',
+    'Hasznald ezeket a szakaszokat pontosan:',
+    '## Definiciok',
+    '## Kulcsotletek',
+    '## Peldak',
+    '## Tipikus hibak',
+    '## Gyors osszefoglalo',
+    'Ha keves az info, tegyel fel esszeru felteveseket es akkor is legyen hosszu jegyzet.',
   ].join('\n')
 
   const userText = [
@@ -478,37 +530,18 @@ async function generateNotesStep(
   ].join('\n')
   const userJson = `Notes:\n${rawNotesText || '(empty)'}`
 
-  let jsonOk = false
-  let notes: z.infer<typeof notesSchema> = fallbackNotes(rawNotesText || userText)
-  try {
-    const jsonResp = await client.chat.completions.create({
-      model,
-      messages: [
-        { role: 'system', content: systemJson },
-        { role: 'user', content: userJson },
-      ],
-      temperature: 0.2,
-      response_format: {
-        type: 'json_schema',
-        json_schema: {
-          name: 'notes_json',
-          schema: notesJsonSchema,
-        },
-      },
-    })
-    const jsonText = String(jsonResp.choices?.[0]?.message?.content ?? '').trim()
-    const parsed = safeJsonParse(jsonText)
-    notes = notesSchema.parse(parsed)
-    jsonOk = validateNotes(notes)
-  } catch {
-    jsonOk = false
-  }
+  const { data, raw } = await callJsonWithRetries(
+    client,
+    model,
+    systemJson,
+    userJson,
+    notesSchema,
+    notesJsonSchema,
+    2,
+    validateNotes
+  )
 
-  if (!jsonOk) {
-    notes = fallbackNotes(rawNotesText || userText)
-  }
-
-  return { notes, rawNotesText, jsonOk }
+  return { notes: data, rawNotesText, rawNotesJson: raw }
 }
 
 async function generateDailyStep(
@@ -531,16 +564,18 @@ async function generateDailyStep(
     `Study notes:\n${notes.study_notes}`,
   ].join('\n\n')
 
-  try {
-    let daily = await callJson(client, model, system, user, dailySchema, dailyJsonSchema, 1)
-    if (!validateDaily(daily)) {
-      const fixUser = `${user}\n\nFix to satisfy schema/rules. Return ONLY JSON.`
-      daily = await callJson(client, model, system, fixUser, dailySchema, dailyJsonSchema, 0)
-    }
-    if (validateDaily(daily)) return normalizeDaily(daily)
-  } catch {}
+  const { data } = await callJsonWithRetries(
+    client,
+    model,
+    system,
+    user,
+    dailySchema,
+    dailyJsonSchema,
+    2,
+    validateDaily
+  )
 
-  return fallbackDaily(notes)
+  return normalizeDaily(data)
 }
 
 async function generatePracticeStep(client: OpenAI, model: string, notes: z.infer<typeof notesSchema>) {
@@ -558,24 +593,33 @@ async function generatePracticeStep(client: OpenAI, model: string, notes: z.infe
     `Study notes:\n${notes.study_notes}`,
   ].join('\n\n')
 
-  try {
-    let practice = await callJson(client, model, system, user, practiceSchema, practiceJsonSchema, 1)
-    if (!validatePractice(practice)) {
-      const fixUser = `${user}\n\nFix to satisfy schema/rules. Return ONLY JSON.`
-      practice = await callJson(client, model, system, fixUser, practiceSchema, practiceJsonSchema, 0)
-    }
-    if (validatePractice(practice)) return normalizePractice(practice)
-  } catch {}
+  const { data } = await callJsonWithRetries(
+    client,
+    model,
+    system,
+    user,
+    practiceSchema,
+    practiceJsonSchema,
+    2,
+    validatePractice
+  )
 
-  return fallbackPractice(notes)
+  return normalizePractice(data)
+}
+
+function countWords(text: string) {
+  return String(text || '')
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean).length
 }
 
 function validateNotes(notes: z.infer<typeof notesSchema>) {
   const text = String(notes?.study_notes || '')
-  if (text.length < 2200) return false
+  if (countWords(text) < 900) return false
   if (!/##\s+/.test(text)) return false
   if (!/(^|\n)\s*[-*]\s+/.test(text)) return false
-  const required = ['Definitions', 'Key Ideas', 'Examples', 'Typical Mistakes', 'Quick Recap']
+  const required = ['Definiciok', 'Kulcsotletek', 'Peldak', 'Tipikus hibak', 'Gyors osszefoglalo']
   for (const r of required) {
     const re = new RegExp(`##\\s*${r}\\b`, 'i')
     if (!re.test(text)) return false
@@ -599,24 +643,24 @@ function fallbackNotes(rawNotesText: string) {
 
 function buildNotesShell() {
   const parts = [
-    '## Definitions',
+    '## Definiciok',
     '- Alapfogalom definicio.',
     '',
-    '## Key Ideas',
+    '## Kulcsotletek',
     '- Kozponti osszefuggesek roviden.',
     '',
-    '## Examples',
+    '## Peldak',
     '- Egy egyszeru pelda levezetes.',
     '',
-    '## Typical Mistakes',
+    '## Tipikus hibak',
     '- Gyakori felreertesek felsorolasa.',
     '',
-    '## Quick Recap',
+    '## Gyors osszefoglalo',
     '- 4-6 rovid bulletpont.',
   ]
   let text = parts.join('\n')
-  const filler = ' Ez a resz a feltevésekre es osszegzesre epul, rovid, tanulhato allitasokkal.'
-  while (text.length < 2300) text += filler
+  const filler = ' Ez a resz a feltevesekre es osszegzesre epul, rovid, tanulhato allitasokkal.'
+  while (countWords(text) < 930) text += filler
   return text
 }
 
@@ -661,13 +705,47 @@ function validatePractice(practice: z.infer<typeof practiceSchema>) {
   return true
 }
 
-function normalizePractice(practice: z.infer<typeof practiceSchema>) {
-  const questions = practice.practice.questions.map((q) => ({
-    question: String(q.question || '').trim(),
-    answer: limitAnswer(String(q.answer || '').trim()),
-    type: q.type === 'mcq' || q.type === 'true_false' ? q.type : 'short',
-  }))
+function normalizePractice(
+  practice: z.infer<typeof practiceSchema>
+): { practice: { questions: Array<{ question: string; answer: string; type: 'mcq' | 'short' | 'true_false' }> } } {
+  const questions: Array<{ question: string; answer: string; type: 'mcq' | 'short' | 'true_false' }> =
+    practice.practice.questions.map((q) => ({
+      question: String(q.question || '').trim(),
+      answer: limitAnswer(String(q.answer || '').trim()),
+      type: q.type === 'mcq' || q.type === 'true_false' ? q.type : 'short',
+    }))
   return { practice: { questions } }
+}
+
+function dailyJsonToPlan(dailyJson: any, notes: any) {
+  const blocks = Array.isArray(dailyJson?.daily_plan?.blocks) ? dailyJson.daily_plan.blocks : []
+  if (!blocks.length) return []
+  const minutes = Number(dailyJson?.daily_plan?.total_minutes) || blocks.reduce((s: number, b: any) => s + Number(b.duration_minutes || 0), 0)
+  return [
+    {
+      day: 'Day 1',
+      focus: String(notes?.subject || notes?.title || 'Focus'),
+      minutes,
+      tasks: blocks.filter((b: any) => b.type !== 'break').map((b: any) => String(b.title || 'Study')),
+      blocks: blocks.map((b: any) => ({
+        type: b.type === 'break' ? 'break' : 'study',
+        minutes: Number(b.duration_minutes || 0) || 25,
+        label: String(b.title || (b.type === 'break' ? 'Break' : 'Focus')),
+      })),
+    },
+  ]
+}
+
+function practiceJsonToQuestions(practiceJson: any) {
+  const questions = Array.isArray(practiceJson?.practice?.questions) ? practiceJson.practice.questions : []
+  return questions.map((q: any, i: number) => ({
+    id: `q${i + 1}`,
+    type: q.type === 'mcq' ? 'mcq' : 'short',
+    question: String(q.question || ''),
+    options: q.type === 'true_false' ? ['True', 'False'] : null,
+    answer: q.answer != null ? String(q.answer) : null,
+    explanation: null,
+  }))
 }
 
 function fallbackDaily(notes: z.infer<typeof notesSchema>) {
@@ -749,7 +827,21 @@ async function setCurrentPlanBestEffort(userId: string, planId: string) {
   }
 }
 
-async function savePlanToDbBestEffort(row: { id: string; title: string; created_at: string; result: any; userId: string }) {
+type SavePlanRow = {
+  id: string
+  userId: string
+  title: string
+  created_at: string
+  result: any
+  notes_json?: any
+  daily_json?: any
+  practice_json?: any
+  generation_status?: string | null
+  error?: string | null
+  raw_notes_output?: string | null
+}
+
+async function savePlanToDbBestEffort(row: SavePlanRow) {
   try {
     const sb = supabaseAdmin()
     await sb
@@ -761,6 +853,12 @@ async function savePlanToDbBestEffort(row: { id: string; title: string; created_
           title: row.title,
           created_at: row.created_at,
           result: row.result,
+          notes_json: row.notes_json ?? null,
+          daily_json: row.daily_json ?? null,
+          practice_json: row.practice_json ?? null,
+          generation_status: row.generation_status ?? null,
+          error: row.error ?? null,
+          raw_notes_output: row.raw_notes_output ?? null,
         },
         { onConflict: 'id' }
       )
@@ -780,10 +878,44 @@ export async function GET(req: Request) {
     const id = searchParams.get('id')
     if (!id) return NextResponse.json({ error: 'Missing id' }, { status: 400, headers: { 'cache-control': 'no-store' } })
 
-    const row = getPlan(user.id, id)
-    if (!row) return NextResponse.json({ error: 'Not found' }, { status: 404, headers: { 'cache-control': 'no-store' } })
+    const sb = supabaseAdmin()
+    const { data, error } = await sb
+      .from('plans')
+      .select('result, notes_json, daily_json, practice_json, title')
+      .eq('user_id', user.id)
+      .eq('id', id)
+      .maybeSingle()
+    if (error) throw error
 
-    return NextResponse.json({ result: row.result }, { headers: { 'cache-control': 'no-store' } })
+    if (!data) {
+      const row = getPlan(user.id, id)
+      if (!row) return NextResponse.json({ error: 'Not found' }, { status: 404, headers: { 'cache-control': 'no-store' } })
+      return NextResponse.json({ result: row.result }, { headers: { 'cache-control': 'no-store' } })
+    }
+
+    if (data.result) {
+      return NextResponse.json({ result: data.result }, { headers: { 'cache-control': 'no-store' } })
+    }
+
+    const notes = data.notes_json || null
+    const dailyPlan = dailyJsonToPlan(data.daily_json, notes)
+    const practiceQuestions = practiceJsonToQuestions(data.practice_json)
+    const plan = normalizePlan({
+      title: notes?.title || data.title || 'Untitled plan',
+      language: detectHungarian(String(notes?.study_notes || '')) ? 'Hungarian' : 'English',
+      exam_date: null,
+      confidence: Number.isFinite(Number(notes?.confidence)) ? Number(notes.confidence) : 6,
+      quick_summary:
+        Array.isArray(notes?.key_topics) && notes.key_topics.length
+          ? `Key topics: ${notes.key_topics.slice(0, 8).join(', ')}`
+          : String(notes?.study_notes || '').split('\n').filter(Boolean)[0] || 'Study notes generated.',
+      study_notes: String(notes?.study_notes || ''),
+      daily_plan: dailyPlan,
+      practice_questions: practiceQuestions,
+      notes_payload: notes,
+    })
+
+    return NextResponse.json({ result: plan }, { headers: { 'cache-control': 'no-store' } })
   } catch (e: any) {
     return NextResponse.json({ error: e?.message ?? 'Server error' }, { status: e?.status ?? 400, headers: { 'cache-control': 'no-store' } })
   }
@@ -805,6 +937,7 @@ export async function POST(req: Request) {
 
     const promptRaw = parsedRequest.value.prompt
     const planId = parsedRequest.value.planId
+    const idToUse = planId || crypto.randomUUID()
 
     // ✅ PRECHECK: ne generáljunk ha nincs entitlement
     const profile = await getProfileStrict(user.id)
@@ -840,6 +973,20 @@ export async function POST(req: Request) {
       promptRaw.trim() ||
       (materials.fileNames.length ? 'Create structured study notes and a study plan based on the uploaded materials.' : '')
 
+    await savePlanToDbBestEffort({
+      id: idToUse,
+      userId: user.id,
+      title: 'Generating plan',
+      created_at: new Date().toISOString(),
+      result: null,
+      notes_json: null,
+      daily_json: null,
+      practice_json: null,
+      generation_status: 'processing',
+      error: null,
+      raw_notes_output: null,
+    })
+
     if (!openAiKey) {
       console.log('plan.generate request', {
         planId,
@@ -852,6 +999,10 @@ export async function POST(req: Request) {
         notesStep.key_topics && notesStep.key_topics.length
           ? `Key topics: ${notesStep.key_topics.slice(0, 8).join(', ')}`
           : notesStep.study_notes.split('\n').filter(Boolean)[0] || 'Study notes generated.'
+      const dailyJson = fallbackDaily(notesStep)
+      const practiceJson = fallbackPractice(notesStep)
+      const dailyPlan = dailyJsonToPlan(dailyJson, notesStep)
+      const practiceQuestions = practiceJsonToQuestions(practiceJson)
       const plan = normalizePlan({
         title: notesStep.title || notesStep.subject || 'Untitled plan',
         language: detectHungarian(`${prompt}\n${notesStep.study_notes}`) ? 'Hungarian' : 'English',
@@ -859,40 +1010,150 @@ export async function POST(req: Request) {
         confidence: notesStep.confidence,
         quick_summary: quickSummary,
         study_notes: notesStep.study_notes,
-        daily_plan: [],
-        practice_questions: [],
+        daily_plan: dailyPlan,
+        practice_questions: practiceQuestions,
         notes_payload: notesStep,
       })
-      const saved = savePlan(user.id, plan.title || notesStep.subject || 'Untitled plan', plan)
-      await savePlanToDbBestEffort({ ...saved, userId: user.id })
-      await setCurrentPlanBestEffort(user.id, saved.id)
+      await savePlanToDbBestEffort({
+        id: idToUse,
+        userId: user.id,
+        title: plan.title || notesStep.subject || 'Untitled plan',
+        created_at: new Date().toISOString(),
+        result: plan,
+        notes_json: notesStep,
+        daily_json: dailyJson,
+        practice_json: practiceJson,
+        generation_status: 'completed',
+        error: null,
+        raw_notes_output: null,
+      })
+      await setCurrentPlanBestEffort(user.id, idToUse)
 
       await consumeGeneration(user.id)
 
-      return NextResponse.json({ id: saved.id, result: plan }, { headers: { 'cache-control': 'no-store', 'x-examly-plan': 'mock' } })
+      return NextResponse.json({ id: idToUse }, { headers: { 'cache-control': 'no-store', 'x-examly-plan': 'mock' } })
     }
 
     const client = new OpenAI({ apiKey: openAiKey })
-    const model = 'gpt-4.1'
-    const ocrText = materials.images.length ? await extractTextFromImages(client, model, materials.images) : ''
+    const textModel = process.env.OPENAI_TEXT_MODEL || 'gpt-4.1'
+    const visionModel = process.env.OPENAI_VISION_MODEL || textModel
+    const ocrText = materials.images.length ? await extractTextFromImages(client, visionModel, materials.images) : ''
+    const extractedText = [materials.textFromFiles, ocrText].filter(Boolean).join('\n\n').slice(0, 140_000)
 
     console.log('plan.step.notes.start', { requestId })
-    const notesResult = await generateNotesStep(client, model, prompt, materials.textFromFiles, ocrText)
-    const notesStep = notesResult.notes
+    let notesStep: z.infer<typeof notesSchema>
+    let rawNotesJson = ''
+    let rawNotesText = ''
+    try {
+      const notesResult = await generateNotesStep(client, textModel, prompt, extractedText, '')
+      notesStep = notesResult.notes
+      rawNotesJson = notesResult.rawNotesJson
+      rawNotesText = notesResult.rawNotesText
+    } catch (err: any) {
+      await savePlanToDbBestEffort({
+        id: idToUse,
+        userId: user.id,
+        title: 'Plan generation failed',
+        created_at: new Date().toISOString(),
+        result: null,
+        notes_json: null,
+        daily_json: null,
+        practice_json: null,
+        generation_status: 'error',
+        error: 'NOTES_JSON_FAILED',
+        raw_notes_output: String(err?.raw || rawNotesText || '').slice(0, 20000),
+      })
+      return NextResponse.json(
+        { error: 'NOTES_JSON_FAILED' },
+        { status: 500, headers: { 'cache-control': 'no-store' } }
+      )
+    }
     console.log('plan.step.notes.end', {
       requestId,
-      chars: notesStep.study_notes.length,
+      words: countWords(notesStep.study_notes),
       topics: notesStep.key_topics.length,
-      raw_length: notesResult.rawNotesText.length,
-      json_ok: notesResult.jsonOk,
+      raw_length: rawNotesText.length,
     })
 
     const examDate = inferExamDate(prompt)
+    console.log('plan.step.daily.start', { requestId })
+    let dailyJson: { daily_plan: { total_minutes: number; blocks: Array<{ title: string; duration_minutes: number; type: 'study' | 'review' | 'break' }> } }
+    try {
+      dailyJson = await generateDailyStep(client, textModel, notesStep, examDate)
+    } catch {
+      await savePlanToDbBestEffort({
+        id: idToUse,
+        userId: user.id,
+        title: notesStep.title || notesStep.subject || 'Untitled plan',
+        created_at: new Date().toISOString(),
+        result: null,
+        notes_json: notesStep,
+        daily_json: null,
+        practice_json: null,
+        generation_status: 'error',
+        error: 'DAILY_JSON_FAILED',
+        raw_notes_output: rawNotesJson.slice(0, 20000),
+      })
+      return NextResponse.json(
+        { error: 'DAILY_JSON_FAILED' },
+        { status: 500, headers: { 'cache-control': 'no-store' } }
+      )
+    }
+    console.log('plan.step.daily.end', { requestId, blocks: dailyJson.daily_plan.blocks.length })
+
+    console.log('plan.step.practice.start', { requestId })
+    let practiceJson: { practice: { questions: Array<{ question: string; answer: string; type: 'mcq' | 'short' | 'true_false' }> } }
+    try {
+      practiceJson = await generatePracticeStep(client, textModel, notesStep)
+    } catch {
+      await savePlanToDbBestEffort({
+        id: idToUse,
+        userId: user.id,
+        title: notesStep.title || notesStep.subject || 'Untitled plan',
+        created_at: new Date().toISOString(),
+        result: null,
+        notes_json: notesStep,
+        daily_json: dailyJson,
+        practice_json: null,
+        generation_status: 'error',
+        error: 'PRACTICE_JSON_FAILED',
+        raw_notes_output: rawNotesJson.slice(0, 20000),
+      })
+      return NextResponse.json(
+        { error: 'PRACTICE_JSON_FAILED' },
+        { status: 500, headers: { 'cache-control': 'no-store' } }
+      )
+    }
+    console.log('plan.step.practice.end', { requestId, questions: practiceJson.practice.questions.length })
+
     const language = detectHungarian(`${prompt}\n${notesStep.study_notes}`) ? 'Hungarian' : 'English'
     const quickSummary =
       notesStep.key_topics && notesStep.key_topics.length
         ? `Key topics: ${notesStep.key_topics.slice(0, 8).join(', ')}`
         : notesStep.study_notes.split('\n').filter(Boolean)[0] || 'Study notes generated.'
+
+    const dailyPlan = [
+      {
+        day: 'Day 1',
+        focus: notesStep.subject || notesStep.title,
+        minutes: dailyJson.daily_plan.total_minutes,
+        tasks: dailyJson.daily_plan.blocks.filter((b) => b.type !== 'break').map((b) => b.title),
+        blocks: dailyJson.daily_plan.blocks.map((b) => ({
+          type: b.type === 'break' ? 'break' : 'study',
+          minutes: b.duration_minutes,
+          label: b.title,
+        })),
+      },
+    ]
+
+    const practiceQuestions = practiceJson.practice.questions.map((q, i) => ({
+      id: `q${i + 1}`,
+      type: q.type === 'mcq' ? 'mcq' : 'short',
+      question: q.question,
+      options: q.type === 'true_false' ? ['True', 'False'] : null,
+      answer: q.answer,
+      explanation: null,
+    }))
 
     const plan = normalizePlan({
       title: notesStep.title || notesStep.subject || 'Untitled plan',
@@ -901,18 +1162,29 @@ export async function POST(req: Request) {
       confidence: notesStep.confidence,
       quick_summary: quickSummary,
       study_notes: notesStep.study_notes,
-      daily_plan: [],
-      practice_questions: [],
+      daily_plan: dailyPlan,
+      practice_questions: practiceQuestions,
       notes_payload: notesStep,
     })
 
-    const saved = savePlan(user.id, plan.title || notesStep.subject || 'Untitled plan', plan)
-    await savePlanToDbBestEffort({ ...saved, userId: user.id })
-    await setCurrentPlanBestEffort(user.id, saved.id)
+    await savePlanToDbBestEffort({
+      id: idToUse,
+      userId: user.id,
+      title: plan.title,
+      created_at: new Date().toISOString(),
+      result: plan,
+      notes_json: notesStep,
+      daily_json: dailyJson,
+      practice_json: practiceJson,
+      generation_status: 'completed',
+      error: null,
+      raw_notes_output: null,
+    })
+    await setCurrentPlanBestEffort(user.id, idToUse)
 
     await consumeGeneration(user.id)
 
-    return NextResponse.json({ id: saved.id, result: plan }, { headers: { 'cache-control': 'no-store', 'x-examly-plan': 'ok' } })
+    return NextResponse.json({ id: idToUse }, { headers: { 'cache-control': 'no-store', 'x-examly-plan': 'ok' } })
   } catch (e: any) {
     console.error('[plan.error]', {
       requestId,

@@ -16,6 +16,8 @@ import { MAX_IMAGES, creditsForImages } from '@/lib/credits'
 type Block = { type: 'study' | 'break'; minutes: number; label: string }
 type DayPlan = { day: string; focus: string; tasks: string[]; minutes: number; blocks?: Block[] }
 type PlanResult = {
+  title?: string | null
+  language?: string | null
   plan: { title: string; overview: string; topics: string[] }
   notes: { sections: Array<{ title: string; content: string }> }
   daily: { blocks: Array<{ title: string; duration_minutes: number; description: string }> }

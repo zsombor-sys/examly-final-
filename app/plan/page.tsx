@@ -11,7 +11,7 @@ import { supabase } from '@/lib/supabaseClient'
 import { buildMaterialObjectKey } from '@/lib/uploadClient'
 import HScroll from '@/components/HScroll'
 import Pomodoro from '@/components/Pomodoro'
-import { computePlanCost } from '@/lib/planCost'
+import { MAX_IMAGES, creditsForImages } from '@/lib/credits'
 
 type Block = { type: 'study' | 'break'; minutes: number; label: string }
 type DayPlan = { day: string; focus: string; tasks: string[]; minutes: number; blocks?: Block[] }
@@ -19,14 +19,10 @@ type PlanResult = {
   title: string
   language: string
   exam_date: string | null
-  quick_summary: string
-  study_notes_markdown: string
-  daily_plan: {
-    blocks: Array<{ start: string; end: string; task: string; details: string }>
-  }
-  practice: {
-    questions: Array<{ q: string; options?: string[] | null; answer: string; explanation: string }>
-  }
+  confidence: number
+  notes: string
+  daily: Array<{ start: string; end: string; task: string; details: string }>
+  practice: Array<{ q: string; options?: string[] | null; answer: string; explanation: string }>
 }
 
 type SavedPlan = { id: string; title: string; created_at: string }
@@ -146,7 +142,7 @@ function Inner() {
   const [files, setFiles] = useState<File[]>([])
   const [loading, setLoading] = useState(false)
   const [isGenerating, setIsGenerating] = useState(false)
-  const [materials, setMaterials] = useState<Array<{ id: string; status: string; processing_error?: string | null }>>([])
+  const [materials, setMaterials] = useState<Array<{ id: string; status: string; error?: string | null }>>([])
   const [processedFiles, setProcessedFiles] = useState(0)
   const [totalFiles, setTotalFiles] = useState(0)
   const [planId, setPlanId] = useState<string | null>(null)
@@ -401,7 +397,7 @@ function Inner() {
     if (!res.ok) throw new Error(json?.error ?? 'Failed to load materials status')
     const items = Array.isArray(json?.items) ? json.items : []
     setMaterials(items)
-    return items as Array<{ id: string; status: string; processing_error?: string | null }>
+    return items as Array<{ id: string; status: string; error?: string | null }>
   }
 
   async function kickProcessing(nextPlanId: string) {
@@ -412,11 +408,11 @@ function Inner() {
 
   async function generate() {
     setError(null)
-    if (files.length > 15) {
-      setError('You can upload up to 15 files.')
+    if (files.length > MAX_IMAGES) {
+      setError(`You can upload up to ${MAX_IMAGES} files.`)
       return
     }
-    const cost = computePlanCost(imageCount || 0)
+    const cost = creditsForImages(imageCount || 0)
     if (credits != null && credits < cost) {
       setError(`Not enough credits. This will cost ${cost} credits.`)
       return
@@ -436,7 +432,7 @@ function Inner() {
       const start = Date.now()
       while (true) {
         const items = await fetchStatus(nextPlanId)
-        const pending = items.filter((x) => x.status === 'uploaded' || x.status === 'processing' || x.status === 'failed')
+        const pending = items.filter((x) => x.status === 'uploaded' || x.status === 'processing')
         if (pending.length === 0) break
         await kickProcessing(nextPlanId)
         if (Date.now() - start > 120_000) {
@@ -459,20 +455,31 @@ function Inner() {
       if (res.status === 202) {
         setError(`Processing materials… (${json?.processed ?? 0}/${json?.total ?? 0})`)
         const start2 = Date.now()
+        let shouldRetry = false
         while (Date.now() - start2 < 60_000) {
           await kickProcessing(nextPlanId)
           const items = await fetchStatus(nextPlanId)
           const processed = items.filter((x) => x.status === 'processed').length
+          const pending = items.filter((x) => x.status === 'uploaded' || x.status === 'processing')
           if (processed > 0) {
-            const retry = await authedFetch('/api/plan', { method: 'POST', body: form })
-            json = await retry.json().catch(() => ({} as any))
-            if (!retry.ok) {
-              const message = json?.details || json?.error || json?.message
-              throw new Error(message ?? `Generation failed (${retry.status})`)
-            }
+            shouldRetry = true
+            break
+          }
+          if (pending.length === 0) {
+            shouldRetry = true
             break
           }
           await new Promise((r) => setTimeout(r, 2000))
+        }
+        if (shouldRetry) {
+          const retry = await authedFetch('/api/plan', { method: 'POST', body: form })
+          json = await retry.json().catch(() => ({} as any))
+          if (!retry.ok) {
+            const message = json?.details || json?.error || json?.message
+            throw new Error(message ?? `Generation failed (${retry.status})`)
+          }
+        } else {
+          throw new Error('Processing materials timed out. Please try again.')
         }
       } else if (!res.ok) {
         const message = json?.details || json?.error || json?.message
@@ -549,14 +556,14 @@ function Inner() {
   const imageCount = countImages(files)
   const costEstimate = (() => {
     try {
-      return computePlanCost(imageCount || 0)
+      return creditsForImages(imageCount || 0)
     } catch {
       return null
     }
   })()
   const pomodoroPlan = useMemo<DayPlan[]>(() => {
     if (!result) return []
-    const blocksRaw = Array.isArray(result.daily_plan?.blocks) ? result.daily_plan.blocks : []
+    const blocksRaw = Array.isArray(result.daily) ? result.daily : []
     const blocks: Block[] = blocksRaw.map((b) => {
       const toMinutes = (val: string) => {
         const m = String(val || '').match(/^(\d{1,2}):(\d{2})/)
@@ -651,9 +658,9 @@ function Inner() {
               multiple
               onChange={(e) => {
                 const next = Array.from(e.target.files ?? [])
-                if (next.length > 15) {
-                  setError('You can upload up to 15 files.')
-                  setFiles(next.slice(0, 15))
+                if (next.length > MAX_IMAGES) {
+                  setError(`You can upload up to ${MAX_IMAGES} files.`)
+                  return
                 } else {
                   setFiles(next)
                 }
@@ -668,7 +675,7 @@ function Inner() {
 
           {files.length ? <div className="mt-2 text-xs text-white/60">Selected: {files.length} file(s)</div> : null}
           <div className="mt-2 text-xs text-white/60">
-            {costEstimate == null ? 'Max 15 files.' : `This will cost ${costEstimate} credits.`}
+            {costEstimate == null ? `Max ${MAX_IMAGES} files.` : `This will cost ${costEstimate} credits.`}
           </div>
           {isGenerating && totalFiles > 0 ? (
             <div className="mt-2 text-xs text-white/60">
@@ -678,12 +685,12 @@ function Inner() {
           ) : null}
           {materials.length > 0 ? (
             <div className="mt-2 space-y-1 text-xs text-white/60">
-              {materials.map((m, i) => (
-                <div key={m.id}>
-                  File {i + 1}: {m.status}
-                  {m.status === 'failed' && m.processing_error ? ` — ${m.processing_error}` : ''}
-                </div>
-              ))}
+                  {materials.map((m, i) => (
+                    <div key={m.id}>
+                      File {i + 1}: {m.status}
+                      {m.status === 'failed' && m.error ? ` — ${m.error}` : ''}
+                    </div>
+                  ))}
             </div>
           ) : null}
           {failedCount > 0 ? (
@@ -723,8 +730,11 @@ function Inner() {
                   </p>
                 ) : null}
 
-                {result?.quick_summary ? (
-                  <p className="mt-2 max-w-[80ch] text-sm text-white/70 break-words">{result.quick_summary}</p>
+                {result?.notes ? (
+                  <p className="mt-2 max-w-[80ch] text-sm text-white/70 break-words">
+                    {result.notes.slice(0, 200)}
+                    {result.notes.length > 200 ? '…' : ''}
+                  </p>
                 ) : (
                   <p className="mt-2 max-w-[80ch] text-sm text-white/50">
                     Generate a plan to see your schedule, notes, and practice questions.
@@ -759,7 +769,10 @@ function Inner() {
               {tab === 'plan' && result && (
                 <div className="rounded-3xl border border-white/10 bg-white/[0.02] p-5 min-w-0 overflow-hidden">
                   <div className="text-xs uppercase tracking-[0.18em] text-white/55">Plan</div>
-                  <div className="mt-3 text-sm text-white/75 whitespace-pre-wrap">{result.quick_summary}</div>
+                  <div className="mt-3 text-sm text-white/75 whitespace-pre-wrap">
+                    {result.notes.slice(0, 300)}
+                    {result.notes.length > 300 ? '…' : ''}
+                  </div>
                   {result.exam_date ? (
                     <div className="mt-3 text-xs text-white/60">Exam date: {result.exam_date}</div>
                   ) : null}
@@ -771,7 +784,7 @@ function Inner() {
                 <div className="rounded-3xl border border-white/10 bg-white/[0.02] p-5 min-w-0 overflow-hidden">
                   <div className="text-xs uppercase tracking-[0.18em] text-white/55">Notes</div>
                   <div className="mt-3 richtext min-w-0 max-w-full overflow-x-auto">
-                    <MarkdownMath content={result.study_notes_markdown || ''} />
+                    <MarkdownMath content={result.notes || ''} />
                   </div>
                 </div>
               )}
@@ -787,7 +800,7 @@ function Inner() {
                     <section className="w-full rounded-3xl border border-white/10 bg-white/[0.02] p-5 min-w-0 overflow-hidden">
                       <div className="text-xs uppercase tracking-[0.18em] text-white/55">Daily schedule</div>
                       <div className="mt-3 space-y-3 text-sm text-white/80">
-                        {(result.daily_plan?.blocks ?? []).map((b, i) => (
+                        {(result.daily ?? []).map((b, i) => (
                           <div key={i} className="rounded-2xl border border-white/10 bg-black/30 px-4 py-3">
                             <div className="flex items-center justify-between gap-3">
                               <div className="text-white/90">{b.task}</div>
@@ -807,7 +820,7 @@ function Inner() {
               {/* PRACTICE */}
               {tab === 'practice' && result && (
                 <div className="space-y-6 min-w-0">
-                  {(result.practice?.questions ?? []).map((q, qi) => (
+                  {(result.practice ?? []).map((q, qi) => (
                     <section
                       key={`${qi}-${q.q}`}
                       className="rounded-3xl border border-white/10 bg-white/[0.02] p-5 min-w-0 overflow-hidden"

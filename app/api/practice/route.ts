@@ -162,6 +162,15 @@ async function fetchPlanResult(userId: string, planId: string) {
 function extractNotes(result: any): NotesPayload | null {
   const payload = result?.notes_payload
   if (payload?.study_notes) return payload as NotesPayload
+  if (result?.notes) {
+    return {
+      title: String(result.title || 'Study notes'),
+      subject: String(result.title || 'General'),
+      study_notes: String(result.notes || ''),
+      key_topics: Array.isArray(result.key_topics) ? result.key_topics.map((t: any) => String(t)) : [],
+      confidence: Number.isFinite(Number(result.confidence)) ? Number(result.confidence) : 0.6,
+    }
+  }
   if (result?.study_notes) {
     return {
       title: String(result.title || 'Study notes'),

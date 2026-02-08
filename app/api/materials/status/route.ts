@@ -14,13 +14,19 @@ export async function GET(req: Request) {
     const sb = supabaseAdmin()
     const { data, error } = await sb
       .from('materials')
-      .select('id, status, processing_error')
+      .select('id, status, error')
       .eq('user_id', user.id)
       .eq('plan_id', planId)
       .order('created_at', { ascending: true })
     if (error) throw error
 
-    const items = data ?? []
+    const items = Array.isArray(data)
+      ? data.map((item: any) => ({
+          id: item.id,
+          status: item.status,
+          error: item.error ?? null,
+        }))
+      : []
     const total = items.length
     const processed = items.filter((x: any) => x.status === 'processed').length
     return NextResponse.json({ items, total, processed })

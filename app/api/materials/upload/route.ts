@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server'
 import { requireUser } from '@/lib/authServer'
 import { supabaseAdmin } from '@/lib/supabaseServer'
+import { MAX_IMAGES } from '@/lib/credits'
 
 export const runtime = 'nodejs'
 
@@ -39,8 +40,8 @@ export async function POST(req: Request) {
     if (rows.length === 0) {
       return NextResponse.json({ error: 'No valid items' }, { status: 400 })
     }
-    if (rows.length > 15) {
-      return NextResponse.json({ error: 'Too many files. Max 15 per request.' }, { status: 400 })
+    if (rows.length > MAX_IMAGES) {
+      return NextResponse.json({ error: `Too many files. Max ${MAX_IMAGES} per request.` }, { status: 400 })
     }
 
     const sb = supabaseAdmin()

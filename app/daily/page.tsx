@@ -1,17 +1,19 @@
 'use client'
 
 import Link from 'next/link'
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import AuthGate from '@/components/AuthGate'
 import { authedFetch } from '@/lib/authClient'
 import { supabase } from '@/lib/supabaseClient'
-import HScroll from '@/components/HScroll'
 import { ArrowLeft, Loader2 } from 'lucide-react'
 import Pomodoro from '@/components/Pomodoro'
 
 type Block = { type: 'study' | 'break'; minutes: number; label: string }
 type DayPlan = { day: string; focus: string; tasks: string[]; minutes: number; blocks?: Block[] }
-type PlanResult = { title: string; daily_plan: DayPlan[] }
+type PlanResult = {
+  title: string
+  daily: Array<{ start: string; end: string; task: string; details: string }>
+}
 
 function historyKeyForUser(userId: string | null) {
   return userId ? `examly_plans_v1:${userId}` : null
@@ -123,6 +125,26 @@ function Inner() {
     })()
   }, [userId])
 
+  const pomodoroPlan = useMemo<DayPlan[]>(() => {
+    if (!plan) return []
+    const blocksRaw = Array.isArray(plan.daily) ? plan.daily : []
+    const blocks: Block[] = blocksRaw.map((b) => ({
+      type: /break|pihen/i.test(b.task) ? 'break' : 'study',
+      minutes: 25,
+      label: String(b.task || 'Fokusz'),
+    }))
+    const minutes = blocks.reduce((sum, b) => sum + b.minutes, 0)
+    return [
+      {
+        day: 'Today',
+        focus: plan.title || 'Focus',
+        minutes,
+        tasks: blocksRaw.map((b) => String(b.task || '')).filter(Boolean),
+        blocks,
+      },
+    ]
+  }, [plan])
+
   return (
     <div className="mx-auto max-w-6xl px-4 py-10">
       <div className="flex items-center justify-between">
@@ -149,48 +171,27 @@ function Inner() {
             <div className="mt-6 grid gap-6 min-w-0 2xl:grid-cols-[minmax(0,1fr)_360px]">
               {/* TIMER (shared component) */}
               <aside className="order-1 w-full shrink-0 self-start 2xl:order-2 2xl:w-[360px] 2xl:sticky 2xl:top-6">
-                <Pomodoro dailyPlan={plan.daily_plan} />
+                <Pomodoro dailyPlan={pomodoroPlan} />
               </aside>
 
               {/* DAYS */}
               <div className="order-2 min-w-0 space-y-6 2xl:order-1">
-                {(plan?.daily_plan ?? []).map((d, di) => (
-                  <section
-                    key={di}
-                    className="w-full rounded-3xl border border-white/10 bg-white/[0.02] p-5 min-w-0 overflow-hidden"
-                  >
-                    <div className="flex flex-col gap-2 md:flex-row md:items-end md:justify-between min-w-0">
-                      <div className="min-w-0">
-                        <div className="text-xs uppercase tracking-[0.18em] text-white/55">{d.day}</div>
-                        <div className="mt-2 text-xl font-semibold text-white break-normal hyphens-auto">
-                          {d.focus}
+                <section className="w-full rounded-3xl border border-white/10 bg-white/[0.02] p-5 min-w-0 overflow-hidden">
+                  <div className="text-xs uppercase tracking-[0.18em] text-white/55">Schedule</div>
+                  <div className="mt-4 space-y-3 text-sm text-white/80">
+                    {(plan?.daily ?? []).map((b, i) => (
+                      <div key={i} className="rounded-2xl border border-white/10 bg-black/30 px-4 py-3">
+                        <div className="flex items-center justify-between gap-3">
+                          <div className="text-white/90">{b.task}</div>
+                          <div className="text-white/60">
+                            {b.start}–{b.end}
+                          </div>
                         </div>
+                        {b.details ? <div className="mt-2 text-white/70">{b.details}</div> : null}
                       </div>
-
-                      {d.blocks?.length ? (
-                        <HScroll className="w-full md:w-auto md:justify-end -mx-1 px-1 max-w-full">
-                          {d.blocks.map((x, i) => (
-                            <span
-                              key={i}
-                              className="shrink-0 rounded-full border border-white/10 bg-white/5 px-3 py-1 text-xs text-white/70"
-                            >
-                              {x.label} {x.minutes}m
-                            </span>
-                          ))}
-                        </HScroll>
-                      ) : null}
-                    </div>
-
-                    <ul className="mt-4 space-y-2 text-sm text-white/80">
-                      {(d.tasks ?? []).map((t, i) => (
-                        <li key={i} className="flex gap-2">
-                          <span className="text-white/40">•</span>
-                          <span className="break-words">{t}</span>
-                        </li>
-                      ))}
-                    </ul>
-                  </section>
-                ))}
+                    ))}
+                  </div>
+                </section>
               </div>
             </div>
           </>

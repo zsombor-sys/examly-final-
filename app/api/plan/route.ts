@@ -20,6 +20,89 @@ const planRequestSchema = z.object({
   required_credits: z.number().int().min(0).max(3).optional().nullable(),
 })
 
+const planPayloadSchema = z.object({
+  plan: z.object({
+    title: z.string(),
+    overview: z.string(),
+    steps: z.array(z.string()),
+  }),
+  notes: z.object({
+    summary: z.string(),
+    detailed: z.string(),
+    key_points: z.array(z.string()),
+  }),
+  daily: z.object({
+    today_goal: z.string(),
+    time_blocks: z.array(
+      z.object({
+        label: z.string(),
+        minutes: z.number(),
+      })
+    ),
+  }),
+  practice: z.object({
+    quick_questions: z.array(z.string()),
+    exam_tasks: z.array(z.string()),
+  }),
+})
+
+const planPayloadJsonSchema = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    plan: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        title: { type: 'string' },
+        overview: { type: 'string' },
+        steps: { type: 'array', items: { type: 'string' } },
+      },
+      required: ['title', 'overview', 'steps'],
+    },
+    notes: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        summary: { type: 'string' },
+        detailed: { type: 'string' },
+        key_points: { type: 'array', items: { type: 'string' } },
+      },
+      required: ['summary', 'detailed', 'key_points'],
+    },
+    daily: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        today_goal: { type: 'string' },
+        time_blocks: {
+          type: 'array',
+          items: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              label: { type: 'string' },
+              minutes: { type: 'number' },
+            },
+            required: ['label', 'minutes'],
+          },
+        },
+      },
+      required: ['today_goal', 'time_blocks'],
+    },
+    practice: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        quick_questions: { type: 'array', items: { type: 'string' } },
+        exam_tasks: { type: 'array', items: { type: 'string' } },
+      },
+      required: ['quick_questions', 'exam_tasks'],
+    },
+  },
+  required: ['plan', 'notes', 'daily', 'practice'],
+}
+
 const notesSchema = z.object({
   plan: z.object({
     title: z.string(),
@@ -356,9 +439,116 @@ function safeJsonParse(text: string) {
   return JSON.parse(first)
 }
 
-function isJsonParseFailure(err: any) {
-  const msg = String(err?.message || '')
-  return msg === 'AI_JSON_PARSE_FAILED' || msg === 'AI_JSON_INVALID' || msg === 'AI_JSON_EMPTY'
+type PlanPayload = z.infer<typeof planPayloadSchema>
+
+function normalizePlanPayload(input: any): PlanPayload {
+  const plan = input?.plan ?? {}
+  const notes = input?.notes ?? {}
+  const daily = input?.daily ?? {}
+  const practice = input?.practice ?? {}
+
+  const steps = Array.isArray(plan.steps) ? plan.steps.map((s: any) => String(s)) : []
+  const keyPoints = Array.isArray(notes.key_points) ? notes.key_points.map((s: any) => String(s)) : []
+  const quickQuestions = Array.isArray(practice.quick_questions)
+    ? practice.quick_questions.map((s: any) => String(s))
+    : []
+  const examTasks = Array.isArray(practice.exam_tasks) ? practice.exam_tasks.map((s: any) => String(s)) : []
+
+  const timeBlocksRaw = Array.isArray(daily.time_blocks) ? daily.time_blocks : []
+  const timeBlocks = timeBlocksRaw
+    .map((b: any) => ({
+      label: String(b?.label ?? '').trim() || 'Fokusz',
+      minutes: Number.isFinite(Number(b?.minutes)) ? Number(b.minutes) : 25,
+    }))
+    .map((b: any) => ({ ...b, minutes: Math.max(5, Math.min(180, Math.round(b.minutes))) }))
+
+  return {
+    plan: {
+      title: String(plan.title ?? '').trim() || 'Tanulasi terv',
+      overview: String(plan.overview ?? '').trim() || 'Rovid attekintes a tanulashoz.',
+      steps: steps.length ? steps.slice(0, 12) : ['Alapfogalmak attekintese', 'Jegyzetek rendszerezese', 'Gyakorlo feladatok'],
+    },
+    notes: {
+      summary: String(notes.summary ?? '').trim() || 'Rovid osszefoglalo.',
+      detailed: String(notes.detailed ?? '').trim() || 'Reszletes jegyzetek a fo temakrol.',
+      key_points: keyPoints.length ? keyPoints.slice(0, 12) : ['Definiciok', 'Kulcsotletek', 'Peldak', 'Tipikus hibak'],
+    },
+    daily: {
+      today_goal: String(daily.today_goal ?? '').trim() || 'Fokuszalt attekintes es gyakorlati feladatok.',
+      time_blocks: timeBlocks.length
+        ? timeBlocks.slice(0, 10)
+        : [
+            { label: 'Ismetles', minutes: 25 },
+            { label: 'Jegyzeteles', minutes: 30 },
+            { label: 'Gyakorlas', minutes: 30 },
+          ],
+    },
+    practice: {
+      quick_questions: quickQuestions.length ? quickQuestions.slice(0, 12) : ['Sorold fel a fo fogalmakat.'],
+      exam_tasks: examTasks.length ? examTasks.slice(0, 8) : ['Oldj meg egy tipikus vizsgafeladatot.'],
+    },
+  }
+}
+
+function fallbackPlanPayload(prompt: string, fileNames: string[]) {
+  const titleBase = String(prompt || '').trim().slice(0, 80)
+  const title = titleBase || (fileNames.length ? `Tanulasi terv: ${fileNames[0]}` : 'Tanulasi terv')
+  return normalizePlanPayload({
+    plan: {
+      title,
+      overview: 'Rovid, de teljes attekintes a felkeszuleshez.',
+      steps: ['Attekintes es celok', 'Fobb temak osszegyujtese', 'Gyakorlas es visszanezes'],
+    },
+    notes: {
+      summary: 'Osszefoglalo a legfontosabb pontokrol.',
+      detailed: 'A jegyzetek a definiciokat, kulcsotleteket, peldakat es tipikus hibakat fedik le.',
+      key_points: ['Definiciok', 'Kulcsotletek', 'Peldak', 'Tipikus hibak'],
+    },
+    daily: {
+      today_goal: 'Rovid attekintes es egy gyakorlo blokk.',
+      time_blocks: [
+        { label: 'Attekintes', minutes: 20 },
+        { label: 'Jegyzeteles', minutes: 25 },
+        { label: 'Gyakorlas', minutes: 25 },
+      ],
+    },
+    practice: {
+      quick_questions: ['Mi a legfontosabb definicio?', 'Sorold fel a kulcstetelleket.'],
+      exam_tasks: ['Oldj meg egy tipikus feladatot a tematika alapjan.'],
+    },
+  })
+}
+
+function legacyToPlanPayload(
+  notesJson: any,
+  dailyJson: any,
+  practiceJson: any,
+  titleFallback: string
+) {
+  const notesPayload = notesJson ? notesJsonToPayload(notesJson) : null
+  const title = notesPayload?.title || titleFallback || 'Tanulasi terv'
+  const overview = notesJson?.plan?.summary?.trim() || 'Rovid attekintes a felkeszuleshez.'
+  const steps = Array.isArray(notesPayload?.key_topics) ? notesPayload?.key_topics : []
+  const timeBlocks = Array.isArray(dailyJson?.daily_plan?.blocks)
+    ? dailyJson.daily_plan.blocks.map((b: any) => ({
+        label: String(b?.title ?? '').trim() || 'Fokusz',
+        minutes: Number.isFinite(Number(b?.duration_minutes)) ? Number(b.duration_minutes) : 25,
+      }))
+    : []
+  const quickQuestions = Array.isArray(practiceJson?.practice?.questions)
+    ? practiceJson.practice.questions.map((q: any) => String(q?.question ?? '')).filter(Boolean)
+    : []
+
+  return normalizePlanPayload({
+    plan: { title, overview, steps },
+    notes: {
+      summary: overview,
+      detailed: String(notesPayload?.study_notes ?? '').trim(),
+      key_points: steps,
+    },
+    daily: { today_goal: title, time_blocks: timeBlocks },
+    practice: { quick_questions: quickQuestions, exam_tasks: [] },
+  })
 }
 
 async function callJsonWithRetries<T>(
@@ -505,6 +695,9 @@ async function loadMaterialsForPlan(userId: string, planId: string) {
   let imageCount = 0
 
   for (const m of items) {
+    if (isImage(String(m.file_path || ''), typeof m.mime_type === 'string' ? m.mime_type : '')) {
+      imageCount += 1
+    }
     if (m.status !== 'processed') continue
     const path = String(m.file_path || '')
     const name = path.split('/').pop() || 'file'
@@ -515,7 +708,6 @@ async function loadMaterialsForPlan(userId: string, planId: string) {
     }
 
     if (isImage(name, mime)) {
-      imageCount += 1
       try {
         const { buf, type } = await downloadToBuffer(path)
         images.push({ name, b64: toBase64(buf), mime: type || mime || 'image/png' })
@@ -958,33 +1150,14 @@ export async function GET(req: Request) {
     if (!data) {
       const row = getPlan(user.id, id)
       if (!row) return NextResponse.json({ error: 'Not found' }, { status: 404, headers: { 'cache-control': 'no-store' } })
-      return NextResponse.json({ result: row.result }, { headers: { 'cache-control': 'no-store' } })
+      return NextResponse.json({ result: normalizePlanPayload(row.result) }, { headers: { 'cache-control': 'no-store' } })
     }
 
     if (data.result) {
-      return NextResponse.json({ result: data.result }, { headers: { 'cache-control': 'no-store' } })
+      return NextResponse.json({ result: normalizePlanPayload(data.result) }, { headers: { 'cache-control': 'no-store' } })
     }
 
-    const notesJson = data.notes_json || null
-    const notesPayload = notesJson ? notesJsonToPayload(notesJson) : null
-    const dailyPlan = dailyJsonToPlan(data.daily_json, notesPayload)
-    const practiceQuestions = practiceJsonToQuestions(data.practice_json)
-    const plan = normalizePlan({
-      title: notesPayload?.title || data.title || 'Untitled plan',
-      language: 'Hungarian',
-      exam_date: null,
-      confidence: notesPayload?.confidence ?? 6,
-      quick_summary:
-        notesJson?.plan?.summary?.trim() ||
-        (notesPayload?.key_topics?.length
-          ? `Kulcstopikok: ${notesPayload.key_topics.slice(0, 8).join(', ')}`
-          : String(notesPayload?.study_notes || '').split('\n').filter(Boolean)[0] || 'Tanulasi jegyzet keszult.'),
-      study_notes: String(notesPayload?.study_notes || ''),
-      daily_plan: dailyPlan,
-      practice_questions: practiceQuestions,
-      notes_payload: notesPayload,
-    })
-
+    const plan = legacyToPlanPayload(data.notes_json, data.daily_json, data.practice_json, data.title || '')
     return NextResponse.json({ result: plan }, { headers: { 'cache-control': 'no-store' } })
   } catch (e: any) {
     return NextResponse.json({ error: e?.message ?? 'Server error' }, { status: e?.status ?? 400, headers: { 'cache-control': 'no-store' } })
@@ -1114,49 +1287,21 @@ export async function POST(req: Request) {
     }
 
     if (!openAiKey) {
-      console.log('plan.generate request', {
-        planId,
-        files: materials.fileNames.length,
-        extracted_chars: materials.textFromFiles.length,
-        prompt_chars: prompt.length,
-      })
-      const notesJson = mock(prompt, materials.fileNames)
-      const notesStep = notesJsonToPayload(notesJson)
-      const quickSummary =
-        notesJson.plan.summary?.trim() ||
-        (notesStep.key_topics && notesStep.key_topics.length
-          ? `Kulcstopikok: ${notesStep.key_topics.slice(0, 8).join(', ')}`
-          : notesStep.study_notes.split('\n').filter(Boolean)[0] || 'Tanulasi jegyzet keszult.')
-      const dailyJson = fallbackDaily(notesStep)
-      const practiceJson = fallbackPractice(notesStep)
-      const dailyPlan = dailyJsonToPlan(dailyJson, notesStep)
-      const practiceQuestions = practiceJsonToQuestions(practiceJson)
-      const plan = normalizePlan({
-        title: notesStep.title || notesStep.subject || 'Untitled plan',
-        language: 'Hungarian',
-        exam_date: null,
-        confidence: notesStep.confidence,
-        quick_summary: quickSummary,
-        study_notes: notesStep.study_notes,
-        daily_plan: dailyPlan,
-        practice_questions: practiceQuestions,
-        notes_payload: notesStep,
-      })
+      const fallback = fallbackPlanPayload(prompt, materials.fileNames)
       await savePlanToDbBestEffort({
         id: idToUse,
         userId: user.id,
-        title: plan.title || notesStep.subject || 'Untitled plan',
+        title: fallback.plan.title,
         created_at: new Date().toISOString(),
-        result: plan,
-        notes_json: notesJson,
-        daily_json: dailyJson,
-        practice_json: practiceJson,
+        result: fallback,
+        notes_json: null,
+        daily_json: null,
+        practice_json: null,
         generation_status: 'completed',
         error: null,
         raw_notes_output: null,
       })
       await setCurrentPlanBestEffort(user.id, idToUse)
-
       return NextResponse.json({ id: idToUse }, { headers: { 'cache-control': 'no-store', 'x-examly-plan': 'mock' } })
     }
 
@@ -1165,207 +1310,55 @@ export async function POST(req: Request) {
     const ocrText = materials.images.length ? await extractTextFromImages(client, model, materials.images) : ''
     const extractedText = [materials.textFromFiles, ocrText].filter(Boolean).join('\n\n').slice(0, 140_000)
 
-    console.log('plan.step.notes.start', { requestId })
-    let notesJson: z.infer<typeof notesSchema>
-    let rawNotesJson = ''
-    let rawNotesText = ''
+    const systemText = [
+      'Return ONLY valid JSON matching the schema. No markdown, no extra text.',
+      'Language: Hungarian.',
+      'If information is missing, make reasonable assumptions and still fill all fields.',
+      'Keep the plan concise but complete.',
+    ].join('\n')
+    const userText = [
+      `Prompt:\n${prompt || '(empty)'}`,
+      `File names:\n${materials.fileNames.join(', ') || '(none)'}`,
+      `Text from files:\n${materials.textFromFiles || '(none)'}`,
+      `Text from images (OCR):\n${ocrText || '(none)'}`,
+    ].join('\n\n')
+
+    let planPayload: PlanPayload
     try {
-      const notesResult = await generateNotesStep(client, model, prompt, extractedText, '')
-      notesJson = notesResult.notes
-      rawNotesJson = notesResult.rawNotesJson
-      rawNotesText = notesResult.rawNotesText
-    } catch (err: any) {
-      if (isJsonParseFailure(err)) {
-        await refundCredits()
-        await savePlanToDbBestEffort({
-          id: idToUse,
-          userId: user.id,
-          title: 'Plan generation failed',
-          created_at: new Date().toISOString(),
-          result: null,
-          notes_json: null,
-          daily_json: null,
-          practice_json: null,
-          generation_status: 'error',
-          error: 'AI_JSON_PARSE_FAILED',
-          raw_notes_output: String(err?.raw || rawNotesText || '').slice(0, 20000),
-        })
-        return NextResponse.json(
-          { ok: false, error: 'AI_JSON_PARSE_FAILED' },
-          { status: 200, headers: { 'cache-control': 'no-store' } }
-        )
-      }
-      await refundCredits()
-      await savePlanToDbBestEffort({
-        id: idToUse,
-        userId: user.id,
-        title: 'Plan generation failed',
-        created_at: new Date().toISOString(),
-        result: null,
-        notes_json: null,
-        daily_json: null,
-        practice_json: null,
-        generation_status: 'error',
-        error: 'NOTES_JSON_FAILED',
-        raw_notes_output: String(err?.raw || rawNotesText || '').slice(0, 20000),
+      const resp = await client.chat.completions.create({
+        model,
+        messages: [
+          { role: 'system', content: systemText },
+          { role: 'user', content: userText },
+        ],
+        temperature: 0.2,
+        max_tokens: MAX_OUTPUT_TOKENS,
+        response_format: {
+          type: 'json_schema',
+          json_schema: {
+            name: 'study_plan',
+            schema: planPayloadJsonSchema,
+          },
+        },
       })
-      return NextResponse.json(
-        { error: 'NOTES_JSON_FAILED' },
-        { status: 500, headers: { 'cache-control': 'no-store' } }
-      )
+      const raw = String(resp.choices?.[0]?.message?.content ?? '').trim()
+      const parsed = safeJsonParse(raw)
+      planPayload = normalizePlanPayload(planPayloadSchema.parse(parsed))
+    } catch {
+      planPayload = fallbackPlanPayload(prompt, materials.fileNames)
     }
-    const notesStep = notesJsonToPayload(notesJson)
-    console.log('plan.step.notes.end', {
-      requestId,
-      words: countWords(notesStep.study_notes),
-      topics: notesStep.key_topics.length,
-      raw_length: rawNotesText.length,
-    })
 
-    const examDate = inferExamDate(prompt)
-    console.log('plan.step.daily.start', { requestId })
-    let dailyJson: { daily_plan: { total_minutes: number; blocks: Array<{ title: string; duration_minutes: number; type: 'study' | 'review' | 'break' }> } }
-    try {
-      dailyJson = await generateDailyStep(client, model, notesStep, examDate)
-    } catch (err: any) {
-      if (isJsonParseFailure(err)) {
-        await refundCredits()
-        await savePlanToDbBestEffort({
-          id: idToUse,
-          userId: user.id,
-          title: notesStep.title || notesStep.subject || 'Untitled plan',
-          created_at: new Date().toISOString(),
-          result: null,
-          notes_json: notesJson,
-          daily_json: null,
-          practice_json: null,
-          generation_status: 'error',
-          error: 'AI_JSON_PARSE_FAILED',
-          raw_notes_output: String(err?.raw || rawNotesJson || '').slice(0, 20000),
-        })
-        return NextResponse.json(
-          { ok: false, error: 'AI_JSON_PARSE_FAILED' },
-          { status: 200, headers: { 'cache-control': 'no-store' } }
-        )
-      }
-      await refundCredits()
-      await savePlanToDbBestEffort({
-        id: idToUse,
-        userId: user.id,
-        title: notesStep.title || notesStep.subject || 'Untitled plan',
-        created_at: new Date().toISOString(),
-        result: null,
-        notes_json: notesJson,
-        daily_json: null,
-        practice_json: null,
-        generation_status: 'error',
-        error: 'DAILY_JSON_FAILED',
-        raw_notes_output: String(err?.raw || rawNotesJson || '').slice(0, 20000),
-      })
-      return NextResponse.json(
-        { error: 'DAILY_JSON_FAILED' },
-        { status: 500, headers: { 'cache-control': 'no-store' } }
-      )
-    }
-    console.log('plan.step.daily.end', { requestId, blocks: dailyJson.daily_plan.blocks.length })
-
-    console.log('plan.step.practice.start', { requestId })
-    let practiceJson: { practice: { questions: Array<{ question: string; answer: string; type: 'mcq' | 'short' | 'true_false' }> } }
-    try {
-      practiceJson = await generatePracticeStep(client, model, notesStep)
-    } catch (err: any) {
-      if (isJsonParseFailure(err)) {
-        await refundCredits()
-        await savePlanToDbBestEffort({
-          id: idToUse,
-          userId: user.id,
-          title: notesStep.title || notesStep.subject || 'Untitled plan',
-          created_at: new Date().toISOString(),
-          result: null,
-          notes_json: notesJson,
-          daily_json: dailyJson,
-          practice_json: null,
-          generation_status: 'error',
-          error: 'AI_JSON_PARSE_FAILED',
-          raw_notes_output: String(err?.raw || rawNotesJson || '').slice(0, 20000),
-        })
-        return NextResponse.json(
-          { ok: false, error: 'AI_JSON_PARSE_FAILED' },
-          { status: 200, headers: { 'cache-control': 'no-store' } }
-        )
-      }
-      await refundCredits()
-      await savePlanToDbBestEffort({
-        id: idToUse,
-        userId: user.id,
-        title: notesStep.title || notesStep.subject || 'Untitled plan',
-        created_at: new Date().toISOString(),
-        result: null,
-        notes_json: notesJson,
-        daily_json: dailyJson,
-        practice_json: null,
-        generation_status: 'error',
-        error: 'PRACTICE_JSON_FAILED',
-        raw_notes_output: String(err?.raw || rawNotesJson || '').slice(0, 20000),
-      })
-      return NextResponse.json(
-        { error: 'PRACTICE_JSON_FAILED' },
-        { status: 500, headers: { 'cache-control': 'no-store' } }
-      )
-    }
-    console.log('plan.step.practice.end', { requestId, questions: practiceJson.practice.questions.length })
-
-    const language = 'Hungarian'
-    const quickSummary =
-      notesJson?.plan?.summary?.trim() ||
-      (notesStep.key_topics && notesStep.key_topics.length
-        ? `Kulcstopikok: ${notesStep.key_topics.slice(0, 8).join(', ')}`
-        : notesStep.study_notes.split('\n').filter(Boolean)[0] || 'Tanulasi jegyzet keszult.')
-
-    const dailyPlan = [
-      {
-        day: 'Day 1',
-        focus: notesStep.subject || notesStep.title,
-        minutes: dailyJson.daily_plan.total_minutes,
-        tasks: dailyJson.daily_plan.blocks.filter((b) => b.type !== 'break').map((b) => b.title),
-        blocks: dailyJson.daily_plan.blocks.map((b) => ({
-          type: b.type === 'break' ? 'break' : 'study',
-          minutes: b.duration_minutes,
-          label: b.title,
-        })),
-      },
-    ]
-
-    const practiceQuestions = practiceJson.practice.questions.map((q, i) => ({
-      id: `q${i + 1}`,
-      type: q.type === 'mcq' ? 'mcq' : 'short',
-      question: q.question,
-      options: q.type === 'true_false' ? ['True', 'False'] : null,
-      answer: q.answer,
-      explanation: null,
-    }))
-
-    const plan = normalizePlan({
-      title: notesStep.title || notesStep.subject || 'Untitled plan',
-      language,
-      exam_date: null,
-      confidence: notesStep.confidence,
-      quick_summary: quickSummary,
-      study_notes: notesStep.study_notes,
-      daily_plan: dailyPlan,
-      practice_questions: practiceQuestions,
-      notes_payload: notesStep,
-    })
+    const plan = planPayload
 
     await savePlanToDbBestEffort({
       id: idToUse,
       userId: user.id,
-      title: plan.title,
+      title: plan.plan.title,
       created_at: new Date().toISOString(),
       result: plan,
-      notes_json: notesJson,
-      daily_json: dailyJson,
-      practice_json: practiceJson,
+      notes_json: null,
+      daily_json: null,
+      practice_json: null,
       generation_status: 'completed',
       error: null,
       raw_notes_output: null,
@@ -1397,23 +1390,5 @@ export async function POST(req: Request) {
       { error: 'PLAN_GENERATE_FAILED', details },
       { status: 500, headers: { 'cache-control': 'no-store' } }
     )
-  }
-}
-
-function mock(prompt: string, fileNames: string[]) {
-  return {
-    plan: {
-      title: 'Mock plan (no OpenAI key yet)',
-      summary: `Mock summary. Prompt: ${prompt || '(empty)'}. Uploads: ${fileNames.join(', ') || '(none)'}`,
-    },
-    notes: {
-      sections: [
-        { title: 'Definiciok', bullets: ['Alapfogalom definicio.', 'Fogalmi keretek.'] },
-        { title: 'Kulcsotletek', bullets: ['Kozponti elvek.', 'Osszefuggesek.'] },
-        { title: 'Peldak', bullets: ['Rovid pelda levezetes.', 'Mintafeladat.'] },
-        { title: 'Tipikus hibak', bullets: ['Gyakori felreertesek.', 'Hibas kovetkeztetesek.'] },
-        { title: 'Gyors osszefoglalo', bullets: ['Fontos pontok roviden.', 'Mit kell tudni.'] },
-      ],
-    },
   }
 }

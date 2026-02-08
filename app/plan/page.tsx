@@ -4,7 +4,6 @@ import Link from 'next/link'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Button, Textarea } from '@/components/ui'
 import MarkdownMath from '@/components/MarkdownMath'
-import InlineMath from '@/components/InlineMath'
 import { FileUp, Loader2, Trash2, ArrowLeft, Send } from 'lucide-react'
 import AuthGate from '@/components/AuthGate'
 import { authedFetch } from '@/lib/authClient'
@@ -16,25 +15,25 @@ import { computePlanCost } from '@/lib/planCost'
 
 type Block = { type: 'study' | 'break'; minutes: number; label: string }
 type DayPlan = { day: string; focus: string; tasks: string[]; minutes: number; blocks?: Block[] }
-type Flashcard = { front: string; back: string }
-
 type PlanResult = {
-  title: string
-  language: string
-  exam_date?: string | null
-  confidence?: number | null
-  daily_plan: DayPlan[]
-  quick_summary: string
-  study_notes: string
-  flashcards: Flashcard[]
-  practice_questions: Array<{
-    id: string
-    type: 'mcq' | 'short'
-    question: string
-    options?: string[] | null
-    answer?: string | null
-    explanation?: string | null
-  }>
+  plan: {
+    title: string
+    overview: string
+    steps: string[]
+  }
+  notes: {
+    summary: string
+    detailed: string
+    key_points: string[]
+  }
+  daily: {
+    today_goal: string
+    time_blocks: Array<{ label: string; minutes: number }>
+  }
+  practice: {
+    quick_questions: string[]
+    exam_tasks: string[]
+  }
 }
 
 type SavedPlan = { id: string; title: string; created_at: string }
@@ -545,7 +544,8 @@ function Inner() {
       const q = askText.trim()
       if (!q) throw new Error('Írj be egy kérdést.')
 
-      const lang = (result?.language ?? '').toLowerCase().includes('hun') ? 'hu' : 'en'
+      const langSource = `${prompt} ${result?.plan?.title ?? ''} ${result?.notes?.summary ?? ''}`.toLowerCase()
+      const lang = /magyar|hu\b|szia|t\xE9tel|vizsga/.test(langSource) ? 'hu' : 'en'
 
       const res = await authedFetch('/api/ask', {
         method: 'POST',
@@ -563,7 +563,7 @@ function Inner() {
     }
   }
 
-  const displayTitle = result?.title?.trim() ? result.title : 'Study plan'
+  const displayTitle = result?.plan?.title?.trim() ? result.plan.title : 'Study plan'
   const displayInput = shortPrompt(prompt)
   const totalMaterials = materials.length
   const processedCount = materials.filter((m) => m.status === 'processed').length
@@ -577,6 +577,25 @@ function Inner() {
       return null
     }
   })()
+  const pomodoroPlan = useMemo<DayPlan[]>(() => {
+    if (!result) return []
+    const timeBlocks = Array.isArray(result.daily?.time_blocks) ? result.daily.time_blocks : []
+    const blocks: Block[] = timeBlocks.map((b) => ({
+      type: /break|pihen/i.test(b.label) ? 'break' : 'study',
+      minutes: Number.isFinite(Number(b.minutes)) ? Number(b.minutes) : 25,
+      label: String(b.label || 'Fokusz'),
+    }))
+    const minutes = blocks.reduce((sum, b) => sum + b.minutes, 0)
+    return [
+      {
+        day: 'Today',
+        focus: result.daily?.today_goal || result.plan?.title || 'Focus',
+        minutes,
+        tasks: Array.isArray(result.plan?.steps) ? result.plan.steps : [],
+        blocks,
+      },
+    ]
+  }, [result])
 
 
   return (
@@ -586,12 +605,6 @@ function Inner() {
           <ArrowLeft size={18} />
           Back
         </Link>
-
-        <div className="text-xs text-white/50">
-          {result?.language ? (
-            <span className="rounded-full border border-white/10 bg-white/5 px-3 py-1">{result.language}</span>
-          ) : null}
-        </div>
       </div>
 
       <div className="mt-8 grid gap-6 lg:grid-cols-[360px_1fr]">
@@ -719,11 +732,11 @@ function Inner() {
                   </p>
                 ) : null}
 
-                {result?.quick_summary ? (
-                  <p className="mt-2 max-w-[80ch] text-sm text-white/70 break-words">{result.quick_summary}</p>
+                {result?.plan?.overview ? (
+                  <p className="mt-2 max-w-[80ch] text-sm text-white/70 break-words">{result.plan.overview}</p>
                 ) : (
                   <p className="mt-2 max-w-[80ch] text-sm text-white/50">
-                    Generate a plan to see your schedule, notes, flashcards, and practice questions.
+                    Generate a plan to see your schedule, notes, and practice questions.
                   </p>
                 )}
               </div>
@@ -751,13 +764,38 @@ function Inner() {
                 </div>
               )}
 
+              {/* PLAN */}
+              {tab === 'plan' && result && (
+                <div className="rounded-3xl border border-white/10 bg-white/[0.02] p-5 min-w-0 overflow-hidden">
+                  <div className="text-xs uppercase tracking-[0.18em] text-white/55">Plan</div>
+                  <div className="mt-3 text-sm text-white/75 whitespace-pre-wrap">{result.plan.overview}</div>
+                  <div className="mt-4 text-xs uppercase tracking-[0.18em] text-white/55">Steps</div>
+                  <ul className="mt-3 space-y-2 text-sm text-white/80">
+                    {(result.plan.steps ?? []).map((step, i) => (
+                      <li key={i} className="flex gap-2">
+                        <span className="text-white/40">•</span>
+                        <span className="break-words">{step}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+
               {/* NOTES */}
               {tab === 'notes' && result && (
                 <div className="rounded-3xl border border-white/10 bg-white/[0.02] p-5 min-w-0 overflow-hidden">
-                  <div className="text-xs uppercase tracking-[0.18em] text-white/55">Study notes</div>
-                  <div className="mt-3 richtext min-w-0 max-w-full overflow-x-auto">
-                    <MarkdownMath content={result?.study_notes ?? ''} />
-                  </div>
+                  <div className="text-xs uppercase tracking-[0.18em] text-white/55">Notes</div>
+                  <div className="mt-3 text-sm text-white/75 whitespace-pre-wrap">{result.notes.summary}</div>
+                  <div className="mt-4 text-sm text-white/80 whitespace-pre-wrap">{result.notes.detailed}</div>
+                  <div className="mt-4 text-xs uppercase tracking-[0.18em] text-white/55">Key points</div>
+                  <ul className="mt-3 space-y-2 text-sm text-white/80">
+                    {(result.notes.key_points ?? []).map((point, i) => (
+                      <li key={i} className="flex gap-2">
+                        <span className="text-white/40">•</span>
+                        <span className="break-words">{point}</span>
+                      </li>
+                    ))}
+                  </ul>
                 </div>
               )}
 
@@ -765,47 +803,26 @@ function Inner() {
               {tab === 'daily' && result && (
                 <div className="grid gap-6 min-w-0 2xl:grid-cols-[minmax(0,1fr)_360px]">
                   <aside className="order-1 w-full shrink-0 self-start 2xl:order-2 2xl:w-[360px] 2xl:sticky 2xl:top-6">
-                    <Pomodoro dailyPlan={result.daily_plan} />
+                    <Pomodoro dailyPlan={pomodoroPlan} />
                   </aside>
 
                   <div className="order-2 min-w-0 space-y-6 2xl:order-1">
-                    {(result?.daily_plan ?? []).map((d, di) => (
-                      <section
-                        key={di}
-                        className="w-full rounded-3xl border border-white/10 bg-white/[0.02] p-5 min-w-0 overflow-hidden"
-                      >
-                        <div className="flex flex-col gap-2 md:flex-row md:items-end md:justify-between min-w-0">
-                          <div className="min-w-0">
-                            <div className="text-xs uppercase tracking-[0.18em] text-white/55">{d.day}</div>
-                            <div className="mt-2 text-xl font-semibold text-white break-normal hyphens-auto">
-                              {d.focus}
-                            </div>
+                    <section className="w-full rounded-3xl border border-white/10 bg-white/[0.02] p-5 min-w-0 overflow-hidden">
+                      <div className="text-xs uppercase tracking-[0.18em] text-white/55">Today</div>
+                      <div className="mt-2 text-xl font-semibold text-white break-normal hyphens-auto">
+                        {result.daily.today_goal}
+                      </div>
+
+                      <div className="mt-4 text-xs uppercase tracking-[0.18em] text-white/55">Time blocks</div>
+                      <div className="mt-3 space-y-2 text-sm text-white/80">
+                        {(result.daily.time_blocks ?? []).map((b, i) => (
+                          <div key={i} className="flex items-center justify-between gap-3">
+                            <span className="break-words">{b.label}</span>
+                            <span className="text-white/60">{b.minutes}m</span>
                           </div>
-
-                          {d.blocks?.length ? (
-                            <HScroll className="w-full md:w-auto md:justify-end -mx-1 px-1 max-w-full">
-                              {d.blocks.map((x, i) => (
-                                <span
-                                  key={i}
-                                  className="shrink-0 rounded-full border border-white/10 bg-white/5 px-3 py-1 text-xs text-white/70"
-                                >
-                                  {x.label} {x.minutes}m
-                                </span>
-                              ))}
-                            </HScroll>
-                          ) : null}
-                        </div>
-
-                        <ul className="mt-4 space-y-2 text-sm text-white/80">
-                          {(d.tasks ?? []).map((t, i) => (
-                            <li key={i} className="flex gap-2">
-                              <span className="text-white/40">•</span>
-                              <span className="break-words">{t}</span>
-                            </li>
-                          ))}
-                        </ul>
-                      </section>
-                    ))}
+                        ))}
+                      </div>
+                    </section>
                   </div>
                 </div>
               )}
@@ -813,52 +830,29 @@ function Inner() {
               {/* PRACTICE */}
               {tab === 'practice' && result && (
                 <div className="space-y-6 min-w-0">
-                  {(result?.practice_questions ?? []).map((q, qi) => (
-                    <section
-                      key={q.id ?? String(qi)}
-                      className="rounded-3xl border border-white/10 bg-white/[0.02] p-5 min-w-0 overflow-hidden"
-                    >
-                      <div className="flex items-start justify-between gap-3 min-w-0">
-                        <div className="text-sm font-semibold text-white/90 min-w-0 break-words">
-                          {qi + 1}. <InlineMath content={q.question} />
-                        </div>
-                        <span className="shrink-0 rounded-full border border-white/10 bg-white/5 px-3 py-1 text-xs text-white/70">
-                          {q.type.toUpperCase()}
-                        </span>
-                      </div>
+                  <section className="rounded-3xl border border-white/10 bg-white/[0.02] p-5 min-w-0 overflow-hidden">
+                    <div className="text-xs uppercase tracking-[0.18em] text-white/55">Quick questions</div>
+                    <ul className="mt-3 space-y-2 text-sm text-white/80">
+                      {(result.practice.quick_questions ?? []).map((q, i) => (
+                        <li key={i} className="flex gap-2">
+                          <span className="text-white/40">•</span>
+                          <span className="break-words">{q}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  </section>
 
-                      {q.type === 'mcq' && q.options?.length ? (
-                        <div className="mt-4 grid gap-2">
-                          {q.options.map((o, i) => (
-                            <div
-                              key={i}
-                              className="rounded-2xl border border-white/10 bg-black/30 px-4 py-3 text-sm text-white/80"
-                            >
-                              <InlineMath content={o} />
-                            </div>
-                          ))}
-                        </div>
-                      ) : null}
-
-                      {q.answer ? (
-                        <div className="mt-4 rounded-2xl border border-white/10 bg-black/30 p-4">
-                          <div className="text-xs uppercase tracking-[0.18em] text-white/55">Answer</div>
-                          <div className="mt-2 text-sm text-white/80 break-words">
-                            <InlineMath content={q.answer ?? ''} />
-                          </div>
-                        </div>
-                      ) : null}
-
-                      {q.explanation ? (
-                        <div className="mt-4 rounded-2xl border border-white/10 bg-black/30 p-4">
-                          <div className="text-xs uppercase tracking-[0.18em] text-white/55">Explanation</div>
-                          <div className="mt-2 text-sm text-white/70 richtext min-w-0 max-w-full overflow-x-auto">
-                            <MarkdownMath content={q.explanation ?? ''} />
-                          </div>
-                        </div>
-                      ) : null}
-                    </section>
-                  ))}
+                  <section className="rounded-3xl border border-white/10 bg-white/[0.02] p-5 min-w-0 overflow-hidden">
+                    <div className="text-xs uppercase tracking-[0.18em] text-white/55">Exam tasks</div>
+                    <ul className="mt-3 space-y-2 text-sm text-white/80">
+                      {(result.practice.exam_tasks ?? []).map((t, i) => (
+                        <li key={i} className="flex gap-2">
+                          <span className="text-white/40">•</span>
+                          <span className="break-words">{t}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  </section>
                 </div>
               )}
 

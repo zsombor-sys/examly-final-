@@ -11,17 +11,17 @@ import { supabase } from '@/lib/supabaseClient'
 import { buildMaterialObjectKey } from '@/lib/uploadClient'
 import HScroll from '@/components/HScroll'
 import Pomodoro from '@/components/Pomodoro'
-import { MAX_IMAGES, creditsForImages } from '@/lib/credits'
+import { MAX_IMAGES, calcCreditsFromFileCount } from '@/lib/credits'
 
 type Block = { type: 'study' | 'break'; minutes: number; label: string }
 type DayPlan = { day: string; focus: string; tasks: string[]; minutes: number; blocks?: Block[] }
 type PlanResult = {
   title?: string | null
   language?: string | null
-  plan: { title: string; overview: string; topics: string[] }
-  notes: { sections: Array<{ title: string; content: string }> }
-  daily: { blocks: Array<{ title: string; duration_minutes: number; description: string }> }
-  practice: { questions: Array<{ question: string; answer: string }> }
+  plan: { blocks: Array<{ title: string; duration_minutes: number; description: string }> }
+  notes: { markdown: string; quick_summary: string }
+  daily: { focus: string; steps: string[]; pomodoro_blocks: Array<{ title: string; minutes: number }> }
+  practice: { questions: Array<{ q: string; a: string }> }
 }
 
 type SavedPlan = { id: string; title: string; created_at: string }
@@ -122,10 +122,6 @@ function shortPrompt(p: string) {
   const t = p.trim().replace(/\s+/g, ' ')
   if (!t) return ''
   return t.length > 120 ? t.slice(0, 120) + '…' : t
-}
-
-function countImages(list: File[]) {
-  return list.filter((f) => f.type.startsWith('image/') || /\.(png|jpe?g|webp)$/i.test(f.name)).length
 }
 
 export default function PlanPage() {
@@ -411,7 +407,7 @@ function Inner() {
       setError(`You can upload up to ${MAX_IMAGES} files.`)
       return
     }
-    const cost = creditsForImages(imageCount || 0)
+    const cost = calcCreditsFromFileCount(files.length || 0)
     if (credits != null && credits < cost) {
       setError(`Not enough credits. This will cost ${cost} credits.`)
       return
@@ -548,30 +544,29 @@ function Inner() {
     }
   }
 
-  const displayTitle = result?.plan?.title?.trim() ? result.plan.title : 'Study plan'
+  const displayTitle = result?.title?.trim() ? result.title : 'Study plan'
   const displayInput = shortPrompt(prompt)
   const failedCount = materials.filter((m) => m.status === 'failed').length
   const canGenerate = !loading && !isGenerating && (prompt.trim().length >= 6 || files.length > 0)
-  const imageCount = countImages(files)
-  const summaryText = result?.plan?.overview?.trim()
-    ? result.plan.overview
-    : result?.notes?.sections?.[0]?.content
-      ? result.notes.sections[0].content
+  const summaryText = result?.notes?.quick_summary?.trim()
+    ? result.notes.quick_summary
+    : result?.notes?.markdown
+      ? result.notes.markdown
       : ''
   const costEstimate = (() => {
     try {
-      return creditsForImages(imageCount || 0)
+      return calcCreditsFromFileCount(files.length || 0)
     } catch {
       return null
     }
   })()
   const pomodoroPlan = useMemo<DayPlan[]>(() => {
     if (!result) return []
-    const blocksRaw = Array.isArray(result.daily?.blocks) ? result.daily.blocks : []
+    const blocksRaw = Array.isArray(result.daily?.pomodoro_blocks) ? result.daily.pomodoro_blocks : []
     const blocks: Block[] = blocksRaw.map((b) => {
       return {
         type: /break|pihen/i.test(b.title) ? 'break' : 'study',
-        minutes: Math.max(5, Math.min(180, Number(b.duration_minutes) || 25)),
+        minutes: Math.max(5, Math.min(180, Number(b.minutes) || 25)),
         label: String(b.title || 'Fokusz'),
       }
     })
@@ -769,8 +764,8 @@ function Inner() {
                     {summaryText.slice(0, 300)}
                     {summaryText.length > 300 ? '…' : ''}
                   </div>
-                  {result?.plan?.topics?.length ? (
-                    <div className="mt-3 text-xs text-white/60">Topics: {result.plan.topics.join(', ')}</div>
+                  {result?.daily?.focus ? (
+                    <div className="mt-3 text-xs text-white/60">Focus: {result.daily.focus}</div>
                   ) : null}
                 </div>
               )}
@@ -779,14 +774,7 @@ function Inner() {
               {tab === 'notes' && result && (
                 <div className="rounded-3xl border border-white/10 bg-white/[0.02] p-5 min-w-0 overflow-hidden">
                   <div className="text-xs uppercase tracking-[0.18em] text-white/55">Notes</div>
-                  <div className="mt-3 space-y-4 text-sm text-white/80">
-                    {(result.notes?.sections ?? []).map((section, idx) => (
-                      <div key={`${idx}-${section.title}`} className="rounded-2xl border border-white/10 bg-black/30 p-4">
-                        <div className="text-xs uppercase tracking-[0.18em] text-white/55">{section.title}</div>
-                        <div className="mt-2 text-sm text-white/80 whitespace-pre-wrap">{section.content}</div>
-                      </div>
-                    ))}
-                  </div>
+                  <div className="mt-3 text-sm text-white/80 whitespace-pre-wrap">{result.notes?.markdown || ''}</div>
                 </div>
               )}
 
@@ -801,13 +789,17 @@ function Inner() {
                     <section className="w-full rounded-3xl border border-white/10 bg-white/[0.02] p-5 min-w-0 overflow-hidden">
                       <div className="text-xs uppercase tracking-[0.18em] text-white/55">Daily schedule</div>
                       <div className="mt-3 space-y-3 text-sm text-white/80">
-                        {(result.daily?.blocks ?? []).map((b, i) => (
+                        {(result.daily?.pomodoro_blocks ?? []).map((b, i) => (
                           <div key={i} className="rounded-2xl border border-white/10 bg-black/30 px-4 py-3">
                             <div className="flex items-center justify-between gap-3">
                               <div className="text-white/90">{b.title}</div>
-                              <div className="text-white/60">{Math.round(Number(b.duration_minutes) || 0)} min</div>
+                              <div className="text-white/60">{Math.round(Number(b.minutes) || 0)} min</div>
                             </div>
-                            {b.description ? <div className="mt-2 text-white/70">{b.description}</div> : null}
+                          </div>
+                        ))}
+                        {(result.daily?.steps ?? []).map((step, i) => (
+                          <div key={`step-${i}`} className="rounded-2xl border border-white/10 bg-black/30 px-4 py-3">
+                            <div className="text-white/80">{step}</div>
                           </div>
                         ))}
                       </div>
@@ -821,16 +813,16 @@ function Inner() {
                 <div className="space-y-6 min-w-0">
                   {(result.practice?.questions ?? []).map((q, qi) => (
                     <section
-                      key={`${qi}-${q.question}`}
+                      key={`${qi}-${q.q}`}
                       className="rounded-3xl border border-white/10 bg-white/[0.02] p-5 min-w-0 overflow-hidden"
                     >
                       <div className="text-sm font-semibold text-white/90 min-w-0 break-words">
-                        {qi + 1}. {q.question}
+                        {qi + 1}. {q.q}
                       </div>
-                      {q.answer ? (
+                      {q.a ? (
                         <div className="mt-4 rounded-2xl border border-white/10 bg-black/30 p-4">
                           <div className="text-xs uppercase tracking-[0.18em] text-white/55">Answer</div>
-                          <div className="mt-2 text-sm text-white/80 break-words">{q.answer}</div>
+                          <div className="mt-2 text-sm text-white/80 break-words">{q.a}</div>
                         </div>
                       ) : null}
                     </section>

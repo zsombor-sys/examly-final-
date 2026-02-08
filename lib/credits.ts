@@ -7,3 +7,7 @@ export function creditsForImages(n: number) {
   if (n <= 15) return 3
   throw new Error('MAX_IMAGES_EXCEEDED')
 }
+
+export function calcCreditsFromFileCount(n: number) {
+  return creditsForImages(n)
+}

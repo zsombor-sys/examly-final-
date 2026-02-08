@@ -581,7 +581,7 @@ function Inner() {
         day: 'Today',
         focus: result.title || 'Focus',
         minutes,
-        tasks: blocksRaw.map((b) => String(b.task || '')).filter(Boolean),
+        tasks: blocksRaw.map((b) => String(b.title || '')).filter(Boolean),
         blocks,
       },
     ]

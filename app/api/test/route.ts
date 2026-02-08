@@ -3,17 +3,51 @@ import { NextResponse } from 'next/server'
 import { requireUser } from '@/lib/authServer'
 import { consumeGeneration } from '@/lib/creditsServer'
 import OpenAI from 'openai'
+import { z } from 'zod'
 
 export const runtime = 'nodejs'
 
-function safeParseJson(text: string) {
-  try {
-    return JSON.parse(text)
-  } catch {
-    const m = text.match(/\{[\s\S]*\}/)
-    if (m) return JSON.parse(m[0])
-    throw new Error('Model did not return JSON')
-  }
+const testSchema = z.object({
+  title: z.string(),
+  language: z.string(),
+  duration_minutes: z.number(),
+  questions: z.array(
+    z.object({
+      id: z.string().optional(),
+      type: z.enum(['mcq', 'short']),
+      question: z.string(),
+      options: z.array(z.string()).nullable().optional(),
+      answer: z.string(),
+      explanation: z.string(),
+    })
+  ),
+})
+
+const testJsonSchema = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    title: { type: 'string' },
+    language: { type: 'string' },
+    duration_minutes: { type: 'number' },
+    questions: {
+      type: 'array',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          id: { type: 'string' },
+          type: { type: 'string', enum: ['mcq', 'short'] },
+          question: { type: 'string' },
+          options: { type: ['array', 'null'], items: { type: 'string' } },
+          answer: { type: 'string' },
+          explanation: { type: 'string' },
+        },
+        required: ['type', 'question', 'answer', 'explanation'],
+      },
+    },
+  },
+  required: ['title', 'language', 'duration_minutes', 'questions'],
 }
 
 function normalizeTest(obj: any) {
@@ -105,15 +139,21 @@ Rules:
 
     const model = 'gpt-4.1'
 
-    const resp = await openai.responses.create({
+    const resp = await openai.chat.completions.create({
       model,
-      input: [
-        { role: 'system', content: [{ type: 'input_text', text: system }] },
-        { role: 'user', content: [{ type: 'input_text', text: userText }] },
+      messages: [
+        { role: 'system', content: system },
+        { role: 'user', content: userText },
       ],
+      temperature: 0.2,
+      response_format: {
+        type: 'json_schema',
+        json_schema: { name: 'practice_test', schema: testJsonSchema },
+      },
     })
 
-    const parsed = safeParseJson(resp.output_text)
+    const raw = String(resp.choices?.[0]?.message?.content ?? '').trim()
+    const parsed = testSchema.parse(JSON.parse(raw))
     const json = normalizeTest(parsed)
     return NextResponse.json(json)
   } catch (e: any) {

@@ -4,10 +4,11 @@ import { requireUser } from '@/lib/authServer'
 import { computePlanCost } from '@/lib/planCost'
 import OpenAI from 'openai'
 import pdfParse from 'pdf-parse'
-import { getPlan, savePlan } from '@/app/api/plan/store'
+import { getPlan } from '@/app/api/plan/store'
 import { supabaseAdmin } from '@/lib/supabaseServer'
 
 export const runtime = 'nodejs'
+export const maxDuration = 300
 
 const MODEL = 'gpt-4.1'
 const MAX_OUTPUT_TOKENS = 1100
@@ -21,28 +22,30 @@ const planRequestSchema = z.object({
 })
 
 const planPayloadSchema = z.object({
-  plan: z.object({
-    title: z.string(),
-    overview: z.string(),
-    steps: z.array(z.string()),
-  }),
-  notes: z.object({
-    summary: z.string(),
-    detailed: z.string(),
-    key_points: z.array(z.string()),
-  }),
-  daily: z.object({
-    today_goal: z.string(),
-    time_blocks: z.array(
+  title: z.string(),
+  language: z.string(),
+  exam_date: z.string().nullable(),
+  quick_summary: z.string(),
+  study_notes_markdown: z.string(),
+  daily_plan: z.object({
+    blocks: z.array(
       z.object({
-        label: z.string(),
-        minutes: z.number(),
+        start: z.string(),
+        end: z.string(),
+        task: z.string(),
+        details: z.string(),
       })
     ),
   }),
   practice: z.object({
-    quick_questions: z.array(z.string()),
-    exam_tasks: z.array(z.string()),
+    questions: z.array(
+      z.object({
+        q: z.string(),
+        options: z.array(z.string()).optional().nullable(),
+        answer: z.string(),
+        explanation: z.string(),
+      })
+    ),
   }),
 })
 
@@ -50,57 +53,55 @@ const planPayloadJsonSchema = {
   type: 'object',
   additionalProperties: false,
   properties: {
-    plan: {
+    title: { type: 'string' },
+    language: { type: 'string' },
+    exam_date: { type: ['string', 'null'] },
+    quick_summary: { type: 'string' },
+    study_notes_markdown: { type: 'string' },
+    daily_plan: {
       type: 'object',
       additionalProperties: false,
       properties: {
-        title: { type: 'string' },
-        overview: { type: 'string' },
-        steps: { type: 'array', items: { type: 'string' } },
-      },
-      required: ['title', 'overview', 'steps'],
-    },
-    notes: {
-      type: 'object',
-      additionalProperties: false,
-      properties: {
-        summary: { type: 'string' },
-        detailed: { type: 'string' },
-        key_points: { type: 'array', items: { type: 'string' } },
-      },
-      required: ['summary', 'detailed', 'key_points'],
-    },
-    daily: {
-      type: 'object',
-      additionalProperties: false,
-      properties: {
-        today_goal: { type: 'string' },
-        time_blocks: {
+        blocks: {
           type: 'array',
           items: {
             type: 'object',
             additionalProperties: false,
             properties: {
-              label: { type: 'string' },
-              minutes: { type: 'number' },
+              start: { type: 'string' },
+              end: { type: 'string' },
+              task: { type: 'string' },
+              details: { type: 'string' },
             },
-            required: ['label', 'minutes'],
+            required: ['start', 'end', 'task', 'details'],
           },
         },
       },
-      required: ['today_goal', 'time_blocks'],
+      required: ['blocks'],
     },
     practice: {
       type: 'object',
       additionalProperties: false,
       properties: {
-        quick_questions: { type: 'array', items: { type: 'string' } },
-        exam_tasks: { type: 'array', items: { type: 'string' } },
+        questions: {
+          type: 'array',
+          items: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              q: { type: 'string' },
+              options: { type: ['array', 'null'], items: { type: 'string' } },
+              answer: { type: 'string' },
+              explanation: { type: 'string' },
+            },
+            required: ['q', 'answer', 'explanation'],
+          },
+        },
       },
-      required: ['quick_questions', 'exam_tasks'],
+      required: ['questions'],
     },
   },
-  required: ['plan', 'notes', 'daily', 'practice'],
+  required: ['title', 'language', 'exam_date', 'quick_summary', 'study_notes_markdown', 'daily_plan', 'practice'],
 }
 
 const notesSchema = z.object({
@@ -252,6 +253,42 @@ function isImage(name: string, type: string) {
 
 function isPdf(name: string, type: string) {
   return type === 'application/pdf' || /\.pdf$/i.test(name)
+}
+
+function sleep(ms: number) {
+  return new Promise((r) => setTimeout(r, ms))
+}
+
+function isRetriable(err: any) {
+  const msg = String(err?.message || '').toLowerCase()
+  const status = Number(err?.status || err?.cause?.status)
+  if (status >= 500 || status === 429) return true
+  return msg.includes('timeout') || msg.includes('econn') || msg.includes('network') || msg.includes('abort')
+}
+
+async function withRetries<T>(fn: () => Promise<T>) {
+  const delays = [500, 1500]
+  let lastErr: any = null
+  for (let i = 0; i <= delays.length; i += 1) {
+    try {
+      return await fn()
+    } catch (err: any) {
+      lastErr = err
+      if (!isRetriable(err) || i === delays.length) break
+      await sleep(delays[i])
+    }
+  }
+  throw lastErr
+}
+
+async function withTimeout<T>(ms: number, fn: (signal: AbortSignal) => Promise<T>) {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), ms)
+  try {
+    return await fn(controller.signal)
+  } finally {
+    clearTimeout(timer)
+  }
 }
 
 async function bufferToText(name: string, type: string, buf: Buffer) {
@@ -442,50 +479,50 @@ function safeJsonParse(text: string) {
 type PlanPayload = z.infer<typeof planPayloadSchema>
 
 function normalizePlanPayload(input: any): PlanPayload {
-  const plan = input?.plan ?? {}
-  const notes = input?.notes ?? {}
-  const daily = input?.daily ?? {}
-  const practice = input?.practice ?? {}
+  const title = String(input?.title ?? '').trim() || 'Tanulasi terv'
+  const language = String(input?.language ?? '').trim() || 'Hungarian'
+  const examDate = input?.exam_date ? String(input.exam_date) : null
+  const quickSummary = String(input?.quick_summary ?? '').trim() || 'Rovid attekintes a felkeszuleshez.'
+  const studyNotes = String(input?.study_notes_markdown ?? '').trim() || '## Jegyzetek\n- Fo fogalmak\n- Kulcsotletek'
 
-  const steps = Array.isArray(plan.steps) ? plan.steps.map((s: any) => String(s)) : []
-  const keyPoints = Array.isArray(notes.key_points) ? notes.key_points.map((s: any) => String(s)) : []
-  const quickQuestions = Array.isArray(practice.quick_questions)
-    ? practice.quick_questions.map((s: any) => String(s))
-    : []
-  const examTasks = Array.isArray(practice.exam_tasks) ? practice.exam_tasks.map((s: any) => String(s)) : []
+  const blocksRaw = Array.isArray(input?.daily_plan?.blocks) ? input.daily_plan.blocks : []
+  const blocks = blocksRaw.map((b: any) => ({
+    start: String(b?.start ?? '').trim() || '09:00',
+    end: String(b?.end ?? '').trim() || '09:30',
+    task: String(b?.task ?? '').trim() || 'Attekintes',
+    details: String(b?.details ?? '').trim() || 'Rovid jegyzet es feladatok.',
+  }))
 
-  const timeBlocksRaw = Array.isArray(daily.time_blocks) ? daily.time_blocks : []
-  const timeBlocks = timeBlocksRaw
-    .map((b: any) => ({
-      label: String(b?.label ?? '').trim() || 'Fokusz',
-      minutes: Number.isFinite(Number(b?.minutes)) ? Number(b.minutes) : 25,
-    }))
-    .map((b: any) => ({ ...b, minutes: Math.max(5, Math.min(180, Math.round(b.minutes))) }))
+  const questionsRaw = Array.isArray(input?.practice?.questions) ? input.practice.questions : []
+  const questions = questionsRaw.map((q: any) => ({
+    q: String(q?.q ?? '').trim() || 'Ismertesd a fo fogalmakat.',
+    options: Array.isArray(q?.options) ? q.options.map((o: any) => String(o)) : null,
+    answer: String(q?.answer ?? '').trim() || 'Rovid, pontos valasz.',
+    explanation: String(q?.explanation ?? '').trim() || 'Rovid magyarazat.',
+  }))
 
   return {
-    plan: {
-      title: String(plan.title ?? '').trim() || 'Tanulasi terv',
-      overview: String(plan.overview ?? '').trim() || 'Rovid attekintes a tanulashoz.',
-      steps: steps.length ? steps.slice(0, 12) : ['Alapfogalmak attekintese', 'Jegyzetek rendszerezese', 'Gyakorlo feladatok'],
-    },
-    notes: {
-      summary: String(notes.summary ?? '').trim() || 'Rovid osszefoglalo.',
-      detailed: String(notes.detailed ?? '').trim() || 'Reszletes jegyzetek a fo temakrol.',
-      key_points: keyPoints.length ? keyPoints.slice(0, 12) : ['Definiciok', 'Kulcsotletek', 'Peldak', 'Tipikus hibak'],
-    },
-    daily: {
-      today_goal: String(daily.today_goal ?? '').trim() || 'Fokuszalt attekintes es gyakorlati feladatok.',
-      time_blocks: timeBlocks.length
-        ? timeBlocks.slice(0, 10)
+    title,
+    language,
+    exam_date: examDate,
+    quick_summary: quickSummary,
+    study_notes_markdown: studyNotes,
+    daily_plan: {
+      blocks: blocks.length
+        ? blocks.slice(0, 12)
         : [
-            { label: 'Ismetles', minutes: 25 },
-            { label: 'Jegyzeteles', minutes: 30 },
-            { label: 'Gyakorlas', minutes: 30 },
+            { start: '09:00', end: '09:30', task: 'Attekintes', details: 'Fo temak atnezese.' },
+            { start: '09:30', end: '10:10', task: 'Jegyzeteles', details: 'Definiciok es peldak.' },
+            { start: '10:10', end: '10:40', task: 'Gyakorlas', details: 'Rovid feladatok megoldasa.' },
           ],
     },
     practice: {
-      quick_questions: quickQuestions.length ? quickQuestions.slice(0, 12) : ['Sorold fel a fo fogalmakat.'],
-      exam_tasks: examTasks.length ? examTasks.slice(0, 8) : ['Oldj meg egy tipikus vizsgafeladatot.'],
+      questions: questions.length
+        ? questions.slice(0, 15)
+        : [
+            { q: 'Sorolj fel 3 kulcsfogalmat.', options: null, answer: 'Pelda valasz.', explanation: 'Rovid indoklas.' },
+            { q: 'Adj egy tipikus peldat.', options: null, answer: 'Pelda valasz.', explanation: 'Rovid indoklas.' },
+          ],
     },
   }
 }
@@ -494,27 +531,24 @@ function fallbackPlanPayload(prompt: string, fileNames: string[]) {
   const titleBase = String(prompt || '').trim().slice(0, 80)
   const title = titleBase || (fileNames.length ? `Tanulasi terv: ${fileNames[0]}` : 'Tanulasi terv')
   return normalizePlanPayload({
-    plan: {
-      title,
-      overview: 'Rovid, de teljes attekintes a felkeszuleshez.',
-      steps: ['Attekintes es celok', 'Fobb temak osszegyujtese', 'Gyakorlas es visszanezes'],
-    },
-    notes: {
-      summary: 'Osszefoglalo a legfontosabb pontokrol.',
-      detailed: 'A jegyzetek a definiciokat, kulcsotleteket, peldakat es tipikus hibakat fedik le.',
-      key_points: ['Definiciok', 'Kulcsotletek', 'Peldak', 'Tipikus hibak'],
-    },
-    daily: {
-      today_goal: 'Rovid attekintes es egy gyakorlo blokk.',
-      time_blocks: [
-        { label: 'Attekintes', minutes: 20 },
-        { label: 'Jegyzeteles', minutes: 25 },
-        { label: 'Gyakorlas', minutes: 25 },
+    title,
+    language: 'Hungarian',
+    exam_date: null,
+    quick_summary: 'Rovid, de teljes attekintes a felkeszuleshez.',
+    study_notes_markdown:
+      '## Definiciok\n- Alapfogalmak\n\n## Kulcsotletek\n- Fo osszefuggesek\n\n## Peldak\n- Rovid pelda\n\n## Tipikus hibak\n- Gyakori hibak',
+    daily_plan: {
+      blocks: [
+        { start: '09:00', end: '09:30', task: 'Attekintes', details: 'Fo temak atnezese.' },
+        { start: '09:30', end: '10:10', task: 'Jegyzeteles', details: 'Definiciok es peldak.' },
+        { start: '10:10', end: '10:40', task: 'Gyakorlas', details: 'Rovid feladatok megoldasa.' },
       ],
     },
     practice: {
-      quick_questions: ['Mi a legfontosabb definicio?', 'Sorold fel a kulcstetelleket.'],
-      exam_tasks: ['Oldj meg egy tipikus feladatot a tematika alapjan.'],
+      questions: [
+        { q: 'Mi a legfontosabb definicio?', options: null, answer: 'Pelda valasz.', explanation: 'Rovid indoklas.' },
+        { q: 'Sorolj fel kulcsotleteket.', options: null, answer: 'Pelda valasz.', explanation: 'Rovid indoklas.' },
+      ],
     },
   })
 }
@@ -527,150 +561,33 @@ function legacyToPlanPayload(
 ) {
   const notesPayload = notesJson ? notesJsonToPayload(notesJson) : null
   const title = notesPayload?.title || titleFallback || 'Tanulasi terv'
-  const overview = notesJson?.plan?.summary?.trim() || 'Rovid attekintes a felkeszuleshez.'
-  const steps = Array.isArray(notesPayload?.key_topics) ? notesPayload?.key_topics : []
-  const timeBlocks = Array.isArray(dailyJson?.daily_plan?.blocks)
+  const summary = notesJson?.plan?.summary?.trim() || 'Rovid attekintes a felkeszuleshez.'
+  const blocks = Array.isArray(dailyJson?.daily_plan?.blocks)
     ? dailyJson.daily_plan.blocks.map((b: any) => ({
-        label: String(b?.title ?? '').trim() || 'Fokusz',
-        minutes: Number.isFinite(Number(b?.duration_minutes)) ? Number(b.duration_minutes) : 25,
+        start: '09:00',
+        end: '09:30',
+        task: String(b?.title ?? '').trim() || 'Fokusz',
+        details: 'Idokeret a blokk szerint.',
       }))
     : []
-  const quickQuestions = Array.isArray(practiceJson?.practice?.questions)
-    ? practiceJson.practice.questions.map((q: any) => String(q?.question ?? '')).filter(Boolean)
+  const questions = Array.isArray(practiceJson?.practice?.questions)
+    ? practiceJson.practice.questions.map((q: any) => ({
+        q: String(q?.question ?? '').trim(),
+        options: null,
+        answer: String(q?.answer ?? '').trim(),
+        explanation: '',
+      }))
     : []
 
   return normalizePlanPayload({
-    plan: { title, overview, steps },
-    notes: {
-      summary: overview,
-      detailed: String(notesPayload?.study_notes ?? '').trim(),
-      key_points: steps,
-    },
-    daily: { today_goal: title, time_blocks: timeBlocks },
-    practice: { quick_questions: quickQuestions, exam_tasks: [] },
+    title,
+    language: 'Hungarian',
+    exam_date: null,
+    quick_summary: summary,
+    study_notes_markdown: String(notesPayload?.study_notes ?? '').trim(),
+    daily_plan: { blocks },
+    practice: { questions },
   })
-}
-
-async function callJsonWithRetries<T>(
-  client: OpenAI,
-  model: string,
-  system: string,
-  user: string,
-  schema: z.ZodSchema<T>,
-  jsonSchema: any,
-  retries: number,
-  validate?: (data: T) => boolean
-) {
-  let lastRaw = ''
-  for (let attempt = 0; attempt <= retries; attempt += 1) {
-    const sys = attempt === 0 ? system : 'Return ONLY JSON matching the schema. No extra text.'
-    const userMsg = attempt === 0 ? user : user.slice(0, 4000)
-    const resp = await client.chat.completions.create({
-      model,
-      messages: [
-        { role: 'system', content: sys },
-        { role: 'user', content: userMsg },
-      ],
-      temperature: 0.2,
-      max_tokens: MAX_OUTPUT_TOKENS,
-      response_format: {
-        type: 'json_schema',
-        json_schema: {
-          name: 'plan_step',
-          schema: jsonSchema,
-        },
-      },
-    })
-    const raw = String(resp.choices?.[0]?.message?.content ?? '').trim()
-    lastRaw = raw
-    try {
-      const parsed = safeJsonParse(raw)
-      const data = schema.parse(parsed)
-      if (validate && !validate(data)) throw new Error('AI_JSON_INVALID')
-      return { data, raw }
-    } catch (err) {
-      if (attempt >= retries) {
-        const e: any = new Error('AI_JSON_PARSE_FAILED')
-        e.raw = lastRaw
-        throw e
-      }
-    }
-  }
-  const e: any = new Error('AI_JSON_PARSE_FAILED')
-  e.raw = lastRaw
-  throw e
-}
-
-async function callJson<T>(
-  client: OpenAI,
-  model: string,
-  system: string,
-  user: string,
-  schema: z.ZodSchema<T>,
-  jsonSchema: any,
-  retries: number
-) {
-  let lastErr: any = null
-  for (let attempt = 0; attempt <= retries; attempt += 1) {
-    try {
-      const resp = await client.chat.completions.create({
-        model,
-        messages: [
-          { role: 'system', content: system },
-          { role: 'user', content: user },
-        ],
-        temperature: 0.2,
-        max_tokens: MAX_OUTPUT_TOKENS,
-        response_format: {
-          type: 'json_schema',
-          json_schema: {
-            name: 'plan_step',
-            schema: jsonSchema,
-          },
-        },
-      })
-      const raw = resp.choices?.[0]?.message?.content ?? ''
-      const parsed = extractJsonObject(raw)
-      return schema.parse(parsed)
-    } catch (err) {
-      lastErr = err
-    }
-  }
-  throw lastErr || new Error('AI_JSON_INVALID')
-}
-
-async function extractTextFromImages(
-  client: OpenAI,
-  model: string,
-  images: Array<{ name: string; b64: string; mime: string }>
-) {
-  if (!images.length) return ''
-  const chunks: string[] = []
-  for (let i = 0; i < images.length; i += 6) {
-    const batch = images.slice(i, i + 6)
-    const content: any[] = [
-      {
-        type: 'text',
-        text:
-          'Extract ALL readable text from these images (including handwritten notes). Preserve reading order as best as possible. Return plain text only.',
-      },
-    ]
-    for (const img of batch) {
-      content.push({ type: 'image_url', image_url: { url: `data:${img.mime};base64,${img.b64}` } })
-    }
-    const resp = await client.chat.completions.create({
-      model,
-      messages: [
-        { role: 'system', content: 'You are an OCR extractor.' },
-        { role: 'user', content: content as any },
-      ],
-      temperature: 0,
-      max_tokens: MAX_OUTPUT_TOKENS,
-    })
-    const txt = String(resp.choices?.[0]?.message?.content ?? '').trim()
-    if (txt) chunks.push(txt)
-  }
-  return chunks.join('\n\n')
 }
 
 async function loadMaterialsForPlan(userId: string, planId: string) {
@@ -690,7 +607,6 @@ async function loadMaterialsForPlan(userId: string, planId: string) {
   }
 
   const textParts: string[] = []
-  const images: Array<{ name: string; b64: string; mime: string }> = []
   const fileNames: string[] = []
   let imageCount = 0
 
@@ -698,149 +614,15 @@ async function loadMaterialsForPlan(userId: string, planId: string) {
     if (isImage(String(m.file_path || ''), typeof m.mime_type === 'string' ? m.mime_type : '')) {
       imageCount += 1
     }
-    if (m.status !== 'processed') continue
     const path = String(m.file_path || '')
     const name = path.split('/').pop() || 'file'
-    const mime = typeof m.mime_type === 'string' ? m.mime_type : ''
     fileNames.push(name)
-    if (m.extracted_text) {
-      textParts.push(`--- ${name} ---\n${String(m.extracted_text)}`)
-    }
-
-    if (isImage(name, mime)) {
-      try {
-        const { buf, type } = await downloadToBuffer(path)
-        images.push({ name, b64: toBase64(buf), mime: type || mime || 'image/png' })
-      } catch {}
-      continue
-    }
-
-    if (!m.extracted_text) {
-      try {
-        const { buf, type } = await downloadToBuffer(path)
-        const text = await bufferToText(name, type || mime, buf)
-        if (text.trim()) textParts.push(`--- ${name} ---\n${text}`)
-      } catch {}
-    }
+    if (m.status !== 'processed') continue
+    if (m.extracted_text) textParts.push(`--- ${name} ---\n${String(m.extracted_text)}`)
   }
 
-  const textFromFiles = textParts.join('\n\n').slice(0, 120_000)
-  return { status: 'ready' as const, textFromFiles, images, fileNames, imageCount, total }
-}
-
-async function generateNotesStep(
-  client: OpenAI,
-  model: string,
-  prompt: string,
-  textFromFiles: string,
-  ocrText: string
-) {
-  const systemText = [
-    'Irj reszletes, strukturalt tanulasi jegyzetet magyarul.',
-    'Legyen kb. 450-650 szo, tomor de teljes.',
-    'Hasznalj "##" cimsorokat es bullet listakat.',
-    'Hasznald ezeket a szakaszokat pontosan:',
-    '## Definiciok',
-    '## Kulcsotletek',
-    '## Peldak',
-    '## Tipikus hibak',
-    '## Gyors osszefoglalo',
-    'Ha keves az info, tegyel fel esszeru felteveseket es akkor is legyen hosszu jegyzet.',
-  ].join('\n')
-
-  const userText = [
-    `Prompt:\n${prompt || '(empty)'}`,
-    `Text from files:\n${textFromFiles || '(none)'}`,
-    `Text from images (OCR):\n${ocrText || '(none)'}`,
-  ].join('\n\n')
-
-  const textResp = await client.chat.completions.create({
-    model,
-    messages: [
-      { role: 'system', content: systemText },
-      { role: 'user', content: userText },
-    ],
-    temperature: 0.2,
-    max_tokens: MAX_OUTPUT_TOKENS,
-  })
-  const rawNotesText = String(textResp.choices?.[0]?.message?.content ?? '').trim()
-
-  const systemJson = [
-    'Convert the provided study notes into JSON matching the schema.',
-    'Return ONLY JSON, no extra text.',
-  ].join('\n')
-  const userJson = `Notes:\n${rawNotesText || '(empty)'}`
-
-  const { data, raw } = await callJsonWithRetries(
-    client,
-    model,
-    systemJson,
-    userJson,
-    notesSchema,
-    notesJsonSchema,
-    2,
-    validateNotes
-  )
-
-  return { notes: data, rawNotesText, rawNotesJson: raw }
-}
-
-async function generateDailyStep(client: OpenAI, model: string, notes: NotesPayload, examDate: string) {
-  const system = [
-    'Return ONLY valid JSON matching the schema. No markdown or extra text.',
-    'blocks length must be >= 3.',
-    'total_minutes must equal the sum of block durations.',
-    'Language: Hungarian.',
-  ].join('\n')
-  const user = [
-    `Exam date: ${examDate}`,
-    `Subject: ${notes.subject}`,
-    `Title: ${notes.title}`,
-    `Key topics: ${notes.key_topics.join(', ')}`,
-    `Study notes:\n${notes.study_notes}`,
-  ].join('\n\n')
-
-  const { data } = await callJsonWithRetries(
-    client,
-    model,
-    system,
-    user,
-    dailySchema,
-    dailyJsonSchema,
-    2,
-    validateDaily
-  )
-
-  return normalizeDaily(data)
-}
-
-async function generatePracticeStep(client: OpenAI, model: string, notes: NotesPayload) {
-  const system = [
-    'Return ONLY valid JSON matching the schema. No markdown or extra text.',
-    'Generate at least 5 questions total.',
-    'Answers must be 1-3 sentences max.',
-    'Questions must be based on key_topics.',
-    'Language: Hungarian.',
-  ].join('\n')
-  const user = [
-    `Subject: ${notes.subject}`,
-    `Title: ${notes.title}`,
-    `Key topics: ${notes.key_topics.join(', ')}`,
-    `Study notes:\n${notes.study_notes}`,
-  ].join('\n\n')
-
-  const { data } = await callJsonWithRetries(
-    client,
-    model,
-    system,
-    user,
-    practiceSchema,
-    practiceJsonSchema,
-    2,
-    validatePractice
-  )
-
-  return normalizePractice(data)
+  const textFromFiles = textParts.join('\n\n').slice(0, 80_000)
+  return { status: 'ready' as const, textFromFiles, fileNames, imageCount, total }
 }
 
 function countWords(text: string) {
@@ -1170,6 +952,7 @@ export async function POST(req: Request) {
   let cost = 0
   let creditsConsumed = false
   let userId: string | null = null
+  const startedAt = Date.now()
   try {
     const user = await requireUser(req)
     userId = user.id
@@ -1194,7 +977,6 @@ export async function POST(req: Request) {
     let materials = {
       status: 'ready' as const,
       textFromFiles: '',
-      images: [] as Array<{ name: string; b64: string; mime: string }>,
       fileNames: [] as string[],
       imageCount: 0,
       total: 0,
@@ -1202,15 +984,28 @@ export async function POST(req: Request) {
     if (planId) {
       const loaded = await loadMaterialsForPlan(user.id, planId)
       if (loaded.status === 'processing') {
-        console.log('plan.generate materials processing', { planId, total: loaded.total, processed: loaded.processed })
+        console.log('plan.generate materials processing', {
+          requestId,
+          planId,
+          total: loaded.total,
+          processed: loaded.processed,
+        })
         return NextResponse.json({ status: 'processing', processed: loaded.processed, total: loaded.total }, { status: 202 })
       }
       materials = loaded
     }
 
-    if (materials.imageCount > 15) {
+    if (materials.total > 15) {
       return NextResponse.json({ error: 'MAX_FILES_EXCEEDED' }, { status: 400, headers: { 'cache-control': 'no-store' } })
     }
+
+    console.log('plan.generate start', {
+      requestId,
+      planId: planId || idToUse,
+      files: materials.total,
+      images: materials.imageCount,
+      extracted_chars: materials.textFromFiles.length,
+    })
 
     const prompt =
       promptRaw.trim() ||
@@ -1291,7 +1086,7 @@ export async function POST(req: Request) {
       await savePlanToDbBestEffort({
         id: idToUse,
         userId: user.id,
-        title: fallback.plan.title,
+        title: fallback.title,
         created_at: new Date().toISOString(),
         result: fallback,
         notes_json: null,
@@ -1307,40 +1102,46 @@ export async function POST(req: Request) {
 
     const client = new OpenAI({ apiKey: openAiKey })
     const model = MODEL
-    const ocrText = materials.images.length ? await extractTextFromImages(client, model, materials.images) : ''
-    const extractedText = [materials.textFromFiles, ocrText].filter(Boolean).join('\n\n').slice(0, 140_000)
+    const extractedText = String(materials.textFromFiles || '').slice(0, 80_000)
+    const isHu = detectHungarian(prompt) || detectHungarian(extractedText)
 
     const systemText = [
-      'Return ONLY valid JSON matching the schema. No markdown, no extra text.',
-      'Language: Hungarian.',
+      'Return ONLY valid JSON matching the schema. No markdown wrapping, no extra text.',
+      `Language: ${isHu ? 'Hungarian' : 'English'}.`,
       'If information is missing, make reasonable assumptions and still fill all fields.',
-      'Keep the plan concise but complete.',
+      'Study notes must be detailed.',
     ].join('\n')
     const userText = [
       `Prompt:\n${prompt || '(empty)'}`,
       `File names:\n${materials.fileNames.join(', ') || '(none)'}`,
-      `Text from files:\n${materials.textFromFiles || '(none)'}`,
-      `Text from images (OCR):\n${ocrText || '(none)'}`,
+      `Extracted text:\n${extractedText || '(none)'}`,
     ].join('\n\n')
 
     let planPayload: PlanPayload
     try {
-      const resp = await client.chat.completions.create({
-        model,
-        messages: [
-          { role: 'system', content: systemText },
-          { role: 'user', content: userText },
-        ],
-        temperature: 0.2,
-        max_tokens: MAX_OUTPUT_TOKENS,
-        response_format: {
-          type: 'json_schema',
-          json_schema: {
-            name: 'study_plan',
-            schema: planPayloadJsonSchema,
-          },
-        },
-      })
+      const resp = await withRetries(() =>
+        withTimeout(45_000, (signal) =>
+          client.chat.completions.create(
+            {
+              model,
+              messages: [
+                { role: 'system', content: systemText },
+                { role: 'user', content: userText },
+              ],
+              temperature: 0.2,
+              max_tokens: MAX_OUTPUT_TOKENS,
+              response_format: {
+                type: 'json_schema',
+                json_schema: {
+                  name: 'study_plan',
+                  schema: planPayloadJsonSchema,
+                },
+              },
+            },
+            { signal }
+          )
+        )
+      )
       const raw = String(resp.choices?.[0]?.message?.content ?? '').trim()
       const parsed = safeJsonParse(raw)
       planPayload = normalizePlanPayload(planPayloadSchema.parse(parsed))
@@ -1353,7 +1154,7 @@ export async function POST(req: Request) {
     await savePlanToDbBestEffort({
       id: idToUse,
       userId: user.id,
-      title: plan.plan.title,
+      title: plan.title,
       created_at: new Date().toISOString(),
       result: plan,
       notes_json: null,
@@ -1365,6 +1166,11 @@ export async function POST(req: Request) {
     })
     await setCurrentPlanBestEffort(user.id, idToUse)
 
+    console.log('plan.generate done', {
+      requestId,
+      planId: idToUse,
+      elapsed_ms: Date.now() - startedAt,
+    })
     return NextResponse.json({ id: idToUse }, { headers: { 'cache-control': 'no-store', 'x-examly-plan': 'ok' } })
   } catch (e: any) {
     if (creditsConsumed) {

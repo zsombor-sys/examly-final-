@@ -4,8 +4,26 @@ import { supabaseAdmin } from '@/lib/supabaseServer'
 import OpenAI from 'openai'
 import pdfParse from 'pdf-parse'
 import { getOpenAIModels } from '@/lib/openaiModels'
+import { z } from 'zod'
 
 export const runtime = 'nodejs'
+
+const ocrSchema = z.object({
+  extracted_text: z.string(),
+  language: z.string(),
+  confidence: z.number(),
+})
+
+const ocrJsonSchema = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    extracted_text: { type: 'string' },
+    language: { type: 'string' },
+    confidence: { type: 'number' },
+  },
+  required: ['extracted_text', 'language', 'confidence'],
+}
 
 function isImage(path: string, mime: string | null) {
   if (mime && mime.startsWith('image/')) return true
@@ -40,23 +58,29 @@ async function withRetries<T>(fn: () => Promise<T>) {
 }
 
 async function extractImageText(openai: OpenAI | null, model: string, buf: Buffer, mime: string) {
-  if (!openai) return ''
+  if (!openai) throw new Error('Missing OpenAI client')
   const b64 = buf.toString('base64')
   const resp = await openai.chat.completions.create({
     model,
     messages: [
-      { role: 'system', content: 'You are an OCR extractor. Return only extracted text.' },
+      { role: 'system', content: 'You are an OCR extractor. Return ONLY valid JSON matching the schema.' },
       {
         role: 'user',
         content: [
-          { type: 'text', text: 'Extract readable text from this image. Return plain text only.' },
+          { type: 'text', text: 'Extract readable text from this image.' },
           { type: 'image_url', image_url: { url: `data:${mime};base64,${b64}` } },
         ] as any,
       },
     ],
     temperature: 0,
+    response_format: {
+      type: 'json_schema',
+      json_schema: { name: 'ocr_result', schema: ocrJsonSchema },
+    },
   })
-  return String(resp.choices?.[0]?.message?.content ?? '').trim()
+  const raw = String(resp.choices?.[0]?.message?.content ?? '').trim()
+  const parsed = ocrSchema.parse(JSON.parse(raw))
+  return String(parsed.extracted_text || '').trim()
 }
 
 export async function POST(req: Request) {

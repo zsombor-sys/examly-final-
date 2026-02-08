@@ -3,6 +3,7 @@ import { requireUser } from '@/lib/authServer'
 import { consumeGeneration } from '@/lib/creditsServer'
 import { supabaseAdmin } from '@/lib/supabaseServer'
 import OpenAI from 'openai'
+import { z } from 'zod'
 
 export const runtime = 'nodejs'
 
@@ -14,26 +15,52 @@ function isBucketMissingError(err: any) {
   return (status === 404 && msg.includes('bucket')) || (msg.includes('bucket') && msg.includes('not found'))
 }
 
-function safeParseJson(text: string) {
-  const raw = String(text ?? '').trim()
-  if (!raw) throw new Error('Model returned empty response (no JSON).')
+const vocabSchema = z.object({
+  title: z.string(),
+  language: z.string(),
+  items: z.array(
+    z.object({
+      term: z.string(),
+      translation: z.string(),
+      example: z.string().optional(),
+    })
+  ),
+})
 
-  try {
-    return JSON.parse(raw)
-  } catch {}
+const vocabJsonSchema = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    title: { type: 'string' },
+    language: { type: 'string' },
+    items: {
+      type: 'array',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          term: { type: 'string' },
+          translation: { type: 'string' },
+          example: { type: 'string' },
+        },
+        required: ['term', 'translation'],
+      },
+    },
+  },
+  required: ['title', 'language', 'items'],
+}
 
-  const m = raw.match(/\{[\s\S]*\}/)
-  if (m) {
-    try {
-      return JSON.parse(m[0])
-    } catch {}
-  }
+const ocrSchema = z.object({
+  extracted_text: z.string(),
+})
 
-  const repaired = raw.replace(/\\(?!["\\/bfnrtu])/g, '\\\\')
-  const m2 = repaired.match(/\{[\s\S]*\}/)
-  if (m2) return JSON.parse(m2[0])
-
-  throw new Error('Model did not return valid JSON.')
+const ocrJsonSchema = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    extracted_text: { type: 'string' },
+  },
+  required: ['extracted_text'],
 }
 
 function normalize(payload: any) {
@@ -104,13 +131,19 @@ async function extractTextFromImages(openai: OpenAI, model: string, images: Arra
   const resp = await openai.chat.completions.create({
     model,
     messages: [
-      { role: 'system', content: 'You are a careful OCR extractor. Return only the extracted text. No markdown.' },
+      { role: 'system', content: 'You are a careful OCR extractor. Return ONLY valid JSON matching the schema.' },
       { role: 'user', content: userContent as any },
     ],
     temperature: 0,
+    response_format: {
+      type: 'json_schema',
+      json_schema: { name: 'ocr_result', schema: ocrJsonSchema },
+    },
   })
 
-  return String(resp.choices?.[0]?.message?.content ?? '').trim()
+  const raw = String(resp.choices?.[0]?.message?.content ?? '').trim()
+  const parsed = ocrSchema.parse(JSON.parse(raw))
+  return String(parsed.extracted_text || '').trim()
 }
 
 export async function POST(req: Request) {
@@ -190,11 +223,14 @@ Rules:
         { role: 'user', content: combined },
       ],
       temperature: 0.3,
-      response_format: { type: 'json_object' },
+      response_format: {
+        type: 'json_schema',
+        json_schema: { name: 'vocab_set', schema: vocabJsonSchema },
+      },
     })
 
-    const txt = resp.choices?.[0]?.message?.content ?? ''
-    const parsed = safeParseJson(txt)
+    const raw = String(resp.choices?.[0]?.message?.content ?? '').trim()
+    const parsed = vocabSchema.parse(JSON.parse(raw))
     const normalized = normalize(parsed)
     if (!normalized.language) normalized.language = `${src} → ${tgt}`
 

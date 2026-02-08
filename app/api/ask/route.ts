@@ -2,17 +2,25 @@ import { NextResponse } from 'next/server'
 import { requireUser } from '@/lib/authServer'
 import { consumeGeneration } from '@/lib/creditsServer'
 import OpenAI from 'openai'
+import { z } from 'zod'
 
 export const runtime = 'nodejs'
 
-function safeParseJson(text: string) {
-  try {
-    return JSON.parse(text)
-  } catch {
-    const m = text.match(/\{[\s\S]*\}/)
-    if (m) return JSON.parse(m[0])
-    throw new Error('Model did not return JSON')
-  }
+const answerSchema = z.object({
+  display: z.string(),
+  speech: z.string(),
+  language: z.string(),
+})
+
+const answerJsonSchema = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    display: { type: 'string' },
+    speech: { type: 'string' },
+    language: { type: 'string' },
+  },
+  required: ['display', 'speech', 'language'],
 }
 
 export async function POST(req: Request) {
@@ -57,20 +65,25 @@ Language:
 
     const model = 'gpt-4.1'
 
-    const resp = await openai.responses.create({
+    const resp = await openai.chat.completions.create({
       model,
-      input: [
-        { role: 'system', content: [{ type: 'input_text', text: system }] },
-        { role: 'user', content: [{ type: 'input_text', text: `Language: ${language}\nQuestion: ${question}` }] },
+      messages: [
+        { role: 'system', content: system },
+        { role: 'user', content: `Language: ${language}\nQuestion: ${question}` },
       ],
+      temperature: 0.2,
+      response_format: {
+        type: 'json_schema',
+        json_schema: { name: 'ask_answer', schema: answerJsonSchema },
+      },
     })
 
-    const raw = resp.output_text
-    const parsed = safeParseJson(raw)
+    const raw = String(resp.choices?.[0]?.message?.content ?? '').trim()
+    const parsed = answerSchema.parse(JSON.parse(raw))
     const out = {
-      display: String(parsed?.display ?? ''),
-      speech: String(parsed?.speech ?? ''),
-      language: String(parsed?.language ?? (language === 'en' ? 'English' : 'Hungarian')),
+      display: String(parsed.display ?? ''),
+      speech: String(parsed.speech ?? ''),
+      language: String(parsed.language ?? (language === 'en' ? 'English' : 'Hungarian')),
     }
     if (!out.display) out.display = out.speech
     if (!out.speech) out.speech = out.display.replace(/\$\$[\s\S]*?\$\$|\$[^$]*\$/g, '')

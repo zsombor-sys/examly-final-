@@ -16,23 +16,16 @@ import { computePlanCost } from '@/lib/planCost'
 type Block = { type: 'study' | 'break'; minutes: number; label: string }
 type DayPlan = { day: string; focus: string; tasks: string[]; minutes: number; blocks?: Block[] }
 type PlanResult = {
-  plan: {
-    title: string
-    overview: string
-    steps: string[]
-  }
-  notes: {
-    summary: string
-    detailed: string
-    key_points: string[]
-  }
-  daily: {
-    today_goal: string
-    time_blocks: Array<{ label: string; minutes: number }>
+  title: string
+  language: string
+  exam_date: string | null
+  quick_summary: string
+  study_notes_markdown: string
+  daily_plan: {
+    blocks: Array<{ start: string; end: string; task: string; details: string }>
   }
   practice: {
-    quick_questions: string[]
-    exam_tasks: string[]
+    questions: Array<{ q: string; options?: string[] | null; answer: string; explanation: string }>
   }
 }
 
@@ -138,20 +131,6 @@ function shortPrompt(p: string) {
 
 function countImages(list: File[]) {
   return list.filter((f) => f.type.startsWith('image/') || /\.(png|jpe?g|webp)$/i.test(f.name)).length
-}
-
-function clampImages(list: File[], maxImages: number) {
-  const out: File[] = []
-  let images = 0
-  for (const f of list) {
-    const isImg = f.type.startsWith('image/') || /\.(png|jpe?g|webp)$/i.test(f.name)
-    if (isImg) {
-      if (images >= maxImages) continue
-      images += 1
-    }
-    out.push(f)
-  }
-  return out
 }
 
 export default function PlanPage() {
@@ -433,8 +412,8 @@ function Inner() {
 
   async function generate() {
     setError(null)
-    if (imageCount > 15) {
-      setError('You can upload up to 15 images.')
+    if (files.length > 15) {
+      setError('You can upload up to 15 files.')
       return
     }
     const cost = computePlanCost(imageCount || 0)
@@ -544,7 +523,7 @@ function Inner() {
       const q = askText.trim()
       if (!q) throw new Error('Írj be egy kérdést.')
 
-      const langSource = `${prompt} ${result?.plan?.title ?? ''} ${result?.notes?.summary ?? ''}`.toLowerCase()
+      const langSource = `${prompt} ${result?.title ?? ''} ${result?.language ?? ''}`.toLowerCase()
       const lang = /magyar|hu\b|szia|t\xE9tel|vizsga/.test(langSource) ? 'hu' : 'en'
 
       const res = await authedFetch('/api/ask', {
@@ -563,10 +542,8 @@ function Inner() {
     }
   }
 
-  const displayTitle = result?.plan?.title?.trim() ? result.plan.title : 'Study plan'
+  const displayTitle = result?.title?.trim() ? result.title : 'Study plan'
   const displayInput = shortPrompt(prompt)
-  const totalMaterials = materials.length
-  const processedCount = materials.filter((m) => m.status === 'processed').length
   const failedCount = materials.filter((m) => m.status === 'failed').length
   const canGenerate = !loading && !isGenerating && (prompt.trim().length >= 6 || files.length > 0)
   const imageCount = countImages(files)
@@ -579,19 +556,29 @@ function Inner() {
   })()
   const pomodoroPlan = useMemo<DayPlan[]>(() => {
     if (!result) return []
-    const timeBlocks = Array.isArray(result.daily?.time_blocks) ? result.daily.time_blocks : []
-    const blocks: Block[] = timeBlocks.map((b) => ({
-      type: /break|pihen/i.test(b.label) ? 'break' : 'study',
-      minutes: Number.isFinite(Number(b.minutes)) ? Number(b.minutes) : 25,
-      label: String(b.label || 'Fokusz'),
-    }))
+    const blocksRaw = Array.isArray(result.daily_plan?.blocks) ? result.daily_plan.blocks : []
+    const blocks: Block[] = blocksRaw.map((b) => {
+      const toMinutes = (val: string) => {
+        const m = String(val || '').match(/^(\d{1,2}):(\d{2})/)
+        if (!m) return 25
+        return Math.max(5, Math.min(180, Number(m[1]) * 60 + Number(m[2])))
+      }
+      const startMin = toMinutes(b.start)
+      const endMin = toMinutes(b.end)
+      const minutes = endMin > startMin ? endMin - startMin : 25
+      return {
+        type: /break|pihen/i.test(b.task) ? 'break' : 'study',
+        minutes,
+        label: String(b.task || 'Fokusz'),
+      }
+    })
     const minutes = blocks.reduce((sum, b) => sum + b.minutes, 0)
     return [
       {
         day: 'Today',
-        focus: result.daily?.today_goal || result.plan?.title || 'Focus',
+        focus: result.title || 'Focus',
         minutes,
-        tasks: Array.isArray(result.plan?.steps) ? result.plan.steps : [],
+        tasks: blocksRaw.map((b) => String(b.task || '')).filter(Boolean),
         blocks,
       },
     ]
@@ -664,10 +651,9 @@ function Inner() {
               multiple
               onChange={(e) => {
                 const next = Array.from(e.target.files ?? [])
-                const nextImages = countImages(next)
-                if (nextImages > 15) {
-                  setError('You can upload up to 15 images.')
-                  setFiles(clampImages(next, 15))
+                if (next.length > 15) {
+                  setError('You can upload up to 15 files.')
+                  setFiles(next.slice(0, 15))
                 } else {
                   setFiles(next)
                 }
@@ -682,7 +668,7 @@ function Inner() {
 
           {files.length ? <div className="mt-2 text-xs text-white/60">Selected: {files.length} file(s)</div> : null}
           <div className="mt-2 text-xs text-white/60">
-            {costEstimate == null ? 'Max 15 images.' : `This will cost ${costEstimate} credits.`}
+            {costEstimate == null ? 'Max 15 files.' : `This will cost ${costEstimate} credits.`}
           </div>
           {isGenerating && totalFiles > 0 ? (
             <div className="mt-2 text-xs text-white/60">
@@ -698,6 +684,11 @@ function Inner() {
                   {m.status === 'failed' && m.processing_error ? ` — ${m.processing_error}` : ''}
                 </div>
               ))}
+            </div>
+          ) : null}
+          {failedCount > 0 ? (
+            <div className="mt-2 text-xs text-yellow-400">
+              Some files failed to process. You can still generate using the available materials.
             </div>
           ) : null}
 
@@ -732,8 +723,8 @@ function Inner() {
                   </p>
                 ) : null}
 
-                {result?.plan?.overview ? (
-                  <p className="mt-2 max-w-[80ch] text-sm text-white/70 break-words">{result.plan.overview}</p>
+                {result?.quick_summary ? (
+                  <p className="mt-2 max-w-[80ch] text-sm text-white/70 break-words">{result.quick_summary}</p>
                 ) : (
                   <p className="mt-2 max-w-[80ch] text-sm text-white/50">
                     Generate a plan to see your schedule, notes, and practice questions.
@@ -768,16 +759,10 @@ function Inner() {
               {tab === 'plan' && result && (
                 <div className="rounded-3xl border border-white/10 bg-white/[0.02] p-5 min-w-0 overflow-hidden">
                   <div className="text-xs uppercase tracking-[0.18em] text-white/55">Plan</div>
-                  <div className="mt-3 text-sm text-white/75 whitespace-pre-wrap">{result.plan.overview}</div>
-                  <div className="mt-4 text-xs uppercase tracking-[0.18em] text-white/55">Steps</div>
-                  <ul className="mt-3 space-y-2 text-sm text-white/80">
-                    {(result.plan.steps ?? []).map((step, i) => (
-                      <li key={i} className="flex gap-2">
-                        <span className="text-white/40">•</span>
-                        <span className="break-words">{step}</span>
-                      </li>
-                    ))}
-                  </ul>
+                  <div className="mt-3 text-sm text-white/75 whitespace-pre-wrap">{result.quick_summary}</div>
+                  {result.exam_date ? (
+                    <div className="mt-3 text-xs text-white/60">Exam date: {result.exam_date}</div>
+                  ) : null}
                 </div>
               )}
 
@@ -785,17 +770,9 @@ function Inner() {
               {tab === 'notes' && result && (
                 <div className="rounded-3xl border border-white/10 bg-white/[0.02] p-5 min-w-0 overflow-hidden">
                   <div className="text-xs uppercase tracking-[0.18em] text-white/55">Notes</div>
-                  <div className="mt-3 text-sm text-white/75 whitespace-pre-wrap">{result.notes.summary}</div>
-                  <div className="mt-4 text-sm text-white/80 whitespace-pre-wrap">{result.notes.detailed}</div>
-                  <div className="mt-4 text-xs uppercase tracking-[0.18em] text-white/55">Key points</div>
-                  <ul className="mt-3 space-y-2 text-sm text-white/80">
-                    {(result.notes.key_points ?? []).map((point, i) => (
-                      <li key={i} className="flex gap-2">
-                        <span className="text-white/40">•</span>
-                        <span className="break-words">{point}</span>
-                      </li>
-                    ))}
-                  </ul>
+                  <div className="mt-3 richtext min-w-0 max-w-full overflow-x-auto">
+                    <MarkdownMath content={result.study_notes_markdown || ''} />
+                  </div>
                 </div>
               )}
 
@@ -808,17 +785,17 @@ function Inner() {
 
                   <div className="order-2 min-w-0 space-y-6 2xl:order-1">
                     <section className="w-full rounded-3xl border border-white/10 bg-white/[0.02] p-5 min-w-0 overflow-hidden">
-                      <div className="text-xs uppercase tracking-[0.18em] text-white/55">Today</div>
-                      <div className="mt-2 text-xl font-semibold text-white break-normal hyphens-auto">
-                        {result.daily.today_goal}
-                      </div>
-
-                      <div className="mt-4 text-xs uppercase tracking-[0.18em] text-white/55">Time blocks</div>
-                      <div className="mt-3 space-y-2 text-sm text-white/80">
-                        {(result.daily.time_blocks ?? []).map((b, i) => (
-                          <div key={i} className="flex items-center justify-between gap-3">
-                            <span className="break-words">{b.label}</span>
-                            <span className="text-white/60">{b.minutes}m</span>
+                      <div className="text-xs uppercase tracking-[0.18em] text-white/55">Daily schedule</div>
+                      <div className="mt-3 space-y-3 text-sm text-white/80">
+                        {(result.daily_plan?.blocks ?? []).map((b, i) => (
+                          <div key={i} className="rounded-2xl border border-white/10 bg-black/30 px-4 py-3">
+                            <div className="flex items-center justify-between gap-3">
+                              <div className="text-white/90">{b.task}</div>
+                              <div className="text-white/60">
+                                {b.start}–{b.end}
+                              </div>
+                            </div>
+                            {b.details ? <div className="mt-2 text-white/70">{b.details}</div> : null}
                           </div>
                         ))}
                       </div>
@@ -830,29 +807,43 @@ function Inner() {
               {/* PRACTICE */}
               {tab === 'practice' && result && (
                 <div className="space-y-6 min-w-0">
-                  <section className="rounded-3xl border border-white/10 bg-white/[0.02] p-5 min-w-0 overflow-hidden">
-                    <div className="text-xs uppercase tracking-[0.18em] text-white/55">Quick questions</div>
-                    <ul className="mt-3 space-y-2 text-sm text-white/80">
-                      {(result.practice.quick_questions ?? []).map((q, i) => (
-                        <li key={i} className="flex gap-2">
-                          <span className="text-white/40">•</span>
-                          <span className="break-words">{q}</span>
-                        </li>
-                      ))}
-                    </ul>
-                  </section>
+                  {(result.practice?.questions ?? []).map((q, qi) => (
+                    <section
+                      key={`${qi}-${q.q}`}
+                      className="rounded-3xl border border-white/10 bg-white/[0.02] p-5 min-w-0 overflow-hidden"
+                    >
+                      <div className="text-sm font-semibold text-white/90 min-w-0 break-words">
+                        {qi + 1}. {q.q}
+                      </div>
 
-                  <section className="rounded-3xl border border-white/10 bg-white/[0.02] p-5 min-w-0 overflow-hidden">
-                    <div className="text-xs uppercase tracking-[0.18em] text-white/55">Exam tasks</div>
-                    <ul className="mt-3 space-y-2 text-sm text-white/80">
-                      {(result.practice.exam_tasks ?? []).map((t, i) => (
-                        <li key={i} className="flex gap-2">
-                          <span className="text-white/40">•</span>
-                          <span className="break-words">{t}</span>
-                        </li>
-                      ))}
-                    </ul>
-                  </section>
+                      {Array.isArray(q.options) && q.options.length ? (
+                        <div className="mt-4 grid gap-2">
+                          {q.options.map((o, i) => (
+                            <div
+                              key={i}
+                              className="rounded-2xl border border-white/10 bg-black/30 px-4 py-3 text-sm text-white/80"
+                            >
+                              {o}
+                            </div>
+                          ))}
+                        </div>
+                      ) : null}
+
+                      {q.answer ? (
+                        <div className="mt-4 rounded-2xl border border-white/10 bg-black/30 p-4">
+                          <div className="text-xs uppercase tracking-[0.18em] text-white/55">Answer</div>
+                          <div className="mt-2 text-sm text-white/80 break-words">{q.answer}</div>
+                        </div>
+                      ) : null}
+
+                      {q.explanation ? (
+                        <div className="mt-4 rounded-2xl border border-white/10 bg-black/30 p-4">
+                          <div className="text-xs uppercase tracking-[0.18em] text-white/55">Explanation</div>
+                          <div className="mt-2 text-sm text-white/70">{q.explanation}</div>
+                        </div>
+                      ) : null}
+                    </section>
+                  ))}
                 </div>
               )}
 

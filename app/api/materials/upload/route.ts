@@ -4,11 +4,6 @@ import { supabaseAdmin } from '@/lib/supabaseServer'
 
 export const runtime = 'nodejs'
 
-function isImage(path: string, mime: string | null) {
-  if (mime && mime.startsWith('image/')) return true
-  return /\.(png|jpe?g|webp)$/i.test(path)
-}
-
 export async function POST(req: Request) {
   try {
     const user = await requireUser(req)
@@ -44,9 +39,8 @@ export async function POST(req: Request) {
     if (rows.length === 0) {
       return NextResponse.json({ error: 'No valid items' }, { status: 400 })
     }
-    const imageCount = rows.filter((x: any) => isImage(x.file_path, x.mime_type)).length
-    if (imageCount > 15) {
-      return NextResponse.json({ error: 'Too many images. Max 15 per request.' }, { status: 400 })
+    if (rows.length > 15) {
+      return NextResponse.json({ error: 'Too many files. Max 15 per request.' }, { status: 400 })
     }
 
     const sb = supabaseAdmin()

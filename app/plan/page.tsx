@@ -19,10 +19,10 @@ type PlanResult = {
   title: string
   language: string
   exam_date: string | null
-  confidence: number
-  notes: string
-  daily: Array<{ start: string; end: string; task: string; details: string }>
-  practice: Array<{ q: string; options?: string[] | null; answer: string; explanation: string }>
+  quick_summary: string
+  study_notes: string
+  daily_plan: { blocks: Array<{ start: string; end: string; task: string; details: string }> }
+  practice_questions: Array<{ question: string; options?: string[] | null; answer: string; explanation?: string | null }>
 }
 
 type SavedPlan = { id: string; title: string; created_at: string }
@@ -554,6 +554,11 @@ function Inner() {
   const failedCount = materials.filter((m) => m.status === 'failed').length
   const canGenerate = !loading && !isGenerating && (prompt.trim().length >= 6 || files.length > 0)
   const imageCount = countImages(files)
+  const summaryText = result?.quick_summary?.trim()
+    ? result.quick_summary
+    : result?.study_notes
+      ? result.study_notes
+      : ''
   const costEstimate = (() => {
     try {
       return creditsForImages(imageCount || 0)
@@ -563,7 +568,7 @@ function Inner() {
   })()
   const pomodoroPlan = useMemo<DayPlan[]>(() => {
     if (!result) return []
-    const blocksRaw = Array.isArray(result.daily) ? result.daily : []
+    const blocksRaw = Array.isArray(result.daily_plan?.blocks) ? result.daily_plan.blocks : []
     const blocks: Block[] = blocksRaw.map((b) => {
       const toMinutes = (val: string) => {
         const m = String(val || '').match(/^(\d{1,2}):(\d{2})/)
@@ -730,10 +735,10 @@ function Inner() {
                   </p>
                 ) : null}
 
-                {result?.notes ? (
+                {summaryText ? (
                   <p className="mt-2 max-w-[80ch] text-sm text-white/70 break-words">
-                    {result.notes.slice(0, 200)}
-                    {result.notes.length > 200 ? '…' : ''}
+                    {summaryText.slice(0, 200)}
+                    {summaryText.length > 200 ? '…' : ''}
                   </p>
                 ) : (
                   <p className="mt-2 max-w-[80ch] text-sm text-white/50">
@@ -770,8 +775,8 @@ function Inner() {
                 <div className="rounded-3xl border border-white/10 bg-white/[0.02] p-5 min-w-0 overflow-hidden">
                   <div className="text-xs uppercase tracking-[0.18em] text-white/55">Plan</div>
                   <div className="mt-3 text-sm text-white/75 whitespace-pre-wrap">
-                    {result.notes.slice(0, 300)}
-                    {result.notes.length > 300 ? '…' : ''}
+                    {summaryText.slice(0, 300)}
+                    {summaryText.length > 300 ? '…' : ''}
                   </div>
                   {result.exam_date ? (
                     <div className="mt-3 text-xs text-white/60">Exam date: {result.exam_date}</div>
@@ -784,7 +789,7 @@ function Inner() {
                 <div className="rounded-3xl border border-white/10 bg-white/[0.02] p-5 min-w-0 overflow-hidden">
                   <div className="text-xs uppercase tracking-[0.18em] text-white/55">Notes</div>
                   <div className="mt-3 richtext min-w-0 max-w-full overflow-x-auto">
-                    <MarkdownMath content={result.notes || ''} />
+                    <MarkdownMath content={result.study_notes || ''} />
                   </div>
                 </div>
               )}
@@ -800,7 +805,7 @@ function Inner() {
                     <section className="w-full rounded-3xl border border-white/10 bg-white/[0.02] p-5 min-w-0 overflow-hidden">
                       <div className="text-xs uppercase tracking-[0.18em] text-white/55">Daily schedule</div>
                       <div className="mt-3 space-y-3 text-sm text-white/80">
-                        {(result.daily ?? []).map((b, i) => (
+                        {(result.daily_plan?.blocks ?? []).map((b, i) => (
                           <div key={i} className="rounded-2xl border border-white/10 bg-black/30 px-4 py-3">
                             <div className="flex items-center justify-between gap-3">
                               <div className="text-white/90">{b.task}</div>
@@ -820,13 +825,13 @@ function Inner() {
               {/* PRACTICE */}
               {tab === 'practice' && result && (
                 <div className="space-y-6 min-w-0">
-                  {(result.practice ?? []).map((q, qi) => (
+                  {(result.practice_questions ?? []).map((q, qi) => (
                     <section
-                      key={`${qi}-${q.q}`}
+                      key={`${qi}-${q.question}`}
                       className="rounded-3xl border border-white/10 bg-white/[0.02] p-5 min-w-0 overflow-hidden"
                     >
                       <div className="text-sm font-semibold text-white/90 min-w-0 break-words">
-                        {qi + 1}. {q.q}
+                        {qi + 1}. {q.question}
                       </div>
 
                       {Array.isArray(q.options) && q.options.length ? (

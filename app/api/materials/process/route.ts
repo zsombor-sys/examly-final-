@@ -5,7 +5,10 @@ import OpenAI from 'openai'
 import pdfParse from 'pdf-parse'
 import { z } from 'zod'
 import { MAX_IMAGES } from '@/lib/credits'
-const MODEL = 'gpt-4.1'
+
+const MODEL = process.env.OPENAI_MODEL || 'gpt-4.1'
+const BATCH_SIZE = 5
+const TIME_BUDGET_MS = 220_000
 
 export const runtime = 'nodejs'
 export const maxDuration = 300
@@ -119,11 +122,11 @@ export async function POST(req: Request) {
 
     const list = Array.isArray(items) ? items : []
     if (list.length > MAX_IMAGES) {
-      return NextResponse.json({ error: `Too many files. Max ${MAX_IMAGES} per request.` }, { status: 400 })
+      return NextResponse.json({ error: 'TOO_MANY_FILES' }, { status: 400 })
     }
     const imageItems = list.filter((i) => isImage(i.file_path, i.mime_type))
     if (imageItems.length > MAX_IMAGES) {
-      return NextResponse.json({ error: `Too many images. Max ${MAX_IMAGES} per request.` }, { status: 400 })
+      return NextResponse.json({ error: 'TOO_MANY_FILES' }, { status: 400 })
     }
 
     console.log('materials.process start', {
@@ -136,59 +139,80 @@ export async function POST(req: Request) {
     const apiKey = process.env.OPENAI_API_KEY
     const openai = apiKey ? new OpenAI({ apiKey }) : null
     const results: Array<{ id: string; status: 'processed' | 'failed'; error: string | null }> = []
+    const processedIds = new Set<string>()
 
     for (const item of list) {
       await sb.from('materials').update({ status: 'processing' }).eq('id', item.id)
     }
 
-    const imagesForOcr: Array<{ item: any; mime: string; b64: string }> = []
-    for (const item of imageItems) {
-      const { data, error: dlErr } = await sb.storage.from('uploads').download(item.file_path)
-      if (dlErr || !data) {
-        await sb.from('materials').update({ status: 'failed', error: 'Download failed' }).eq('id', item.id)
-        results.push({ id: item.id, status: 'failed', error: 'Download failed' })
-        continue
+    const markRemainingFailed = async (remaining: Array<{ id: string }>, message: string) => {
+      for (const item of remaining) {
+        if (processedIds.has(item.id)) continue
+        await sb.from('materials').update({ status: 'failed', error: message }).eq('id', item.id)
+        results.push({ id: item.id, status: 'failed', error: message })
+        processedIds.add(item.id)
       }
-      const buf = Buffer.from(await data.arrayBuffer())
-      const mime = item.mime_type || (data as any)?.type || 'image/png'
-      imagesForOcr.push({ item, mime, b64: buf.toString('base64') })
     }
 
-    if (imagesForOcr.length && !openai) {
-      for (const entry of imagesForOcr) {
-        await sb.from('materials').update({ status: 'failed', error: 'Missing OpenAI client' }).eq('id', entry.item.id)
-        results.push({ id: entry.item.id, status: 'failed', error: 'Missing OpenAI client' })
-      }
-    } else if (imagesForOcr.length) {
-      let batch: z.infer<typeof ocrBatchSchema> | null = null
-      try {
-        batch = await runOcrBatch(
-          openai as OpenAI,
-          MODEL,
-          imagesForOcr.map((x) => ({ mime: x.mime, b64: x.b64 })),
-          false
-        )
-      } catch {
+    if (imageItems.length && !openai) {
+      await markRemainingFailed(imageItems, 'Missing OpenAI client')
+    } else if (imageItems.length) {
+      for (let startIdx = 0; startIdx < imageItems.length; startIdx += BATCH_SIZE) {
+        if (Date.now() - startedAt > TIME_BUDGET_MS) {
+          const remainingImages = imageItems.slice(startIdx)
+          const remainingNonImages = list.filter((i) => !isImage(i.file_path, i.mime_type))
+          await markRemainingFailed([...remainingImages, ...remainingNonImages], 'TIME_BUDGET_EXCEEDED')
+          console.log('materials.process budget_exceeded', { requestId, planId })
+          return NextResponse.json({ ok: true, processed: results.length, results, time_budget_exceeded: true })
+        }
+
+        const batchItems = imageItems.slice(startIdx, startIdx + BATCH_SIZE)
+        const imagesForOcr: Array<{ item: any; mime: string; b64: string }> = []
+        for (const item of batchItems) {
+          const { data, error: dlErr } = await sb.storage.from('uploads').download(item.file_path)
+          if (dlErr || !data) {
+            await sb.from('materials').update({ status: 'failed', error: 'Download failed' }).eq('id', item.id)
+            results.push({ id: item.id, status: 'failed', error: 'Download failed' })
+            processedIds.add(item.id)
+            continue
+          }
+          const buf = Buffer.from(await data.arrayBuffer())
+          const mime = item.mime_type || (data as any)?.type || 'image/png'
+          imagesForOcr.push({ item, mime, b64: buf.toString('base64') })
+        }
+
+        if (!imagesForOcr.length) continue
+
+        let batch: z.infer<typeof ocrBatchSchema> | null = null
         try {
           batch = await runOcrBatch(
             openai as OpenAI,
             MODEL,
             imagesForOcr.map((x) => ({ mime: x.mime, b64: x.b64 })),
-            true
+            false
           )
         } catch {
-          batch = null
+          try {
+            batch = await runOcrBatch(
+              openai as OpenAI,
+              MODEL,
+              imagesForOcr.map((x) => ({ mime: x.mime, b64: x.b64 })),
+              true
+            )
+          } catch {
+            batch = null
+          }
         }
-      }
-      if (!batch) {
-        for (const entry of imagesForOcr) {
-          await sb
-            .from('materials')
-            .update({ status: 'failed', error: 'OCR failed' })
-            .eq('id', entry.item.id)
-          results.push({ id: entry.item.id, status: 'failed', error: 'OCR failed' })
+
+        if (!batch) {
+          for (const entry of imagesForOcr) {
+            await sb.from('materials').update({ status: 'failed', error: 'OCR failed' }).eq('id', entry.item.id)
+            results.push({ id: entry.item.id, status: 'failed', error: 'OCR failed' })
+            processedIds.add(entry.item.id)
+          }
+          continue
         }
-      } else {
+
         const byIndex = new Map<number, string>()
         for (const entry of batch.items) {
           if (Number.isFinite(entry.index)) byIndex.set(entry.index, String(entry.text || '').trim())
@@ -199,6 +223,7 @@ export async function POST(req: Request) {
           if (!text) {
             await sb.from('materials').update({ status: 'failed', error: 'OCR returned empty text' }).eq('id', item.id)
             results.push({ id: item.id, status: 'failed', error: 'OCR returned empty text' })
+            processedIds.add(item.id)
             continue
           }
           const clipped = text.slice(0, 10_000)
@@ -211,12 +236,20 @@ export async function POST(req: Request) {
             })
             .eq('id', item.id)
           results.push({ id: item.id, status: 'processed', error: null })
+          processedIds.add(item.id)
         }
       }
     }
 
     const nonImageItems = list.filter((i) => !isImage(i.file_path, i.mime_type))
     for (const item of nonImageItems) {
+      if (processedIds.has(item.id)) continue
+      if (Date.now() - startedAt > TIME_BUDGET_MS) {
+        const remainingNonImages = nonImageItems.filter((x) => !processedIds.has(x.id))
+        await markRemainingFailed(remainingNonImages, 'TIME_BUDGET_EXCEEDED')
+        console.log('materials.process budget_exceeded', { requestId, planId })
+        return NextResponse.json({ ok: true, processed: results.length, results, time_budget_exceeded: true })
+      }
       try {
         const { data, error: dlErr } = await sb.storage.from('uploads').download(item.file_path)
         if (dlErr || !data) throw dlErr || new Error('Download failed')
@@ -238,10 +271,12 @@ export async function POST(req: Request) {
           })
           .eq('id', item.id)
         results.push({ id: item.id, status: 'processed', error: null })
+        processedIds.add(item.id)
       } catch (err: any) {
         const message = String(err?.message ?? 'Processing failed')
         await sb.from('materials').update({ status: 'failed', error: message }).eq('id', item.id)
         results.push({ id: item.id, status: 'failed', error: message })
+        processedIds.add(item.id)
       }
     }
 

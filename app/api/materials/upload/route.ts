@@ -41,7 +41,7 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: 'No valid items' }, { status: 400 })
     }
     if (rows.length > MAX_IMAGES) {
-      return NextResponse.json({ error: `Too many files. Max ${MAX_IMAGES} per request.` }, { status: 400 })
+      return NextResponse.json({ error: 'TOO_MANY_FILES' }, { status: 400 })
     }
 
     const sb = supabaseAdmin()

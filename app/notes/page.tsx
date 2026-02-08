@@ -11,7 +11,7 @@ import { ArrowLeft, Loader2 } from 'lucide-react'
 type PlanResult = {
   title: string
   language: string
-  notes: string
+  study_notes: string
 }
 
 function historyKeyForUser(userId: string | null) {
@@ -147,7 +147,7 @@ function Inner() {
             <div className="mt-4 rounded-3xl border border-white/10 bg-white/[0.02] p-5 min-w-0 overflow-hidden">
               <div className="text-xs uppercase tracking-[0.18em] text-white/55">Study notes</div>
               <div className="mt-3 richtext min-w-0 max-w-full overflow-x-auto">
-                <MarkdownMath content={plan.notes ?? ''} />
+                <MarkdownMath content={plan.study_notes ?? ''} />
               </div>
             </div>
           </>

@@ -12,7 +12,7 @@ type Block = { type: 'study' | 'break'; minutes: number; label: string }
 type DayPlan = { day: string; focus: string; tasks: string[]; minutes: number; blocks?: Block[] }
 type PlanResult = {
   title: string
-  daily: Array<{ start: string; end: string; task: string; details: string }>
+  daily_plan: { blocks: Array<{ start: string; end: string; task: string; details: string }> }
 }
 
 function historyKeyForUser(userId: string | null) {
@@ -127,7 +127,7 @@ function Inner() {
 
   const pomodoroPlan = useMemo<DayPlan[]>(() => {
     if (!plan) return []
-    const blocksRaw = Array.isArray(plan.daily) ? plan.daily : []
+    const blocksRaw = Array.isArray(plan.daily_plan?.blocks) ? plan.daily_plan.blocks : []
     const blocks: Block[] = blocksRaw.map((b) => ({
       type: /break|pihen/i.test(b.task) ? 'break' : 'study',
       minutes: 25,
@@ -179,7 +179,7 @@ function Inner() {
                 <section className="w-full rounded-3xl border border-white/10 bg-white/[0.02] p-5 min-w-0 overflow-hidden">
                   <div className="text-xs uppercase tracking-[0.18em] text-white/55">Schedule</div>
                   <div className="mt-4 space-y-3 text-sm text-white/80">
-                    {(plan?.daily ?? []).map((b, i) => (
+                    {(plan?.daily_plan?.blocks ?? []).map((b, i) => (
                       <div key={i} className="rounded-2xl border border-white/10 bg-black/30 px-4 py-3">
                         <div className="flex items-center justify-between gap-3">
                           <div className="text-white/90">{b.task}</div>

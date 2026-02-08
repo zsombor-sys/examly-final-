@@ -4,6 +4,8 @@ import OpenAI from 'openai'
 import { requireUser } from '@/lib/authServer'
 import { supabaseAdmin } from '@/lib/supabaseServer'
 import { getPlan, updatePlan } from '@/app/api/plan/store'
+import { TABLE_PLANS } from '@/lib/dbTables'
+import { throwIfMissingTable } from '@/lib/supabaseErrors'
 
 export const runtime = 'nodejs'
 
@@ -148,14 +150,31 @@ async function fetchPlanResult(userId: string, planId: string) {
   if (local?.result) return local.result
 
   const sb = supabaseAdmin()
-  const { data, error } = await sb.from('plans').select('result').eq('user_id', userId).eq('id', planId).maybeSingle()
-  if (error) throw error
+  const { data, error } = await sb
+    .from(TABLE_PLANS)
+    .select('result')
+    .eq('user_id', userId)
+    .eq('id', planId)
+    .maybeSingle()
+  if (error) {
+    throwIfMissingTable(error, TABLE_PLANS)
+    throw error
+  }
   return data?.result ?? null
 }
 
 function extractNotes(result: any): NotesPayload | null {
   const payload = result?.notes_payload
   if (payload?.study_notes) return payload as NotesPayload
+  if (result?.study_notes) {
+    return {
+      title: String(result.title || 'Study notes'),
+      subject: String(result.title || 'General'),
+      study_notes: String(result.study_notes || ''),
+      key_topics: Array.isArray(result.key_topics) ? result.key_topics.map((t: any) => String(t)) : [],
+      confidence: Number.isFinite(Number(result.confidence)) ? Number(result.confidence) : 0.6,
+    }
+  }
   if (result?.notes) {
     return {
       title: String(result.title || 'Study notes'),
@@ -163,15 +182,6 @@ function extractNotes(result: any): NotesPayload | null {
       study_notes: String(result.notes || ''),
       key_topics: Array.isArray(result.key_topics) ? result.key_topics.map((t: any) => String(t)) : [],
       confidence: Number.isFinite(Number(result.confidence)) ? Number(result.confidence) : 0.6,
-    }
-  }
-  if (result?.study_notes) {
-    return {
-      title: String(result.title || 'Study notes'),
-      subject: String(result.title || 'General'),
-      study_notes: String(result.study_notes || ''),
-      key_topics: Array.isArray(result.key_topics) ? result.key_topics.map((t: any) => String(t)) : [],
-      confidence: Number.isFinite(Number(result.confidence)) ? Number(result.confidence) : 6,
     }
   }
   return null
@@ -197,7 +207,7 @@ export async function POST(req: Request) {
     if (!apiKey) return NextResponse.json({ error: 'OPENAI_KEY_MISSING' }, { status: 500 })
 
     const client = new OpenAI({ apiKey })
-    const model = 'gpt-4.1'
+    const model = process.env.OPENAI_MODEL || 'gpt-4.1'
     const system = [
       'Return ONLY valid JSON matching the schema. No markdown or extra text.',
       'blocks length must be >= 4.',
@@ -239,10 +249,16 @@ export async function POST(req: Request) {
 
     const nextResult = { ...result, daily_plan: daily.daily_plan }
     updatePlan(user.id, planId, nextResult)
-    try {
-      const sb = supabaseAdmin()
-      await sb.from('plans').update({ result: nextResult }).eq('user_id', user.id).eq('id', planId)
-    } catch {}
+    const sb = supabaseAdmin()
+    const { error: upErr } = await sb
+      .from(TABLE_PLANS)
+      .update({ result: nextResult })
+      .eq('user_id', user.id)
+      .eq('id', planId)
+    if (upErr) {
+      throwIfMissingTable(upErr, TABLE_PLANS)
+      throw upErr
+    }
 
     return NextResponse.json({ daily_plan: daily.daily_plan }, { headers: { 'cache-control': 'no-store' } })
   } catch (e: any) {

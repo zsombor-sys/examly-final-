@@ -2,6 +2,8 @@ import { NextResponse } from 'next/server'
 import { requireUser } from '@/lib/authServer'
 import { supabaseAdmin } from '@/lib/supabaseServer'
 import { clearPlans } from '@/app/api/plan/store'
+import { TABLE_PLANS } from '@/lib/dbTables'
+import { throwIfMissingTable } from '@/lib/supabaseErrors'
 
 export const runtime = 'nodejs'
 
@@ -10,12 +12,15 @@ export async function GET(req: Request) {
     const user = await requireUser(req)
     const sb = supabaseAdmin()
     const { data, error } = await sb
-      .from('plans')
+      .from(TABLE_PLANS)
       .select('id, title, created_at')
       .eq('user_id', user.id)
       .order('created_at', { ascending: false })
 
-    if (error) throw error
+    if (error) {
+      throwIfMissingTable(error, TABLE_PLANS)
+      throw error
+    }
 
     return NextResponse.json({ items: data ?? [] }, { headers: { 'cache-control': 'no-store' } })
   } catch (e: any) {
@@ -33,8 +38,11 @@ export async function DELETE(req: Request) {
   try {
     const user = await requireUser(req)
     const sb = supabaseAdmin()
-    const { error } = await sb.from('plans').delete().eq('user_id', user.id)
-    if (error) throw error
+    const { error } = await sb.from(TABLE_PLANS).delete().eq('user_id', user.id)
+    if (error) {
+      throwIfMissingTable(error, TABLE_PLANS)
+      throw error
+    }
 
     clearPlans(user.id)
     return NextResponse.json({ ok: true }, { headers: { 'cache-control': 'no-store' } })

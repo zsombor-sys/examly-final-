@@ -5,11 +5,13 @@ import OpenAI from 'openai'
 import { getPlan } from '@/app/api/plan/store'
 import { supabaseAdmin } from '@/lib/supabaseServer'
 import { MAX_IMAGES, creditsForImages } from '@/lib/credits'
+import { TABLE_PLANS } from '@/lib/dbTables'
+import { throwIfMissingTable } from '@/lib/supabaseErrors'
 
 export const runtime = 'nodejs'
 export const maxDuration = 300
 
-const MODEL = 'gpt-4.1'
+const MODEL = process.env.OPENAI_MODEL || 'gpt-4.1'
 const MAX_OUTPUT_TOKENS = 1100
 
 const planRequestSchema = z.object({
@@ -22,22 +24,24 @@ const planPayloadSchema = z.object({
   title: z.string(),
   language: z.string(),
   exam_date: z.string().nullable(),
-  confidence: z.number().min(0).max(1),
-  notes: z.string(),
-  daily: z.array(
+  quick_summary: z.string(),
+  study_notes: z.string(),
+  daily_plan: z.object({
+    blocks: z.array(
+      z.object({
+        start: z.string(),
+        end: z.string(),
+        task: z.string(),
+        details: z.string(),
+      })
+    ),
+  }),
+  practice_questions: z.array(
     z.object({
-      start: z.string(),
-      end: z.string(),
-      task: z.string(),
-      details: z.string(),
-    })
-  ),
-  practice: z.array(
-    z.object({
-      q: z.string(),
+      question: z.string(),
       options: z.array(z.string()).optional().nullable(),
       answer: z.string(),
-      explanation: z.string(),
+      explanation: z.string().optional().nullable(),
     })
   ),
 })
@@ -49,69 +53,58 @@ const planPayloadJsonSchema = {
     title: { type: 'string' },
     language: { type: 'string' },
     exam_date: { type: ['string', 'null'] },
-    confidence: { type: 'number', minimum: 0, maximum: 1 },
-    notes: { type: 'string' },
-    daily: {
-      type: 'array',
-      items: {
-        type: 'object',
-        additionalProperties: false,
-        properties: {
-          start: { type: 'string' },
-          end: { type: 'string' },
-          task: { type: 'string' },
-          details: { type: 'string' },
+    quick_summary: { type: 'string' },
+    study_notes: { type: 'string' },
+    daily_plan: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        blocks: {
+          type: 'array',
+          items: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              start: { type: 'string' },
+              end: { type: 'string' },
+              task: { type: 'string' },
+              details: { type: 'string' },
+            },
+            required: ['start', 'end', 'task', 'details'],
+          },
         },
-        required: ['start', 'end', 'task', 'details'],
       },
+      required: ['blocks'],
     },
-    practice: {
+    practice_questions: {
       type: 'array',
       items: {
         type: 'object',
         additionalProperties: false,
         properties: {
-          q: { type: 'string' },
+          question: { type: 'string' },
           options: { type: ['array', 'null'], items: { type: 'string' } },
           answer: { type: 'string' },
-          explanation: { type: 'string' },
+          explanation: { type: ['string', 'null'] },
         },
-        required: ['q', 'answer', 'explanation'],
+        required: ['question', 'answer'],
       },
     },
   },
-  required: ['title', 'language', 'exam_date', 'confidence', 'notes', 'daily', 'practice'],
+  required: [
+    'title',
+    'language',
+    'exam_date',
+    'quick_summary',
+    'study_notes',
+    'daily_plan',
+    'practice_questions',
+  ],
 }
 
 
 function isImage(name: string, type: string) {
   return type.startsWith('image/') || /\.(png|jpg|jpeg|webp)$/i.test(name)
-}
-
-function sleep(ms: number) {
-  return new Promise((r) => setTimeout(r, ms))
-}
-
-function isRetriable(err: any) {
-  const msg = String(err?.message || '').toLowerCase()
-  const status = Number(err?.status || err?.cause?.status)
-  if (status >= 500 || status === 429) return true
-  return msg.includes('timeout') || msg.includes('econn') || msg.includes('network') || msg.includes('abort')
-}
-
-async function withRetries<T>(fn: () => Promise<T>) {
-  const delays = [500, 1500]
-  let lastErr: any = null
-  for (let i = 0; i <= delays.length; i += 1) {
-    try {
-      return await fn()
-    } catch (err: any) {
-      lastErr = err
-      if (!isRetriable(err) || i === delays.length) break
-      await sleep(delays[i])
-    }
-  }
-  throw lastErr
 }
 
 async function withTimeout<T>(ms: number, fn: (signal: AbortSignal) => Promise<T>) {
@@ -167,12 +160,6 @@ function detectHungarian(text: string) {
   return /\bhu\b|magyar|szia|tétel|vizsga|érettségi/i.test(text)
 }
 
-function inferExamDate(prompt: string) {
-  const p = String(prompt || '').toLowerCase()
-  if (p.includes('holnap') || p.includes('tomorrow')) return 'tomorrow'
-  return 'tomorrow'
-}
-
 function safeJsonParse(text: string) {
   const raw = String(text ?? '').trim()
   if (!raw) throw new Error('AI_JSON_EMPTY')
@@ -185,11 +172,10 @@ function normalizePlanPayload(input: any): PlanPayload {
   const title = String(input?.title ?? '').trim() || 'Tanulasi terv'
   const language = String(input?.language ?? '').trim() || 'Hungarian'
   const examDate = input?.exam_date ? String(input.exam_date) : null
-  const confidenceRaw = Number(input?.confidence)
-  const confidence = Number.isFinite(confidenceRaw) ? Math.max(0, Math.min(1, confidenceRaw)) : 0.6
-  const notes = String(input?.notes ?? '').trim() || '## Jegyzetek\n- Fo fogalmak\n- Kulcsotletek'
+  const quickSummary = String(input?.quick_summary ?? '').trim() || 'Rovid osszefoglalo.'
+  const studyNotes = String(input?.study_notes ?? '').trim() || '## Jegyzetek\n- Fo fogalmak\n- Kulcsotletek'
 
-  const blocksRaw = Array.isArray(input?.daily) ? input.daily : []
+  const blocksRaw = Array.isArray(input?.daily_plan?.blocks) ? input.daily_plan.blocks : []
   const blocks = blocksRaw.map((b: any) => ({
     start: String(b?.start ?? '').trim() || '09:00',
     end: String(b?.end ?? '').trim() || '09:30',
@@ -197,32 +183,34 @@ function normalizePlanPayload(input: any): PlanPayload {
     details: String(b?.details ?? '').trim() || 'Rovid jegyzet es feladatok.',
   }))
 
-  const questionsRaw = Array.isArray(input?.practice) ? input.practice : []
+  const questionsRaw = Array.isArray(input?.practice_questions) ? input.practice_questions : []
   const questions = questionsRaw.map((q: any) => ({
-    q: String(q?.q ?? '').trim() || 'Ismertesd a fo fogalmakat.',
+    question: String(q?.question ?? '').trim() || 'Ismertesd a fo fogalmakat.',
     options: Array.isArray(q?.options) ? q.options.map((o: any) => String(o)) : null,
     answer: String(q?.answer ?? '').trim() || 'Rovid, pontos valasz.',
-    explanation: String(q?.explanation ?? '').trim() || 'Rovid magyarazat.',
+    explanation: q?.explanation != null ? String(q.explanation).trim() : null,
   }))
 
   return {
     title,
     language,
     exam_date: examDate,
-    confidence,
-    notes,
-    daily: blocks.length
-      ? blocks.slice(0, 12)
-      : [
-          { start: '09:00', end: '09:30', task: 'Attekintes', details: 'Fo temak atnezese.' },
-          { start: '09:30', end: '10:10', task: 'Jegyzeteles', details: 'Definiciok es peldak.' },
-          { start: '10:10', end: '10:40', task: 'Gyakorlas', details: 'Rovid feladatok megoldasa.' },
-        ],
-    practice: questions.length
+    quick_summary: quickSummary,
+    study_notes: studyNotes,
+    daily_plan: {
+      blocks: blocks.length
+        ? blocks.slice(0, 12)
+        : [
+            { start: '09:00', end: '09:30', task: 'Attekintes', details: 'Fo temak atnezese.' },
+            { start: '09:30', end: '10:10', task: 'Jegyzeteles', details: 'Definiciok es peldak.' },
+            { start: '10:10', end: '10:40', task: 'Gyakorlas', details: 'Rovid feladatok megoldasa.' },
+          ],
+    },
+    practice_questions: questions.length
       ? questions.slice(0, 15)
       : [
-          { q: 'Sorolj fel 3 kulcsfogalmat.', options: null, answer: 'Pelda valasz.', explanation: 'Rovid indoklas.' },
-          { q: 'Adj egy tipikus peldat.', options: null, answer: 'Pelda valasz.', explanation: 'Rovid indoklas.' },
+          { question: 'Sorolj fel 3 kulcsfogalmat.', options: null, answer: 'Pelda valasz.', explanation: null },
+          { question: 'Adj egy tipikus peldat.', options: null, answer: 'Pelda valasz.', explanation: null },
         ],
   }
 }
@@ -242,17 +230,19 @@ function fallbackPlanPayload(prompt: string, fileNames: string[]) {
     title,
     language: 'Hungarian',
     exam_date: null,
-    confidence: 0.6,
-    notes:
+    quick_summary: 'Rovid osszefoglalo a temarol.',
+    study_notes:
       '## Definiciok\n- Alapfogalmak\n\n## Kulcsotletek\n- Fo osszefuggesek\n\n## Peldak\n- Rovid pelda\n\n## Tipikus hibak\n- Gyakori hibak',
-    daily: [
-      { start: '09:00', end: '09:30', task: 'Attekintes', details: 'Fo temak atnezese.' },
-      { start: '09:30', end: '10:10', task: 'Jegyzeteles', details: 'Definiciok es peldak.' },
-      { start: '10:10', end: '10:40', task: 'Gyakorlas', details: 'Rovid feladatok megoldasa.' },
-    ],
-    practice: [
-      { q: 'Mi a legfontosabb definicio?', options: null, answer: 'Pelda valasz.', explanation: 'Rovid indoklas.' },
-      { q: 'Sorolj fel kulcsotleteket.', options: null, answer: 'Pelda valasz.', explanation: 'Rovid indoklas.' },
+    daily_plan: {
+      blocks: [
+        { start: '09:00', end: '09:30', task: 'Attekintes', details: 'Fo temak atnezese.' },
+        { start: '09:30', end: '10:10', task: 'Jegyzeteles', details: 'Definiciok es peldak.' },
+        { start: '10:10', end: '10:40', task: 'Gyakorlas', details: 'Rovid feladatok megoldasa.' },
+      ],
+    },
+    practice_questions: [
+      { question: 'Mi a legfontosabb definicio?', options: null, answer: 'Pelda valasz.', explanation: null },
+      { question: 'Sorolj fel kulcsotleteket.', options: null, answer: 'Pelda valasz.', explanation: null },
     ],
   })
 }
@@ -274,10 +264,10 @@ function legacyToPlanPayload(
     : []
   const questions = Array.isArray(practiceJson?.practice?.questions)
     ? practiceJson.practice.questions.map((q: any) => ({
-        q: String(q?.question ?? '').trim(),
+        question: String(q?.question ?? '').trim() || String(q?.q ?? '').trim(),
         options: null,
         answer: String(q?.answer ?? '').trim(),
-        explanation: '',
+        explanation: null,
       }))
     : []
 
@@ -285,10 +275,10 @@ function legacyToPlanPayload(
     title,
     language: 'Hungarian',
     exam_date: null,
-    confidence: 0.6,
-    notes: String(notesJson?.plan?.summary ?? '').trim() || 'Rovid attekintes a felkeszuleshez.',
-    daily: blocks,
-    practice: questions,
+    quick_summary: String(notesJson?.plan?.summary ?? '').trim() || 'Rovid attekintes.',
+    study_notes: String(notesJson?.plan?.summary ?? '').trim() || 'Rovid attekintes a felkeszuleshez.',
+    daily_plan: { blocks },
+    practice_questions: questions,
   })
 }
 
@@ -357,7 +347,7 @@ async function savePlanToDbBestEffort(row: SavePlanRow) {
   try {
     const sb = supabaseAdmin()
     await sb
-      .from('plans')
+      .from(TABLE_PLANS)
       .upsert(
         {
           id: row.id,
@@ -377,6 +367,7 @@ async function savePlanToDbBestEffort(row: SavePlanRow) {
         { onConflict: 'id' }
       )
   } catch (err: any) {
+    throwIfMissingTable(err, TABLE_PLANS)
     console.warn('plan.save db failed', {
       id: row.id,
       message: err?.message ?? 'unknown',
@@ -394,12 +385,15 @@ export async function GET(req: Request) {
 
     const sb = supabaseAdmin()
     const { data, error } = await sb
-      .from('plans')
+      .from(TABLE_PLANS)
       .select('result, notes_json, daily_json, practice_json, title')
       .eq('user_id', user.id)
       .eq('id', id)
       .maybeSingle()
-    if (error) throw error
+    if (error) {
+      throwIfMissingTable(error, TABLE_PLANS)
+      throw error
+    }
 
     if (!data) {
       const row = getPlan(user.id, id)
@@ -467,7 +461,7 @@ export async function POST(req: Request) {
     }
 
     if (materials.total > MAX_IMAGES) {
-      return NextResponse.json({ error: 'MAX_FILES_EXCEEDED' }, { status: 400, headers: { 'cache-control': 'no-store' } })
+      return NextResponse.json({ error: 'TOO_MANY_FILES' }, { status: 400, headers: { 'cache-control': 'no-store' } })
     }
 
     const prompt =
@@ -477,7 +471,7 @@ export async function POST(req: Request) {
     try {
       cost = creditsForImages(materials.imageCount || 0)
     } catch {
-      return NextResponse.json({ error: 'MAX_IMAGES_EXCEEDED' }, { status: 400, headers: { 'cache-control': 'no-store' } })
+      return NextResponse.json({ error: 'TOO_MANY_FILES' }, { status: 400, headers: { 'cache-control': 'no-store' } })
     }
     if (requiredCredits != null && requiredCredits !== cost) {
       return NextResponse.json(
@@ -496,12 +490,16 @@ export async function POST(req: Request) {
     })
 
     const sb = supabaseAdmin()
-    const { data: existingPlan } = await sb
-      .from('plans')
+    const { data: existingPlan, error: existingErr } = await sb
+      .from(TABLE_PLANS)
       .select('generation_id, credits_charged, generation_status')
       .eq('user_id', user.id)
       .eq('id', idToUse)
       .maybeSingle()
+    if (existingErr) {
+      throwIfMissingTable(existingErr, TABLE_PLANS)
+      throw existingErr
+    }
     const existingGenerationId = existingPlan?.generation_id ? String(existingPlan.generation_id) : null
     const alreadyCharged = Number(existingPlan?.credits_charged ?? 0) >= cost && cost > 0
     const generationId =
@@ -621,10 +619,11 @@ export async function POST(req: Request) {
     const minNotes = extractedText.length > 1000 ? 600 : 200
 
     const systemText = [
-      'Return ONLY valid JSON matching the schema. No markdown wrapping, no extra text.',
+      'Return ONLY valid JSON matching the schema. No markdown, no extra text.',
       `Language: ${isHu ? 'Hungarian' : 'English'}.`,
       'If information is missing, make reasonable assumptions and still fill all fields.',
-      `Notes must be detailed (target length >= ${minNotes} chars when enough material exists).`,
+      'Quick summary should be 2-4 sentences.',
+      `Study notes must be detailed (target length >= ${minNotes} chars when enough material exists).`,
     ].join('\n')
     const userText = [
       `Prompt:\n${prompt || '(empty)'}`,
@@ -632,81 +631,69 @@ export async function POST(req: Request) {
       `Extracted text:\n${extractedText || '(none)'}`,
     ].join('\n\n')
 
-    let planPayload: PlanPayload
-    try {
-      const resp = await withRetries(() =>
-        withTimeout(45_000, (signal) =>
-          client.chat.completions.create(
-            {
-              model,
-              messages: [
-                { role: 'system', content: systemText },
-                { role: 'user', content: userText },
-              ],
-              temperature: 0.2,
-              max_tokens: MAX_OUTPUT_TOKENS,
-              response_format: {
-                type: 'json_schema',
-                json_schema: {
-                  name: 'study_plan',
-                  schema: planPayloadJsonSchema,
-                },
+    const callModel = async (system: string) => {
+      const resp = await withTimeout(45_000, (signal) =>
+        client.chat.completions.create(
+          {
+            model,
+            messages: [
+              { role: 'system', content: system },
+              { role: 'user', content: userText },
+            ],
+            temperature: 0.2,
+            max_tokens: MAX_OUTPUT_TOKENS,
+            response_format: {
+              type: 'json_schema',
+              json_schema: {
+                name: 'study_plan',
+                schema: planPayloadJsonSchema,
               },
             },
-            { signal }
-          )
+          },
+          { signal }
         )
       )
-      const raw = String(resp.choices?.[0]?.message?.content ?? '').trim()
-      const parsed = safeJsonParse(raw)
+      return String(resp.choices?.[0]?.message?.content ?? '').trim()
+    }
+
+    let planPayload: PlanPayload
+    let rawOutput = ''
+    try {
+      rawOutput = await callModel(systemText)
+      const parsed = safeJsonParse(rawOutput)
       planPayload = normalizePlanPayload(planPayloadSchema.parse(parsed))
     } catch {
-      planPayload = fallbackPlanPayload(prompt, materials.fileNames)
-    }
-
-    if (planPayload.notes.length < minNotes) {
-      planPayload.notes = ensureNotesLength(planPayload.notes, minNotes)
-    }
-
-    if (planPayload.daily.length === 0 || planPayload.practice.length === 0) {
       try {
-        const repairSystem = [
-          'Return ONLY valid JSON matching the schema. No extra text.',
-          'Fill missing daily or practice fields. Keep other fields consistent.',
-        ].join('\n')
-        const repairUser = `Previous JSON:\n${JSON.stringify(planPayload)}`
-        const resp = await withRetries(() =>
-          withTimeout(35_000, (signal) =>
-            client.chat.completions.create(
-              {
-                model,
-                messages: [
-                  { role: 'system', content: repairSystem },
-                  { role: 'user', content: repairUser },
-                ],
-                temperature: 0.2,
-                max_tokens: MAX_OUTPUT_TOKENS,
-                response_format: {
-                  type: 'json_schema',
-                  json_schema: {
-                    name: 'study_plan_repair',
-                    schema: planPayloadJsonSchema,
-                  },
-                },
-              },
-              { signal }
-            )
-          )
-        )
-        const raw = String(resp.choices?.[0]?.message?.content ?? '').trim()
-        const parsed = safeJsonParse(raw)
+        rawOutput = await callModel(`${systemText}\nReturn ONLY valid JSON that matches the schema. No markdown.`)
+        const parsed = safeJsonParse(rawOutput)
         planPayload = normalizePlanPayload(planPayloadSchema.parse(parsed))
       } catch {
-        // keep existing planPayload
+        const snippet = rawOutput.slice(0, 500)
+        console.error('plan.generate json_parse_failed', { requestId, planId: idToUse, raw: snippet })
+        await savePlanToDbBestEffort({
+          id: idToUse,
+          userId: user.id,
+          title: 'Plan generation failed',
+          created_at: new Date().toISOString(),
+          result: null,
+          notes_json: null,
+          daily_json: null,
+          practice_json: null,
+          generation_status: 'error',
+          generation_id: generationId,
+          credits_charged: alreadyCharged ? cost : cost > 0 ? cost : 0,
+          error: 'NOTES_JSON_FAILED',
+          raw_notes_output: snippet,
+        })
+        return NextResponse.json(
+          { error: 'NOTES_JSON_FAILED' },
+          { status: 500, headers: { 'cache-control': 'no-store' } }
+        )
       }
     }
-    if (planPayload.notes.length < minNotes) {
-      planPayload.notes = ensureNotesLength(planPayload.notes, minNotes)
+
+    if (planPayload.study_notes.length < minNotes) {
+      planPayload.study_notes = ensureNotesLength(planPayload.study_notes, minNotes)
     }
 
     const plan = planPayload

@@ -387,6 +387,13 @@ function legacyToPlanPayload(
   practiceJson: any,
   titleFallback: string
 ) {
+  type DailyBlock = {
+    task?: string | null
+    title?: string | null
+    details?: string | null
+    duration_minutes?: number | null
+  }
+
   const title = titleFallback || 'Tanulasi terv'
   const blocks = Array.isArray(dailyJson?.daily_plan?.blocks)
     ? dailyJson.daily_plan.blocks.map((b: any) => ({
@@ -419,7 +426,7 @@ function legacyToPlanPayload(
     },
     daily: {
       blocks: blocks.length
-        ? blocks.map((b) => ({
+        ? blocks.map((b: DailyBlock) => ({
             title: String(b.task || 'Fokusz'),
             duration_minutes: 30,
             description: String(b.details || 'Idokeret a blokk szerint.'),

@@ -12,7 +12,7 @@ export const runtime = 'nodejs'
 export const maxDuration = 300
 
 const MODEL = process.env.OPENAI_MODEL || 'gpt-4.1'
-const MAX_OUTPUT_TOKENS = 1000
+const MAX_OUTPUT_TOKENS = 1200
 const MAX_PROMPT_CHARS = 150
 const MAX_OUTPUT_CHARS = 4000
 
@@ -22,7 +22,7 @@ const planRequestSchema = z.object({
   required_credits: z.number().int().min(0).max(1).optional().nullable(),
 })
 
-const planPayloadSchema = z.object({
+const PlanResultSchema = z.object({
   title: z.string(),
   language: z.enum(['Hungarian', 'English']),
   plan: z.object({
@@ -58,7 +58,7 @@ const planPayloadSchema = z.object({
   }),
 })
 
-const planPayloadJsonSchema = {
+const planResultJsonSchema = {
   type: 'object',
   additionalProperties: false,
   properties: {
@@ -199,31 +199,39 @@ function detectHungarian(text: string) {
   return /\bhu\b|magyar|szia|tétel|vizsga|érettségi/i.test(text)
 }
 
-function extractJsonOrThrow(text: string) {
+function extractJsonCandidate(text: string) {
+  const raw = String(text ?? '')
+  const objStart = raw.indexOf('{')
+  const arrStart = raw.indexOf('[')
+  let start = -1
+  let end = -1
+
+  if (objStart >= 0 && (arrStart < 0 || objStart < arrStart)) {
+    start = objStart
+    end = raw.lastIndexOf('}')
+  } else if (arrStart >= 0) {
+    start = arrStart
+    end = raw.lastIndexOf(']')
+  }
+
+  if (start >= 0 && end > start) {
+    return raw.slice(start, end + 1)
+  }
+  throw new Error('AI_JSON_PARSE_FAILED')
+}
+
+function safeParseJson(text: string) {
   const raw = String(text ?? '').trim()
   if (!raw) throw new Error('AI_JSON_EMPTY')
   try {
     return JSON.parse(raw)
   } catch {
-    const objStart = raw.indexOf('{')
-    const arrStart = raw.indexOf('[')
-    let start = -1
-    let end = -1
-
-    if (objStart >= 0 && (arrStart < 0 || objStart < arrStart)) {
-      start = objStart
-      end = raw.lastIndexOf('}')
-    } else if (arrStart >= 0) {
-      start = arrStart
-      end = raw.lastIndexOf(']')
-    }
-
-    if (start >= 0 && end > start) {
-      const sliced = raw.slice(start, end + 1)
-      return JSON.parse(sliced)
-    }
-    throw new Error('AI_JSON_PARSE_FAILED')
+    return JSON.parse(extractJsonCandidate(raw))
   }
+}
+
+function validateOrThrow(obj: unknown) {
+  return PlanResultSchema.parse(obj)
 }
 
 function logSupabaseError(context: string, error: any) {
@@ -246,7 +254,7 @@ function sanitizeText(text: string) {
     .trim()
 }
 
-type PlanPayload = z.infer<typeof planPayloadSchema>
+type PlanPayload = z.infer<typeof PlanResultSchema>
 
 function clampText(text: string) {
   const raw = String(text ?? '')
@@ -285,12 +293,16 @@ function clampPlanPayload(input: PlanPayload): PlanPayload {
   }
 }
 
+type PlanBlockInput = { title?: string | null; duration_minutes?: number | null; description?: string | null }
+type PomodoroBlockInput = { title?: string | null; minutes?: number | null }
+type PracticeQuestionInput = { q?: string | null; a?: string | null }
+
 function normalizePlanPayload(input: any): PlanPayload {
   const title = sanitizeText(String(input?.title ?? '').trim() || 'Study plan')
   const language = input?.language === 'Hungarian' ? 'Hungarian' : 'English'
 
   const planBlocksRaw = Array.isArray(input?.plan?.blocks) ? input.plan.blocks : []
-  const planBlocks = planBlocksRaw.map((b: any) => ({
+  const planBlocks = planBlocksRaw.map((b: PlanBlockInput) => ({
     title: sanitizeText(String(b?.title ?? '').trim() || 'Block'),
     duration_minutes: Number(b?.duration_minutes ?? 30) || 30,
     description: sanitizeText(String(b?.description ?? '').trim() || 'Short study block.'),
@@ -300,15 +312,15 @@ function normalizePlanPayload(input: any): PlanPayload {
   const notesQuickSummary = sanitizeText(String(input?.notes?.quick_summary ?? '').trim() || 'Quick summary.')
 
   const dailyStepsRaw = Array.isArray(input?.daily?.steps) ? input.daily.steps : []
-  const dailySteps = dailyStepsRaw.map((s: any) => sanitizeText(String(s ?? '').trim())).filter(Boolean)
+  const dailySteps = dailyStepsRaw.map((s: string) => sanitizeText(String(s ?? '').trim())).filter(Boolean)
   const pomodoroRaw = Array.isArray(input?.daily?.pomodoro_blocks) ? input.daily.pomodoro_blocks : []
-  const pomodoroBlocks = pomodoroRaw.map((b: any) => ({
+  const pomodoroBlocks = pomodoroRaw.map((b: PomodoroBlockInput) => ({
     title: sanitizeText(String(b?.title ?? '').trim() || 'Pomodoro'),
     minutes: Number(b?.minutes ?? 25) || 25,
   }))
 
   const practiceRaw = Array.isArray(input?.practice?.questions) ? input.practice.questions : []
-  const practiceQuestions = practiceRaw.map((q: any) => ({
+  const practiceQuestions = practiceRaw.map((q: PracticeQuestionInput) => ({
     q: sanitizeText(String(q?.q ?? '').trim() || 'Question'),
     a: sanitizeText(String(q?.a ?? '').trim() || 'Answer'),
   }))
@@ -803,10 +815,17 @@ export async function POST(req: Request) {
       'If information is missing, make reasonable assumptions and still fill all fields.',
       'Notes must be detailed and plain text (no markdown). Minimum 400 words in notes.markdown.',
     ].join('\n')
+    const shortSystemText = [
+      'Return ONLY valid JSON matching the schema. No markdown. No extra keys.',
+      `Language: ${isHu ? 'Hungarian' : 'English'}.`,
+      'Keep strings concise. notes.markdown <= 2500 chars. notes.quick_summary <= 400 chars.',
+      'If information is missing, make reasonable assumptions and still fill all fields.',
+    ].join('\n')
     const userText = [
       `Prompt:\n${prompt || '(empty)'}`,
       `File names:\n${materials.fileNames.join(', ') || '(none)'}`,
       `Extracted text:\n${extractedText || '(none)'}`,
+      'Schema: title, language, plan.blocks[{title,duration_minutes,description}], notes.markdown, notes.quick_summary, daily.focus, daily.steps, daily.pomodoro_blocks[{title,minutes}], practice.questions[{q,a}]',
     ].join('\n\n')
 
     const callModel = async (system: string) => {
@@ -821,12 +840,7 @@ export async function POST(req: Request) {
             temperature: 0.2,
             max_tokens: MAX_OUTPUT_TOKENS,
             response_format: {
-              type: 'json_schema',
-              json_schema: {
-                name: 'study_plan',
-                schema: planPayloadJsonSchema,
-                strict: true,
-              },
+              type: 'json_object',
             },
           },
           { signal }
@@ -839,13 +853,13 @@ export async function POST(req: Request) {
     let rawOutput = ''
     try {
       rawOutput = await callModel(systemText)
-      const parsed = extractJsonOrThrow(rawOutput)
-      planPayload = normalizePlanPayload(planPayloadSchema.parse(parsed))
+      const parsed = safeParseJson(rawOutput)
+      planPayload = normalizePlanPayload(validateOrThrow(parsed))
     } catch {
       try {
-        rawOutput = await callModel(`${systemText}\nReturn ONLY valid JSON that matches the schema. No markdown.`)
-        const parsed = extractJsonOrThrow(rawOutput)
-        planPayload = normalizePlanPayload(planPayloadSchema.parse(parsed))
+        rawOutput = await callModel(shortSystemText)
+        const parsed = safeParseJson(rawOutput)
+        planPayload = normalizePlanPayload(validateOrThrow(parsed))
       } catch {
         const snippet = rawOutput.slice(0, 500)
         console.error('plan.generate json_parse_failed', { requestId, planId: idToUse, raw: snippet })

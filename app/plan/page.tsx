@@ -482,7 +482,13 @@ function Inner() {
           throw new Error('Processing materials timed out. Please try again.')
         }
       } else if (!res.ok) {
-        const message = json?.details || json?.error || json?.message
+        const code = json?.error || json?.code
+        let message = json?.details || json?.error || json?.message
+        if (code === 'CREDITS_LOOKUP_FAILED') {
+          message = "Server can't read credits (env/RLS)."
+        } else if (code === 'UNAUTHENTICATED') {
+          message = 'Please log in again.'
+        }
         throw new Error(message ?? `Generation failed (${res.status})`)
       }
       if (json?.ok === false) {

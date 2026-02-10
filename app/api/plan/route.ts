@@ -631,8 +631,6 @@ export async function POST(req: Request) {
       creditsRequired: cost,
     })
 
-    const sb = supabaseAdmin()
-
     await savePlanToDbBestEffort({
       id: idToUse,
       userId: user.id,
@@ -643,54 +641,59 @@ export async function POST(req: Request) {
       result: null,
     })
 
+    const sb = supabaseAdmin()
     if (cost > 0) {
-      try {
-        const { error } = await sb.rpc('consume_credits', { user_id: user.id, cost })
-        if (error) {
-          logSupabaseError('plan.consume_credits', error)
-          await savePlanToDbBestEffort({
-            id: idToUse,
-            userId: user.id,
-            input: prompt,
-            title: 'Plan generation failed',
-            language: null,
-            created_at: new Date().toISOString(),
-            result: null,
-          })
-          return NextResponse.json(
-            { code: 'INSUFFICIENT_CREDITS', message: 'Insufficient credits' },
-            { status: 402, headers: { 'cache-control': 'no-store' } }
-          )
-        }
-        await savePlanToDbBestEffort({
-          id: idToUse,
-          userId: user.id,
-          input: prompt,
-          title: 'Generating plan',
-          language: null,
-          created_at: new Date().toISOString(),
-          result: null,
-        })
-        console.log('plan.generate credits_charged', {
-          requestId,
-          planId: idToUse,
-          credits_charged: cost,
-        })
-      } catch {
-        await savePlanToDbBestEffort({
-          id: idToUse,
-          userId: user.id,
-          input: prompt,
-          title: 'Plan generation failed',
-          language: null,
-          created_at: new Date().toISOString(),
-          result: null,
-        })
+      const { data: creditRow, error: creditsErr } = await sb
+        .from('profiles')
+        .select('credits')
+        .eq('id', user.id)
+        .maybeSingle()
+
+      console.log('plan.generate credits_lookup', {
+        userId: user.id,
+        requiredCredits: cost,
+        credits: creditRow?.credits ?? null,
+        error: creditsErr ? { code: creditsErr.code, message: creditsErr.message } : null,
+      })
+
+      if (creditsErr) {
         return NextResponse.json(
-          { code: 'INSUFFICIENT_CREDITS', message: 'Insufficient credits' },
+          { error: 'CREDITS_LOOKUP_FAILED', details: creditsErr.message },
+          { status: 500, headers: { 'cache-control': 'no-store' } }
+        )
+      }
+
+      const creditsAvailable = Number(creditRow?.credits ?? 0)
+      if (creditsAvailable < cost) {
+        return NextResponse.json(
+          { error: 'INSUFFICIENT_CREDITS' },
           { status: 402, headers: { 'cache-control': 'no-store' } }
         )
       }
+
+      const { error: consumeErr } = await sb.rpc('consume_credits', { user_id: user.id, cost })
+      if (consumeErr) {
+        logSupabaseError('plan.consume_credits', consumeErr)
+        return NextResponse.json(
+          { error: 'CREDITS_LOOKUP_FAILED', details: consumeErr.message },
+          { status: 500, headers: { 'cache-control': 'no-store' } }
+        )
+      }
+
+      await savePlanToDbBestEffort({
+        id: idToUse,
+        userId: user.id,
+        input: prompt,
+        title: 'Generating plan',
+        language: null,
+        created_at: new Date().toISOString(),
+        result: null,
+      })
+      console.log('plan.generate credits_charged', {
+        requestId,
+        planId: idToUse,
+        credits_charged: cost,
+      })
     }
 
     if (!openAiKey) {
@@ -828,7 +831,7 @@ export async function POST(req: Request) {
     })
     if (Number(e?.status) === 401 || Number(e?.status) === 403) {
       return NextResponse.json(
-        { code: 'UNAUTHORIZED', message: 'Unauthorized' },
+        { error: 'UNAUTHENTICATED' },
         { status: 401, headers: { 'cache-control': 'no-store' } }
       )
     }

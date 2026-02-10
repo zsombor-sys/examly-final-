@@ -18,11 +18,13 @@ type DayPlan = { day: string; focus: string; tasks: string[]; minutes: number; b
 type PlanBlock = { title: string; duration_minutes: number; description: string }
 type PlanResult = {
   title?: string | null
-  language?: string | null
+  language?: 'hu' | 'en' | null
+  exam_date?: string | null
+  confidence?: number | null
   plan?: { blocks?: PlanBlock[] } | null
-  notes?: { markdown?: string; quick_summary?: string } | null
-  daily?: { focus?: string; steps?: string[]; pomodoro_blocks?: Array<{ title?: string; minutes?: number }> } | null
-  practice?: { questions?: Array<{ q?: string; a?: string }> } | null
+  notes?: { quick_summary?: string; study_notes?: string; key_points?: string[] } | null
+  daily?: { days?: Array<{ day: number; focus: string; tasks: string[] }> } | null
+  practice?: { questions?: Array<{ q: string; answer: string; choices?: string[]; explanation?: string }> } | null
 }
 
 type SavedPlan = { id: string; title: string; created_at: string }
@@ -562,30 +564,23 @@ function Inner() {
   const canGenerate = !loading && !isGenerating && (prompt.trim().length >= 6 || files.length > 0)
   const summaryText = result?.notes?.quick_summary?.trim()
     ? result.notes.quick_summary
-    : result?.notes?.markdown
-      ? result.notes.markdown
+    : result?.notes?.study_notes
+      ? result.notes.study_notes
       : ''
   const costEstimate = 1
   const pomodoroPlan = useMemo<DayPlan[]>(() => {
     if (!result) return []
-    const blocksRaw = Array.isArray(result.daily?.pomodoro_blocks) ? result.daily.pomodoro_blocks : []
-    const blocks: Block[] = blocksRaw.map((b) => {
+    const daysRaw = Array.isArray(result.daily?.days) ? result.daily.days : []
+    return daysRaw.map((d) => {
+      const tasks = Array.isArray(d.tasks) ? d.tasks.filter(Boolean) : []
+      const minutes = Math.max(20, Math.min(180, tasks.length * 30 || 60))
       return {
-        type: /break|pihen/i.test(String(b.title || '')) ? 'break' : 'study',
-        minutes: Math.max(5, Math.min(180, Number(b.minutes) || 25)),
-        label: String(b.title || 'Fokusz'),
+        day: `Day ${d.day}`,
+        focus: d.focus || result.title || 'Focus',
+        minutes,
+        tasks,
       }
     })
-    const minutes = blocks.reduce((sum, b) => sum + b.minutes, 0)
-    return [
-      {
-        day: 'Today',
-        focus: result.title || 'Focus',
-        minutes,
-        tasks: blocksRaw.map((b) => String(b.title || '')).filter(Boolean),
-        blocks,
-      },
-    ]
   }, [result])
 
 
@@ -773,8 +768,8 @@ function Inner() {
                     {summaryText.slice(0, 300)}
                     {summaryText.length > 300 ? '…' : ''}
                   </div>
-                  {result?.daily?.focus ? (
-                    <div className="mt-3 text-xs text-white/60">Focus: {result.daily.focus}</div>
+                  {result?.daily?.days?.[0]?.focus ? (
+                    <div className="mt-3 text-xs text-white/60">Focus: {result.daily.days[0].focus}</div>
                   ) : null}
                 </div>
               )}
@@ -783,7 +778,16 @@ function Inner() {
               {tab === 'notes' && result && (
                 <div className="rounded-3xl border border-white/10 bg-white/[0.02] p-5 min-w-0 overflow-hidden">
                   <div className="text-xs uppercase tracking-[0.18em] text-white/55">Notes</div>
-                  <div className="mt-3 text-sm text-white/80 whitespace-pre-wrap">{result.notes?.markdown || ''}</div>
+                  <div className="mt-3 text-sm text-white/80 whitespace-pre-wrap">{result.notes?.study_notes || ''}</div>
+                  {(result.notes?.key_points ?? []).length > 0 ? (
+                    <div className="mt-4 space-y-2 text-sm text-white/70">
+                      {(result.notes?.key_points ?? []).map((kp, i) => (
+                        <div key={`${kp}-${i}`} className="rounded-xl border border-white/10 bg-black/30 px-3 py-2">
+                          {kp}
+                        </div>
+                      ))}
+                    </div>
+                  ) : null}
                 </div>
               )}
 
@@ -797,18 +801,15 @@ function Inner() {
                   <div className="order-2 min-w-0 space-y-6 2xl:order-1">
                     <section className="w-full rounded-3xl border border-white/10 bg-white/[0.02] p-5 min-w-0 overflow-hidden">
                       <div className="text-xs uppercase tracking-[0.18em] text-white/55">Daily schedule</div>
-                      <div className="mt-3 space-y-3 text-sm text-white/80">
-                        {(result.daily?.pomodoro_blocks ?? []).map((b, i) => (
-                          <div key={i} className="rounded-2xl border border-white/10 bg-black/30 px-4 py-3">
-                            <div className="flex items-center justify-between gap-3">
-                              <div className="text-white/90">{b.title}</div>
-                              <div className="text-white/60">{Math.round(Number(b.minutes) || 0)} min</div>
+                      <div className="mt-3 space-y-4 text-sm text-white/80">
+                        {(result.daily?.days ?? []).map((d) => (
+                          <div key={`day-${d.day}`} className="rounded-2xl border border-white/10 bg-black/30 px-4 py-3">
+                            <div className="text-white/90">Day {d.day}: {d.focus}</div>
+                            <div className="mt-2 space-y-1 text-white/70">
+                              {(d.tasks ?? []).map((t, i) => (
+                                <div key={`${d.day}-task-${i}`}>{t}</div>
+                              ))}
                             </div>
-                          </div>
-                        ))}
-                        {(result.daily?.steps ?? []).map((step, i) => (
-                          <div key={`step-${i}`} className="rounded-2xl border border-white/10 bg-black/30 px-4 py-3">
-                            <div className="text-white/80">{step}</div>
                           </div>
                         ))}
                       </div>
@@ -828,10 +829,10 @@ function Inner() {
                       <div className="text-sm font-semibold text-white/90 min-w-0 break-words">
                         {qi + 1}. {q.q}
                       </div>
-                      {q.a ? (
+                      {q.answer ? (
                         <div className="mt-4 rounded-2xl border border-white/10 bg-black/30 p-4">
                           <div className="text-xs uppercase tracking-[0.18em] text-white/55">Answer</div>
-                          <div className="mt-2 text-sm text-white/80 break-words">{q.a}</div>
+                          <div className="mt-2 text-sm text-white/80 break-words">{q.answer}</div>
                         </div>
                       ) : null}
                     </section>

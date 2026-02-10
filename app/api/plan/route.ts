@@ -4,7 +4,7 @@ import { requireUser } from '@/lib/authServer'
 import OpenAI from 'openai'
 import { getPlan, upsertPlanInMemory } from '@/app/api/plan/store'
 import { assertAdminEnv, supabaseAdmin } from '@/lib/supabaseAdmin'
-import { MAX_IMAGES, calcCreditsFromFileCount } from '@/lib/credits'
+import { MAX_IMAGES, getCredits, chargeCredits } from '@/lib/credits'
 import { TABLE_PLANS } from '@/lib/dbTables'
 import { throwIfMissingTable } from '@/lib/supabaseErrors'
 
@@ -24,7 +24,9 @@ const planRequestSchema = z.object({
 
 const PlanResultSchema = z.object({
   title: z.string(),
-  language: z.enum(['Hungarian', 'English']),
+  language: z.enum(['hu', 'en']),
+  exam_date: z.string().nullable(),
+  confidence: z.number().nullable(),
   plan: z.object({
     blocks: z.array(
       z.object({
@@ -35,16 +37,16 @@ const PlanResultSchema = z.object({
     ),
   }),
   notes: z.object({
-    markdown: z.string(),
     quick_summary: z.string(),
+    study_notes: z.string(),
+    key_points: z.array(z.string()),
   }),
   daily: z.object({
-    focus: z.string(),
-    steps: z.array(z.string()),
-    pomodoro_blocks: z.array(
+    days: z.array(
       z.object({
-        title: z.string(),
-        minutes: z.number(),
+        day: z.number(),
+        focus: z.string(),
+        tasks: z.array(z.string()),
       })
     ),
   }),
@@ -52,7 +54,9 @@ const PlanResultSchema = z.object({
     questions: z.array(
       z.object({
         q: z.string(),
-        a: z.string(),
+        choices: z.array(z.string()).optional(),
+        answer: z.string(),
+        explanation: z.string().optional(),
       })
     ),
   }),
@@ -63,7 +67,9 @@ const planResultJsonSchema = {
   additionalProperties: false,
   properties: {
     title: { type: 'string' },
-    language: { type: 'string', enum: ['Hungarian', 'English'] },
+    language: { type: 'string', enum: ['hu', 'en'] },
+    exam_date: { type: ['string', 'null'] },
+    confidence: { type: ['number', 'null'] },
     plan: {
       type: 'object',
       additionalProperties: false,
@@ -88,31 +94,31 @@ const planResultJsonSchema = {
       type: 'object',
       additionalProperties: false,
       properties: {
-        markdown: { type: 'string' },
         quick_summary: { type: 'string' },
+        study_notes: { type: 'string' },
+        key_points: { type: 'array', items: { type: 'string' } },
       },
-      required: ['markdown', 'quick_summary'],
+      required: ['quick_summary', 'study_notes', 'key_points'],
     },
     daily: {
       type: 'object',
       additionalProperties: false,
       properties: {
-        focus: { type: 'string' },
-        steps: { type: 'array', items: { type: 'string' } },
-        pomodoro_blocks: {
+        days: {
           type: 'array',
           items: {
             type: 'object',
             additionalProperties: false,
             properties: {
-              title: { type: 'string' },
-              minutes: { type: 'number' },
+              day: { type: 'number' },
+              focus: { type: 'string' },
+              tasks: { type: 'array', items: { type: 'string' } },
             },
-            required: ['title', 'minutes'],
+            required: ['day', 'focus', 'tasks'],
           },
         },
       },
-      required: ['focus', 'steps', 'pomodoro_blocks'],
+      required: ['days'],
     },
     practice: {
       type: 'object',
@@ -125,9 +131,11 @@ const planResultJsonSchema = {
             additionalProperties: false,
             properties: {
               q: { type: 'string' },
-              a: { type: 'string' },
+              choices: { type: 'array', items: { type: 'string' } },
+              answer: { type: 'string' },
+              explanation: { type: 'string' },
             },
-            required: ['q', 'a'],
+            required: ['q', 'answer'],
           },
         },
       },
@@ -261,10 +269,75 @@ function clampText(text: string) {
   return raw.length > MAX_OUTPUT_CHARS ? raw.slice(0, MAX_OUTPUT_CHARS) : raw
 }
 
+function enforceTotalChars(payload: PlanPayload): PlanPayload {
+  const refs: Array<{ get: () => string; set: (v: string) => void }> = [
+    { get: () => payload.notes.study_notes, set: (v) => (payload.notes.study_notes = v) },
+    { get: () => payload.notes.quick_summary, set: (v) => (payload.notes.quick_summary = v) },
+    ...payload.notes.key_points.map((_, i) => ({
+      get: () => payload.notes.key_points[i],
+      set: (v: string) => {
+        payload.notes.key_points[i] = v
+      },
+    })),
+    ...payload.practice.questions.flatMap((q, i) => [
+      { get: () => payload.practice.questions[i].answer, set: (v: string) => (payload.practice.questions[i].answer = v) },
+      { get: () => payload.practice.questions[i].q, set: (v: string) => (payload.practice.questions[i].q = v) },
+      ...(payload.practice.questions[i].explanation != null
+        ? [
+            {
+              get: () => payload.practice.questions[i].explanation as string,
+              set: (v: string) => (payload.practice.questions[i].explanation = v),
+            },
+          ]
+        : []),
+      ...(payload.practice.questions[i].choices
+        ? payload.practice.questions[i].choices!.map((_, ci) => ({
+            get: () => payload.practice.questions[i].choices![ci],
+            set: (v: string) => {
+              payload.practice.questions[i].choices![ci] = v
+            },
+          }))
+        : []),
+    ]),
+    ...payload.plan.blocks.flatMap((b, i) => [
+      { get: () => payload.plan.blocks[i].description, set: (v: string) => (payload.plan.blocks[i].description = v) },
+      { get: () => payload.plan.blocks[i].title, set: (v: string) => (payload.plan.blocks[i].title = v) },
+    ]),
+    ...payload.daily.days.flatMap((d, i) => [
+      { get: () => payload.daily.days[i].focus, set: (v: string) => (payload.daily.days[i].focus = v) },
+      ...payload.daily.days[i].tasks.map((_, ti) => ({
+        get: () => payload.daily.days[i].tasks[ti],
+        set: (v: string) => {
+          payload.daily.days[i].tasks[ti] = v
+        },
+      })),
+    ]),
+    { get: () => payload.title, set: (v) => (payload.title = v) },
+    ...(payload.exam_date ? [{ get: () => payload.exam_date as string, set: (v: string) => (payload.exam_date = v) }] : []),
+  ]
+
+  let total = refs.reduce((sum, r) => sum + r.get().length, 0)
+  if (total <= MAX_OUTPUT_CHARS) return payload
+
+  for (const ref of refs) {
+    if (total <= MAX_OUTPUT_CHARS) break
+    const curr = ref.get()
+    const excess = total - MAX_OUTPUT_CHARS
+    if (excess <= 0) break
+    const nextLen = Math.max(0, curr.length - excess)
+    ref.set(curr.slice(0, nextLen))
+    total -= Math.min(curr.length, excess)
+  }
+
+  return payload
+}
+
 function clampPlanPayload(input: PlanPayload): PlanPayload {
-  return {
+  const payload: PlanPayload = {
     title: clampText(input.title),
     language: input.language,
+    exam_date: input.exam_date ? clampText(input.exam_date) : null,
+    confidence: input.confidence ?? null,
     plan: {
       blocks: input.plan.blocks.map((b) => ({
         title: clampText(b.title),
@@ -273,72 +346,91 @@ function clampPlanPayload(input: PlanPayload): PlanPayload {
       })),
     },
     notes: {
-      markdown: clampText(input.notes.markdown),
       quick_summary: clampText(input.notes.quick_summary),
+      study_notes: clampText(input.notes.study_notes),
+      key_points: input.notes.key_points.map((k) => clampText(k)),
     },
     daily: {
-      focus: clampText(input.daily.focus),
-      steps: input.daily.steps.map((s) => clampText(s)),
-      pomodoro_blocks: input.daily.pomodoro_blocks.map((b) => ({
-        title: clampText(b.title),
-        minutes: b.minutes,
+      days: input.daily.days.map((d) => ({
+        day: d.day,
+        focus: clampText(d.focus),
+        tasks: d.tasks.map((t) => clampText(t)),
       })),
     },
     practice: {
       questions: input.practice.questions.map((q) => ({
         q: clampText(q.q),
-        a: clampText(q.a),
+        choices: q.choices ? q.choices.map((c) => clampText(c)) : undefined,
+        answer: clampText(q.answer),
+        explanation: q.explanation ? clampText(q.explanation) : undefined,
       })),
     },
   }
+
+  return enforceTotalChars(payload)
 }
 
 type PlanBlockInput = { title?: string | null; duration_minutes?: number | null; description?: string | null }
-type PomodoroBlockInput = { title?: string | null; minutes?: number | null }
-type PracticeQuestionInput = { q?: string | null; a?: string | null }
+type DailyDayInput = { day?: number | null; focus?: string | null; tasks?: Array<string | null> | null }
+type PracticeQuestionInput = {
+  q?: string | null
+  choices?: Array<string | null> | null
+  answer?: string | null
+  explanation?: string | null
+}
 
 function normalizePlanPayload(input: any): PlanPayload {
   const title = sanitizeText(String(input?.title ?? '').trim() || 'Study plan')
-  const language = input?.language === 'Hungarian' ? 'Hungarian' : 'English'
+  const language = input?.language === 'hu' ? 'hu' : 'en'
+  const exam_date = input?.exam_date ? sanitizeText(String(input.exam_date).trim()) : null
+  const confidence = Number.isFinite(input?.confidence) ? Number(input.confidence) : null
 
   const planBlocksRaw = Array.isArray(input?.plan?.blocks) ? input.plan.blocks : []
   const planBlocks = planBlocksRaw.map((b: PlanBlockInput) => ({
     title: sanitizeText(String(b?.title ?? '').trim() || 'Block'),
-    duration_minutes: Number(b?.duration_minutes ?? 30) || 30,
+    duration_minutes: Math.max(20, Math.min(40, Number(b?.duration_minutes ?? 30) || 30)),
     description: sanitizeText(String(b?.description ?? '').trim() || 'Short study block.'),
   }))
 
-  const notesMarkdown = sanitizeText(String(input?.notes?.markdown ?? '').trim() || 'Notes summary.')
   const notesQuickSummary = sanitizeText(String(input?.notes?.quick_summary ?? '').trim() || 'Quick summary.')
+  const studyNotes = sanitizeText(String(input?.notes?.study_notes ?? '').trim() || 'Study notes.')
+  const keyPointsRaw = Array.isArray(input?.notes?.key_points) ? input.notes.key_points : []
+  const keyPoints = keyPointsRaw.map((k: string) => sanitizeText(String(k ?? '').trim())).filter(Boolean)
 
-  const dailyStepsRaw = Array.isArray(input?.daily?.steps) ? input.daily.steps : []
-  const dailySteps = dailyStepsRaw.map((s: string) => sanitizeText(String(s ?? '').trim())).filter(Boolean)
-  const pomodoroRaw = Array.isArray(input?.daily?.pomodoro_blocks) ? input.daily.pomodoro_blocks : []
-  const pomodoroBlocks = pomodoroRaw.map((b: PomodoroBlockInput) => ({
-    title: sanitizeText(String(b?.title ?? '').trim() || 'Pomodoro'),
-    minutes: Number(b?.minutes ?? 25) || 25,
+  const dailyRaw = Array.isArray(input?.daily?.days) ? input.daily.days : []
+  const dailyDays = dailyRaw.map((d: DailyDayInput, idx: number) => ({
+    day: Number(d?.day ?? idx + 1) || idx + 1,
+    focus: sanitizeText(String(d?.focus ?? '').trim() || 'Focus'),
+    tasks: Array.isArray(d?.tasks)
+      ? d?.tasks.map((t) => sanitizeText(String(t ?? '').trim())).filter(Boolean)
+      : [],
   }))
 
   const practiceRaw = Array.isArray(input?.practice?.questions) ? input.practice.questions : []
   const practiceQuestions = practiceRaw.map((q: PracticeQuestionInput) => ({
     q: sanitizeText(String(q?.q ?? '').trim() || 'Question'),
-    a: sanitizeText(String(q?.a ?? '').trim() || 'Answer'),
+    choices: Array.isArray(q?.choices)
+      ? q?.choices.map((c) => sanitizeText(String(c ?? '').trim())).filter(Boolean)
+      : undefined,
+    answer: sanitizeText(String(q?.answer ?? '').trim() || 'Answer'),
+    explanation: q?.explanation ? sanitizeText(String(q.explanation).trim()) : undefined,
   }))
 
   return {
     title,
     language,
+    exam_date,
+    confidence,
     plan: {
-      blocks: planBlocks.length ? planBlocks.slice(0, 12) : [],
+      blocks: planBlocks.length ? planBlocks.slice(0, 8) : [],
     },
     notes: {
-      markdown: notesMarkdown,
       quick_summary: notesQuickSummary,
+      study_notes: studyNotes,
+      key_points: keyPoints.length ? keyPoints.slice(0, 12) : [],
     },
     daily: {
-      focus: sanitizeText(String(input?.daily?.focus ?? '').trim() || 'Study focus'),
-      steps: dailySteps.length ? dailySteps.slice(0, 12) : [],
-      pomodoro_blocks: pomodoroBlocks.length ? pomodoroBlocks.slice(0, 12) : [],
+      days: dailyDays.length ? dailyDays.slice(0, 7) : [],
     },
     practice: {
       questions: practiceQuestions.length ? practiceQuestions.slice(0, 15) : [],
@@ -353,9 +445,9 @@ function countWords(text: string) {
     .filter(Boolean).length
 }
 
-function ensureNotesWordCount(markdown: string, minWords: number, isHu: boolean) {
-  const totalWords = countWords(markdown)
-  if (totalWords >= minWords) return markdown
+function ensureNotesWordCount(studyNotes: string, minWords: number, isHu: boolean) {
+  const totalWords = countWords(studyNotes)
+  if (totalWords >= minWords) return studyNotes
   const fillerSentence = isHu
     ? 'Ez a resz attekinti a temakor legfontosabb fogalmait, kulcsotleteit es gyakori osszefuggeseit.'
     : 'This section summarizes the most important concepts, key ideas, and common connections in the topic.'
@@ -363,7 +455,7 @@ function ensureNotesWordCount(markdown: string, minWords: number, isHu: boolean)
   const extraWords = Math.max(needed, 1)
   const repeats = Math.ceil(extraWords / countWords(fillerSentence))
   const filler = Array.from({ length: repeats }, () => fillerSentence).join(' ')
-  return `${markdown} ${filler}`.trim()
+  return `${studyNotes} ${filler}`.trim()
 }
 
 function fallbackPlanPayload(prompt: string, fileNames: string[], isHu: boolean) {
@@ -371,7 +463,9 @@ function fallbackPlanPayload(prompt: string, fileNames: string[], isHu: boolean)
   const title = titleBase || (fileNames.length ? `Study plan: ${fileNames[0]}` : 'Study plan')
   return normalizePlanPayload({
     title: isHu && !titleBase ? 'Tanulasi terv' : title,
-    language: isHu ? 'Hungarian' : 'English',
+    language: isHu ? 'hu' : 'en',
+    exam_date: null,
+    confidence: 0.6,
     plan: {
       blocks: [
         {
@@ -397,42 +491,52 @@ function fallbackPlanPayload(prompt: string, fileNames: string[], isHu: boolean)
       ],
     },
     notes: {
-      markdown: isHu
+      quick_summary: isHu ? 'Rovid osszefoglalo a temarol.' : 'A short overview of the topic.',
+      study_notes: isHu
         ? 'Reszletes jegyzetek a temakorhoz, definiciokkal es peldakkal.'
         : 'Detailed notes on the topic with definitions and examples.',
-      quick_summary: isHu ? 'Rovid osszefoglalo a temarol.' : 'A short overview of the topic.',
+      key_points: isHu ? ['Fo fogalmak', 'Definiciok', 'Tipikus peldak'] : ['Key concepts', 'Definitions', 'Examples'],
     },
     daily: {
-      focus: isHu ? 'Felkeszules' : 'Preparation',
-      steps: isHu
-        ? ['Attekintes', 'Jegyzeteles', 'Gyakorlas', 'Ismetles']
-        : ['Review', 'Notes', 'Practice', 'Recap'],
-      pomodoro_blocks: [
-        { title: isHu ? 'Fokusz blokk' : 'Focus block', minutes: 25 },
-        { title: isHu ? 'Szuenet' : 'Break', minutes: 5 },
+      days: [
+        {
+          day: 1,
+          focus: isHu ? 'Felkeszules' : 'Preparation',
+          tasks: isHu ? ['Attekintes', 'Jegyzeteles'] : ['Review', 'Notes'],
+        },
+        {
+          day: 2,
+          focus: isHu ? 'Gyakorlas' : 'Practice',
+          tasks: isHu ? ['Gyakorlas', 'Ismetles'] : ['Practice', 'Recap'],
+        },
+        {
+          day: 3,
+          focus: isHu ? 'Ismetles' : 'Recap',
+          tasks: isHu ? ['Osszefoglalas', 'Onellenorzes'] : ['Summary', 'Self-check'],
+        },
       ],
     },
     practice: {
       questions: [
         {
           q: isHu ? 'Mi a legfontosabb definicio?' : 'What is the most important definition?',
-          a: isHu ? 'Rovid valasz a kulcsfogalomrol.' : 'A short answer about the key concept.',
+          answer: isHu ? 'Rovid valasz a kulcsfogalomrol.' : 'A short answer about the key concept.',
         },
         {
           q: isHu ? 'Sorolj fel kulcsotleteket.' : 'List the key ideas.',
-          a: isHu ? 'Rovid, pontokba szedett valasz.' : 'A short, bullet-style answer.',
+          answer: isHu ? 'Rovid, pontokba szedett valasz.' : 'A short, bullet-style answer.',
         },
         {
           q: isHu ? 'Adj egy tipikus peldat.' : 'Give a typical example.',
-          a: isHu ? 'Rovid, konkret pelda.' : 'A brief, concrete example.',
+          answer: isHu ? 'Rovid, konkret pelda.' : 'A brief, concrete example.',
         },
         {
           q: isHu ? 'Melyek a gyakori hibak?' : 'What are common mistakes?',
-          a: isHu ? 'Rovid felsorolas.' : 'A short list of mistakes.',
+          answer: isHu ? 'Rovid felsorolas.' : 'A short list of mistakes.',
         },
         {
           q: isHu ? 'Hogyan kapcsolodnak a fogalmak?' : 'How are the concepts connected?',
-          a: isHu ? 'Rovid osszefugges.' : 'A short connection summary.',
+          answer: isHu ? 'Rovid osszefugges.' : 'A short connection summary.',
         },
       ],
     },
@@ -492,6 +596,8 @@ type SavePlanRow = {
   language?: string | null
   created_at: string
   result: any
+  model?: string | null
+  materials?: any
   generationId?: string | null
   creditsCharged?: number | null
 }
@@ -506,13 +612,11 @@ async function savePlanToDbBestEffort(row: SavePlanRow) {
       title: row.title,
       language: row.language ?? null,
       created_at: row.created_at,
-      result: row.result,
-      plan_json: row.result?.plan ?? null,
-      notes_md: row.result?.notes?.markdown ?? null,
-      daily_json: row.result?.daily ?? null,
-      practice_json: row.result?.practice ?? null,
+      model: row.model ?? null,
       credits_charged: row.creditsCharged ?? null,
       generation_id: row.generationId ?? null,
+      materials: row.materials ?? null,
+      result: row.result,
     }
     const { error } = await sb.from(TABLE_PLANS).upsert(payload, { onConflict: 'id' })
     if (!error) return
@@ -684,14 +788,7 @@ export async function POST(req: Request) {
       promptRaw.trim() ||
       (materials.fileNames.length ? 'Create structured study notes and a study plan based on the uploaded materials.' : '')
 
-    try {
-      cost = calcCreditsFromFileCount(materials.imageCount || 0)
-    } catch {
-      return NextResponse.json(
-        { code: 'TOO_MANY_FILES', message: 'Too many files' },
-        { status: 400, headers: { 'cache-control': 'no-store' } }
-      )
-    }
+    cost = 1
     if (requiredCredits != null && requiredCredits !== cost) {
       return NextResponse.json(
         { code: 'REQUIRED_CREDITS_MISMATCH', message: 'Required credits mismatch', required: cost },
@@ -719,34 +816,38 @@ export async function POST(req: Request) {
       result: null,
       generationId: requestId,
       creditsCharged: cost,
+      model: MODEL,
+      materials: {
+        fileNames: materials.fileNames,
+        total: materials.total,
+        imageCount: materials.imageCount,
+      },
     })
 
     if (cost > 0) {
-      const sb = supabaseAdmin
-      const { data: creditRow, error: creditsErr } = await sb
-        .from('profiles')
-        .select('credits')
-        .eq('id', user.id)
-        .maybeSingle()
-
-      console.log('plan.generate credits_lookup', {
-        userId: user.id,
-        requiredCredits: cost,
-        credits: creditRow?.credits ?? null,
-        error: creditsErr ? { code: creditsErr.code, message: creditsErr.message } : null,
-      })
-
-      if (creditsErr) {
+      let creditsAvailable = 0
+      try {
+        creditsAvailable = await getCredits(user.id)
+      } catch (creditsErr: any) {
+        console.log('plan.generate credits_lookup', {
+          userId: user.id,
+          requiredCredits: cost,
+          credits: null,
+          error: { code: creditsErr?.code, message: creditsErr?.message },
+        })
         return NextResponse.json(
-          {
-            error: 'SERVER_CANT_READ_CREDITS',
-            hint: 'Check SUPABASE_SERVICE_ROLE_KEY and credit table name',
-          },
+          { error: 'SERVER_CANT_READ_CREDITS', hint: 'Check SUPABASE_SERVICE_ROLE_KEY and credit table name' },
           { status: 500, headers: { 'cache-control': 'no-store' } }
         )
       }
 
-      const creditsAvailable = Number(creditRow?.credits ?? 0)
+      console.log('plan.generate credits_lookup', {
+        userId: user.id,
+        requiredCredits: cost,
+        credits: creditsAvailable,
+        error: null,
+      })
+
       if (creditsAvailable < cost) {
         return NextResponse.json(
           { error: 'INSUFFICIENT_CREDITS' },
@@ -754,16 +855,11 @@ export async function POST(req: Request) {
         )
       }
 
-      const { error: debitErr } = await sb
-        .from('profiles')
-        .update({ credits: creditsAvailable - cost })
-        .eq('id', user.id)
-      if (debitErr) {
+      try {
+        await chargeCredits(user.id, cost)
+      } catch (debitErr: any) {
         return NextResponse.json(
-          {
-            error: 'SERVER_CANT_READ_CREDITS',
-            hint: 'Check SUPABASE_SERVICE_ROLE_KEY and credit table name',
-          },
+          { error: 'SERVER_CANT_READ_CREDITS', hint: 'Check SUPABASE_SERVICE_ROLE_KEY and credit table name' },
           { status: 500, headers: { 'cache-control': 'no-store' } }
         )
       }
@@ -778,6 +874,12 @@ export async function POST(req: Request) {
         result: null,
         generationId: requestId,
         creditsCharged: cost,
+        model: MODEL,
+        materials: {
+          fileNames: materials.fileNames,
+          total: materials.total,
+          imageCount: materials.imageCount,
+        },
       })
       console.log('plan.generate credits_charged', {
         requestId,
@@ -798,6 +900,12 @@ export async function POST(req: Request) {
         result: fallback,
         generationId: requestId,
         creditsCharged: cost,
+        model: MODEL,
+        materials: {
+          fileNames: materials.fileNames,
+          total: materials.total,
+          imageCount: materials.imageCount,
+        },
       })
       await setCurrentPlanBestEffort(user.id, idToUse)
       return NextResponse.json({ id: idToUse }, { headers: { 'cache-control': 'no-store', 'x-examly-plan': 'mock' } })
@@ -810,22 +918,22 @@ export async function POST(req: Request) {
     const minNotesWords = 400
 
     const systemText = [
-      'Return ONLY valid JSON matching the schema. No markdown. No extra keys.',
-      `Language: ${isHu ? 'Hungarian' : 'English'}.`,
+      'Return ONLY valid JSON matching the schema. No markdown. No prose. No extra keys.',
+      `Language: ${isHu ? 'Hungarian' : 'English'} (use "hu" or "en" in the language field).`,
       'If information is missing, make reasonable assumptions and still fill all fields.',
-      'Notes must be detailed and plain text (no markdown). Minimum 400 words in notes.markdown.',
+      'Notes must be detailed and plain text. Minimum 400 words in notes.study_notes.',
     ].join('\n')
     const shortSystemText = [
-      'Return ONLY valid JSON matching the schema. No markdown. No extra keys.',
-      `Language: ${isHu ? 'Hungarian' : 'English'}.`,
-      'Keep strings concise. notes.markdown <= 2500 chars. notes.quick_summary <= 400 chars.',
+      'Return ONLY valid JSON matching the schema. No markdown. No prose. No extra keys.',
+      `Language: ${isHu ? 'Hungarian' : 'English'} (use "hu" or "en" in the language field).`,
+      'Keep strings concise. notes.study_notes <= 2500 chars. notes.quick_summary <= 400 chars.',
       'If information is missing, make reasonable assumptions and still fill all fields.',
     ].join('\n')
     const userText = [
       `Prompt:\n${prompt || '(empty)'}`,
       `File names:\n${materials.fileNames.join(', ') || '(none)'}`,
       `Extracted text:\n${extractedText || '(none)'}`,
-      'Schema: title, language, plan.blocks[{title,duration_minutes,description}], notes.markdown, notes.quick_summary, daily.focus, daily.steps, daily.pomodoro_blocks[{title,minutes}], practice.questions[{q,a}]',
+      'Schema: title, language, exam_date, confidence, plan.blocks[{title,duration_minutes,description}], notes.quick_summary, notes.study_notes, notes.key_points, daily.days[{day,focus,tasks}], practice.questions[{q,choices,answer,explanation}]',
     ].join('\n\n')
 
     const callModel = async (system: string) => {
@@ -840,7 +948,12 @@ export async function POST(req: Request) {
             temperature: 0.2,
             max_tokens: MAX_OUTPUT_TOKENS,
             response_format: {
-              type: 'json_object',
+              type: 'json_schema',
+              json_schema: {
+                name: 'study_plan',
+                schema: planResultJsonSchema,
+                strict: true,
+              },
             },
           },
           { signal }
@@ -873,6 +986,12 @@ export async function POST(req: Request) {
           result: null,
           generationId: requestId,
           creditsCharged: cost,
+          model,
+          materials: {
+            fileNames: materials.fileNames,
+            total: materials.total,
+            imageCount: materials.imageCount,
+          },
         })
         return NextResponse.json(
           { error: 'AI_JSON_PARSE_FAILED', raw_preview: snippet },
@@ -881,22 +1000,22 @@ export async function POST(req: Request) {
       }
     }
 
-    planPayload.notes.markdown = ensureNotesWordCount(planPayload.notes.markdown, minNotesWords, isHu)
+    planPayload.notes.study_notes = ensureNotesWordCount(planPayload.notes.study_notes, minNotesWords, isHu)
     const fallback = fallbackPlanPayload(prompt, materials.fileNames, isHu)
-    if (planPayload.plan.blocks.length < 1) {
+    if (planPayload.plan.blocks.length < 4) {
       planPayload.plan.blocks = fallback.plan.blocks
     }
-    if (!planPayload.notes.markdown) {
-      planPayload.notes.markdown = fallback.notes.markdown
-      planPayload.notes.markdown = ensureNotesWordCount(planPayload.notes.markdown, minNotesWords, isHu)
+    if (!planPayload.notes.study_notes) {
+      planPayload.notes.study_notes = fallback.notes.study_notes
+      planPayload.notes.study_notes = ensureNotesWordCount(planPayload.notes.study_notes, minNotesWords, isHu)
     }
-    if (planPayload.daily.pomodoro_blocks.length < 1) {
-      planPayload.daily.pomodoro_blocks = fallback.daily.pomodoro_blocks
+    if (planPayload.daily.days.length < 3) {
+      planPayload.daily.days = fallback.daily.days
     }
-    if (planPayload.daily.steps.length < 1) {
-      planPayload.daily.steps = fallback.daily.steps
+    if (planPayload.notes.key_points.length < 3) {
+      planPayload.notes.key_points = fallback.notes.key_points
     }
-    if (planPayload.practice.questions.length < 5) {
+    if (planPayload.practice.questions.length < 8) {
       planPayload.practice.questions = fallback.practice.questions
     }
 
@@ -912,6 +1031,12 @@ export async function POST(req: Request) {
       result: plan,
       generationId: requestId,
       creditsCharged: cost,
+      model,
+      materials: {
+        fileNames: materials.fileNames,
+        total: materials.total,
+        imageCount: materials.imageCount,
+      },
     })
     await setCurrentPlanBestEffort(user.id, idToUse)
 

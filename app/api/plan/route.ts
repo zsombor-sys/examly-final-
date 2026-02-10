@@ -199,14 +199,25 @@ function detectHungarian(text: string) {
   return /\bhu\b|magyar|szia|tétel|vizsga|érettségi/i.test(text)
 }
 
-function safeJsonParse(text: string) {
+function extractJsonOrThrow(text: string) {
   const raw = String(text ?? '').trim()
   if (!raw) throw new Error('AI_JSON_EMPTY')
   try {
     return JSON.parse(raw)
   } catch {
-    const start = raw.indexOf('{')
-    const end = raw.lastIndexOf('}')
+    const objStart = raw.indexOf('{')
+    const arrStart = raw.indexOf('[')
+    let start = -1
+    let end = -1
+
+    if (objStart >= 0 && (arrStart < 0 || objStart < arrStart)) {
+      start = objStart
+      end = raw.lastIndexOf('}')
+    } else if (arrStart >= 0) {
+      start = arrStart
+      end = raw.lastIndexOf(']')
+    }
+
     if (start >= 0 && end > start) {
       const sliced = raw.slice(start, end + 1)
       return JSON.parse(sliced)
@@ -787,7 +798,7 @@ export async function POST(req: Request) {
     const minNotesWords = 400
 
     const systemText = [
-      'Return ONLY valid JSON matching the schema. No markdown, no extra text.',
+      'Return ONLY valid JSON matching the schema. No markdown. No extra keys.',
       `Language: ${isHu ? 'Hungarian' : 'English'}.`,
       'If information is missing, make reasonable assumptions and still fill all fields.',
       'Notes must be detailed and plain text (no markdown). Minimum 400 words in notes.markdown.',
@@ -814,6 +825,7 @@ export async function POST(req: Request) {
               json_schema: {
                 name: 'study_plan',
                 schema: planPayloadJsonSchema,
+                strict: true,
               },
             },
           },
@@ -827,12 +839,12 @@ export async function POST(req: Request) {
     let rawOutput = ''
     try {
       rawOutput = await callModel(systemText)
-      const parsed = safeJsonParse(rawOutput)
+      const parsed = extractJsonOrThrow(rawOutput)
       planPayload = normalizePlanPayload(planPayloadSchema.parse(parsed))
     } catch {
       try {
         rawOutput = await callModel(`${systemText}\nReturn ONLY valid JSON that matches the schema. No markdown.`)
-        const parsed = safeJsonParse(rawOutput)
+        const parsed = extractJsonOrThrow(rawOutput)
         planPayload = normalizePlanPayload(planPayloadSchema.parse(parsed))
       } catch {
         const snippet = rawOutput.slice(0, 500)
@@ -849,7 +861,7 @@ export async function POST(req: Request) {
           creditsCharged: cost,
         })
         return NextResponse.json(
-          { code: 'AI_JSON_PARSE_FAILED', message: 'Failed to parse AI JSON' },
+          { error: 'AI_JSON_PARSE_FAILED', raw_preview: snippet },
           { status: 500, headers: { 'cache-control': 'no-store' } }
         )
       }

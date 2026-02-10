@@ -21,6 +21,12 @@ export function savePlan(userId: string, title: string, result: any) {
   return row
 }
 
+export function upsertPlanInMemory(row: StoredPlan) {
+  const store = getStore()
+  store.set(row.id, row)
+  return row
+}
+
 export function listPlans(userId: string) {
   const store = getStore()
   return Array.from(store.values())

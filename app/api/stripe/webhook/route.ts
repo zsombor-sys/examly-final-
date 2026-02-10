@@ -45,7 +45,7 @@ export async function POST(req: Request) {
         session.customer_details?.email ||
         (typeof session.customer_email === 'string' ? session.customer_email : null)
 
-      const sb = supabaseAdmin()
+      const sb = supabaseAdmin
       const { error: upErr } = await sb
         .from('profiles')
         .upsert(

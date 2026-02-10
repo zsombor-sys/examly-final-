@@ -2,8 +2,8 @@ import { NextResponse } from 'next/server'
 import { z } from 'zod'
 import { requireUser } from '@/lib/authServer'
 import OpenAI from 'openai'
-import { getPlan } from '@/app/api/plan/store'
-import { supabaseAdmin } from '@/lib/supabaseServer'
+import { getPlan, upsertPlanInMemory } from '@/app/api/plan/store'
+import { assertAdminEnv, supabaseAdmin } from '@/lib/supabaseAdmin'
 import { MAX_IMAGES, calcCreditsFromFileCount } from '@/lib/credits'
 import { TABLE_PLANS } from '@/lib/dbTables'
 import { throwIfMissingTable } from '@/lib/supabaseErrors'
@@ -202,7 +202,17 @@ function detectHungarian(text: string) {
 function safeJsonParse(text: string) {
   const raw = String(text ?? '').trim()
   if (!raw) throw new Error('AI_JSON_EMPTY')
-  return JSON.parse(raw)
+  try {
+    return JSON.parse(raw)
+  } catch {
+    const start = raw.indexOf('{')
+    const end = raw.lastIndexOf('}')
+    if (start >= 0 && end > start) {
+      const sliced = raw.slice(start, end + 1)
+      return JSON.parse(sliced)
+    }
+    throw new Error('AI_JSON_PARSE_FAILED')
+  }
 }
 
 function logSupabaseError(context: string, error: any) {
@@ -407,7 +417,7 @@ function fallbackPlanPayload(prompt: string, fileNames: string[], isHu: boolean)
 }
 
 async function loadMaterialsForPlan(userId: string, planId: string) {
-  const sb = supabaseAdmin()
+  const sb = supabaseAdmin
   const { data, error } = await sb
     .from('materials')
     .select('file_path, extracted_text, status, mime_type')
@@ -444,7 +454,7 @@ async function loadMaterialsForPlan(userId: string, planId: string) {
 
 async function setCurrentPlanBestEffort(userId: string, planId: string) {
   try {
-    const sb = supabaseAdmin()
+    const sb = supabaseAdmin
     await sb.from('plan_current').upsert({ user_id: userId, plan_id: planId }, { onConflict: 'user_id' })
   } catch {
     // ignore
@@ -454,32 +464,65 @@ async function setCurrentPlanBestEffort(userId: string, planId: string) {
 type SavePlanRow = {
   id: string
   userId: string
-  input?: string | null
+  prompt?: string | null
   title: string
   language?: string | null
   created_at: string
   result: any
+  generationId?: string | null
+  creditsCharged?: number | null
 }
 
 async function savePlanToDbBestEffort(row: SavePlanRow) {
   try {
-    const sb = supabaseAdmin()
+    const sb = supabaseAdmin
     const payload: Record<string, any> = {
       id: row.id,
       user_id: row.userId,
-      input: row.input ?? null,
+      prompt: row.prompt ?? null,
       title: row.title,
       language: row.language ?? null,
       created_at: row.created_at,
       result: row.result,
+      plan_json: row.result?.plan ?? null,
+      notes_md: row.result?.notes?.markdown ?? null,
+      daily_json: row.result?.daily ?? null,
+      practice_json: row.result?.practice ?? null,
+      credits_charged: row.creditsCharged ?? null,
+      generation_id: row.generationId ?? null,
     }
     const { error } = await sb.from(TABLE_PLANS).upsert(payload, { onConflict: 'id' })
-    if (error) {
-      throw error
+    if (!error) return
+
+    const message = String(error?.message ?? '')
+    if (message.includes('does not exist')) {
+      const fallbackPayload: Record<string, any> = {
+        id: row.id,
+        user_id: row.userId,
+        title: row.title,
+        created_at: row.created_at,
+        result: row.result,
+      }
+      const { error: retryErr } = await sb.from(TABLE_PLANS).upsert(fallbackPayload, { onConflict: 'id' })
+      if (!retryErr) return
+      throw retryErr
     }
+
+    throw error
   } catch (err: any) {
     logSupabaseError('plan.save', err)
-    throwIfMissingTable(err, TABLE_PLANS)
+    try {
+      throwIfMissingTable(err, TABLE_PLANS)
+    } catch {
+      upsertPlanInMemory({
+        id: row.id,
+        userId: row.userId,
+        title: row.title,
+        created_at: row.created_at,
+        result: row.result,
+      })
+      return
+    }
     console.warn('plan.save db failed', {
       id: row.id,
       message: err?.message ?? 'unknown',
@@ -500,7 +543,7 @@ export async function GET(req: Request) {
       )
     }
 
-    const sb = supabaseAdmin()
+    const sb = supabaseAdmin
     const { data, error } = await sb
       .from(TABLE_PLANS)
       .select('result, title, language')
@@ -509,7 +552,18 @@ export async function GET(req: Request) {
       .maybeSingle()
     if (error) {
       logSupabaseError('plan.get', error)
-      throwIfMissingTable(error, TABLE_PLANS)
+      try {
+        throwIfMissingTable(error, TABLE_PLANS)
+      } catch {
+        const row = getPlan(user.id, id)
+        if (row?.result) {
+          return NextResponse.json({ result: normalizePlanPayload(row.result) }, { headers: { 'cache-control': 'no-store' } })
+        }
+        return NextResponse.json(
+          { code: 'NOT_FOUND', message: 'Not found' },
+          { status: 404, headers: { 'cache-control': 'no-store' } }
+        )
+      }
       throw error
     }
 
@@ -542,6 +596,7 @@ export async function GET(req: Request) {
 
 /** POST /api/plan : generate + SAVE + set current */
 export async function POST(req: Request) {
+  assertAdminEnv()
   const requestId = crypto.randomUUID()
   let cost = 0
   let userId: string | null = null
@@ -634,15 +689,17 @@ export async function POST(req: Request) {
     await savePlanToDbBestEffort({
       id: idToUse,
       userId: user.id,
-      input: prompt,
+      prompt,
       title: 'Generating plan',
       language: null,
       created_at: new Date().toISOString(),
       result: null,
+      generationId: requestId,
+      creditsCharged: cost,
     })
 
-    const sb = supabaseAdmin()
     if (cost > 0) {
+      const sb = supabaseAdmin
       const { data: creditRow, error: creditsErr } = await sb
         .from('profiles')
         .select('credits')
@@ -658,7 +715,10 @@ export async function POST(req: Request) {
 
       if (creditsErr) {
         return NextResponse.json(
-          { error: 'CREDITS_LOOKUP_FAILED', details: creditsErr.message },
+          {
+            error: 'SERVER_CANT_READ_CREDITS',
+            hint: 'Check SUPABASE_SERVICE_ROLE_KEY and credit table name',
+          },
           { status: 500, headers: { 'cache-control': 'no-store' } }
         )
       }
@@ -671,11 +731,16 @@ export async function POST(req: Request) {
         )
       }
 
-      const { error: consumeErr } = await sb.rpc('consume_credits', { user_id: user.id, cost })
-      if (consumeErr) {
-        logSupabaseError('plan.consume_credits', consumeErr)
+      const { error: debitErr } = await sb
+        .from('profiles')
+        .update({ credits: creditsAvailable - cost })
+        .eq('id', user.id)
+      if (debitErr) {
         return NextResponse.json(
-          { error: 'CREDITS_LOOKUP_FAILED', details: consumeErr.message },
+          {
+            error: 'SERVER_CANT_READ_CREDITS',
+            hint: 'Check SUPABASE_SERVICE_ROLE_KEY and credit table name',
+          },
           { status: 500, headers: { 'cache-control': 'no-store' } }
         )
       }
@@ -683,11 +748,13 @@ export async function POST(req: Request) {
       await savePlanToDbBestEffort({
         id: idToUse,
         userId: user.id,
-        input: prompt,
+        prompt,
         title: 'Generating plan',
         language: null,
         created_at: new Date().toISOString(),
         result: null,
+        generationId: requestId,
+        creditsCharged: cost,
       })
       console.log('plan.generate credits_charged', {
         requestId,
@@ -701,11 +768,13 @@ export async function POST(req: Request) {
       await savePlanToDbBestEffort({
         id: idToUse,
         userId: user.id,
-        input: prompt,
+        prompt,
         title: fallback.title,
         language: fallback.language,
         created_at: new Date().toISOString(),
         result: fallback,
+        generationId: requestId,
+        creditsCharged: cost,
       })
       await setCurrentPlanBestEffort(user.id, idToUse)
       return NextResponse.json({ id: idToUse }, { headers: { 'cache-control': 'no-store', 'x-examly-plan': 'mock' } })
@@ -771,11 +840,13 @@ export async function POST(req: Request) {
         await savePlanToDbBestEffort({
           id: idToUse,
           userId: user.id,
-          input: prompt,
+          prompt,
           title: 'Plan generation failed',
           language: null,
           created_at: new Date().toISOString(),
           result: null,
+          generationId: requestId,
+          creditsCharged: cost,
         })
         return NextResponse.json(
           { code: 'AI_JSON_PARSE_FAILED', message: 'Failed to parse AI JSON' },
@@ -808,11 +879,13 @@ export async function POST(req: Request) {
     await savePlanToDbBestEffort({
       id: idToUse,
       userId: user.id,
-      input: prompt,
+      prompt,
       title: plan.title,
       language: plan.language,
       created_at: new Date().toISOString(),
       result: plan,
+      generationId: requestId,
+      creditsCharged: cost,
     })
     await setCurrentPlanBestEffort(user.id, idToUse)
 

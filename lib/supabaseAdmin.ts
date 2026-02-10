@@ -1,16 +1,26 @@
 import { createClient } from '@supabase/supabase-js'
 
-// Server-side Supabase client (Service Role).
-// IMPORTANT: Only use in server routes (app/api/*). Never import this in client components.
-const url = process.env.SUPABASE_URL
-const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY
+const url = process.env.NEXT_PUBLIC_SUPABASE_URL
+const service = process.env.SUPABASE_SERVICE_ROLE_KEY
 
-export function supabaseAdmin() {
-  if (!url || !serviceKey) {
-    throw new Error('Supabase server env missing (SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY)')
+export function assertAdminEnv() {
+  const missing: string[] = []
+  if (!url) missing.push('NEXT_PUBLIC_SUPABASE_URL')
+  if (!service) missing.push('SUPABASE_SERVICE_ROLE_KEY')
+  if (missing.length > 0) {
+    console.error('supabase.admin.env_missing', { missing })
   }
-
-  return createClient(url, serviceKey, {
-    auth: { persistSession: false, autoRefreshToken: false },
-  })
+  if (!service) {
+    throw new Error('SERVER_MISCONFIGURED: SUPABASE_SERVICE_ROLE_KEY missing')
+  }
+  if (!url) {
+    throw new Error('SERVER_MISCONFIGURED: NEXT_PUBLIC_SUPABASE_URL missing')
+  }
 }
+
+const fallbackUrl = 'http://localhost'
+const fallbackService = 'missing-service-role-key'
+
+export const supabaseAdmin = createClient(url || fallbackUrl, service || fallbackService, {
+  auth: { persistSession: false },
+})

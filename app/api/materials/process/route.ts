@@ -8,7 +8,7 @@ import { MAX_IMAGES } from '@/lib/credits'
 
 const MODEL = process.env.OPENAI_MODEL || 'gpt-4.1'
 const BATCH_SIZE = 5
-const TIME_BUDGET_MS = 220_000
+const TIME_BUDGET_MS = 90_000
 
 export const runtime = 'nodejs'
 export const maxDuration = 300

@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server'
 import { requireUser } from '@/lib/authServer'
 import { supabaseAdmin } from '@/lib/supabaseServer'
-import { clearPlans } from '@/app/api/plan/store'
+import { clearPlans, listPlans } from '@/app/api/plan/store'
 import { TABLE_PLANS } from '@/lib/dbTables'
 import { throwIfMissingTable } from '@/lib/supabaseErrors'
 
@@ -18,6 +18,10 @@ export async function GET(req: Request) {
       .order('created_at', { ascending: false })
 
     if (error) {
+      const message = String(error?.message ?? '')
+      if (message.includes(`Could not find table public.${TABLE_PLANS} in schema cache`)) {
+        return NextResponse.json({ items: listPlans(user.id) }, { headers: { 'cache-control': 'no-store' } })
+      }
       throwIfMissingTable(error, TABLE_PLANS)
       throw error
     }
@@ -40,6 +44,11 @@ export async function DELETE(req: Request) {
     const sb = supabaseAdmin()
     const { error } = await sb.from(TABLE_PLANS).delete().eq('user_id', user.id)
     if (error) {
+      const message = String(error?.message ?? '')
+      if (message.includes(`Could not find table public.${TABLE_PLANS} in schema cache`)) {
+        clearPlans(user.id)
+        return NextResponse.json({ ok: true }, { headers: { 'cache-control': 'no-store' } })
+      }
       throwIfMissingTable(error, TABLE_PLANS)
       throw error
     }

@@ -15,13 +15,14 @@ import { MAX_IMAGES, calcCreditsFromFileCount } from '@/lib/credits'
 
 type Block = { type: 'study' | 'break'; minutes: number; label: string }
 type DayPlan = { day: string; focus: string; tasks: string[]; minutes: number; blocks?: Block[] }
+type PlanBlock = { title: string; duration_minutes: number; description: string }
 type PlanResult = {
   title?: string | null
   language?: string | null
-  plan: { blocks: Array<{ title: string; duration_minutes: number; description: string }> }
-  notes: { markdown: string; quick_summary: string }
-  daily: { focus: string; steps: string[]; pomodoro_blocks: Array<{ title: string; minutes: number }> }
-  practice: { questions: Array<{ q: string; a: string }> }
+  plan?: { blocks?: PlanBlock[] } | null
+  notes?: { markdown?: string; quick_summary?: string } | null
+  daily?: { focus?: string; steps?: string[]; pomodoro_blocks?: Array<{ title?: string; minutes?: number }> } | null
+  practice?: { questions?: Array<{ q?: string; a?: string }> } | null
 }
 
 type SavedPlan = { id: string; title: string; created_at: string }
@@ -570,7 +571,7 @@ function Inner() {
     const blocksRaw = Array.isArray(result.daily?.pomodoro_blocks) ? result.daily.pomodoro_blocks : []
     const blocks: Block[] = blocksRaw.map((b) => {
       return {
-        type: /break|pihen/i.test(b.title) ? 'break' : 'study',
+        type: /break|pihen/i.test(String(b.title || '')) ? 'break' : 'study',
         minutes: Math.max(5, Math.min(180, Number(b.minutes) || 25)),
         label: String(b.title || 'Fokusz'),
       }

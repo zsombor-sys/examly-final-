@@ -302,6 +302,24 @@ export async function consumeGeneration(userId: string) {
   throw err
 }
 
+export async function getUserCredits(userId: string) {
+  if (!userId) throw new Error('Missing user id')
+  const sb = supabaseAdmin()
+  const { data, error } = await sb.from('profiles').select('credits').eq('id', userId).maybeSingle()
+  if (error) throw error
+  return Number(data?.credits ?? 0)
+}
+
+export async function decrementCredits(userId: string, amount = 1) {
+  if (!userId) throw new Error('Missing user id')
+  if (!Number.isFinite(amount) || amount <= 0) return
+  const sb = supabaseAdmin()
+
+  const { error: rpcErr } = await sb.rpc('consume_credits', { user_id: userId, cost: amount })
+  if (!rpcErr) return
+  throw rpcErr
+}
+
 export async function addProCredits(userId: string, amount = PRO_CREDITS_PER_PURCHASE) {
   const sb = supabaseAdmin()
   const p = await getProfileStrict(userId)

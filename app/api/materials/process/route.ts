@@ -6,7 +6,7 @@ import pdfParse from 'pdf-parse'
 import { z } from 'zod'
 import { MAX_IMAGES } from '@/lib/credits'
 
-const MODEL = 'gpt-4.1'
+const MODEL = process.env.OPENAI_MODEL || 'gpt-4.1'
 const BATCH_SIZE = 5
 const TIME_BUDGET_MS = 220_000
 
@@ -122,11 +122,11 @@ export async function POST(req: Request) {
 
     const list = Array.isArray(items) ? items : []
     if (list.length > MAX_IMAGES) {
-      return NextResponse.json({ error: 'TOO_MANY_FILES' }, { status: 400 })
+      return NextResponse.json({ code: 'TOO_MANY_FILES', message: 'Too many files' }, { status: 400 })
     }
     const imageItems = list.filter((i) => isImage(i.file_path, i.mime_type))
     if (imageItems.length > MAX_IMAGES) {
-      return NextResponse.json({ error: 'TOO_MANY_FILES' }, { status: 400 })
+      return NextResponse.json({ code: 'TOO_MANY_FILES', message: 'Too many files' }, { status: 400 })
     }
 
     console.log('materials.process start', {

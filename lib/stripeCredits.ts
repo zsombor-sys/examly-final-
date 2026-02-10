@@ -19,8 +19,8 @@ export async function confirmStripeSession(sessionId: string, creditsOverride?: 
       ? creditsOverride
       : session.metadata?.credits
       ? Number(session.metadata.credits)
-      : 30
-  const credits = Number.isFinite(creditsRaw) ? Math.trunc(creditsRaw) : 30
+      : 20
+  const credits = Number.isFinite(creditsRaw) ? Math.trunc(creditsRaw) : 20
 
   console.log('stripe.confirm start', {
     session_id: sessionId,

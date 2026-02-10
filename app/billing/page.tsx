@@ -79,9 +79,9 @@ function Inner() {
           <Zap size={18} />
           <div className="text-xs uppercase tracking-[0.18em] text-white/55">Pro credits</div>
         </div>
-        <h1 className="mt-3 text-3xl font-semibold tracking-tight">30 generations</h1>
+        <h1 className="mt-3 text-3xl font-semibold tracking-tight">20 generations</h1>
         <p className="mt-3 text-white/70">
-          One-time purchase of 30 credits. After your first purchase, Umenify can auto-recharge another 30 when you run out
+          One-time purchase of 20 credits. After your first purchase, Umenify can auto-recharge another 20 when you run out
           (best-effort; some banks may require confirmation).
         </p>
 
@@ -90,7 +90,7 @@ function Inner() {
             {loading ? <Loader2 className="animate-spin" size={16} /> : <Lock size={16} />}
             Continue to payment
           </Button>
-          <span className="text-xs text-white/50">Price: 3500 Ft (≈ €8.9)</span>
+          <span className="text-xs text-white/50">Price: 3490 Ft (≈ €8.9)</span>
         </div>
 
         {canceled && <p className="mt-4 text-sm text-white/70">Payment canceled. No worries, you can try again.</p>}

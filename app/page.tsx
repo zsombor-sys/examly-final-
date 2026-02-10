@@ -181,7 +181,7 @@ export default function HomePage() {
                   Pro credits. Buy when needed.
                 </h3>
                 <p className="mt-4 text-white/70 max-w-[70ch]">
-                  3500 Ft (≈ €8.9) for 30 generations. One-time purchase. When you run out, buy another pack.
+                  3490 Ft (≈ €8.9) for 20 generations. One-time purchase. When you run out, buy another pack.
                 </p>
               </div>
 

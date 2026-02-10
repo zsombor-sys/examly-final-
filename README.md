@@ -33,15 +33,15 @@ select pg_notify('pgrst','reload schema');
 ## Stripe setup (Pro credits)
 
 Examly uses a **one-time credit pack**:
-- **Pro**: 30 generations for **3500 Ft** (≈ €8.9)
+- **Pro**: 20 generations for **3490 Ft** (≈ €8.9)
 - Credits are stored **server-side** in Supabase.
 
 ### 1) Create the product/price
 Stripe Dashboard → Products → Add product
-- Name: `Examly Pro (30 generations)`
+- Name: `Examly Pro (20 generations)`
 - Pricing: **One-time** (NOT recurring)
 - Currency: EUR or HUF (either is fine)
-- Amount: 3500 Ft or ~€8.9
+- Amount: 3490 Ft or ~€8.9
 
 Copy the **Price ID** and put it into:
 - `STRIPE_PRICE_ID_PRO`
@@ -75,4 +75,4 @@ Important:
 ## Credit rules
 - You must be logged in to use any AI endpoint
 - **Free**: 10 generations total for 48 hours (activated once per account)
-- **Pro**: each purchase adds +30 credits; when credits reach 0 you can buy again
+- **Pro**: each purchase adds +20 credits; when credits reach 0 you can buy again

@@ -13,8 +13,8 @@ function stripeClient() {
 export async function POST(req: Request) {
   try {
     const user = await requireUser(req)
-    const creditsRaw = Number.parseInt(process.env.STRIPE_CREDITS_PER_PURCHASE ?? '30', 10)
-    const credits = Number.isFinite(creditsRaw) ? creditsRaw : 30
+    const creditsRaw = Number.parseInt(process.env.STRIPE_CREDITS_PER_PURCHASE ?? '20', 10)
+    const credits = Number.isFinite(creditsRaw) ? creditsRaw : 20
     const siteUrl = (process.env.NEXT_PUBLIC_SITE_URL || '').trim()
     if (!siteUrl) {
       return NextResponse.json({ error: 'Missing NEXT_PUBLIC_SITE_URL' }, { status: 500 })
@@ -27,7 +27,7 @@ export async function POST(req: Request) {
         {
           price_data: {
             currency: 'huf',
-            unit_amount: 3500,
+            unit_amount: 3490,
             product_data: {
               name: `${credits} credits pack`,
             },

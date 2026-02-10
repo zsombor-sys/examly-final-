@@ -12,12 +12,14 @@ export const runtime = 'nodejs'
 export const maxDuration = 300
 
 const MODEL = process.env.OPENAI_MODEL || 'gpt-4.1'
-const MAX_OUTPUT_TOKENS = 1100
+const MAX_OUTPUT_TOKENS = 1000
+const MAX_PROMPT_CHARS = 150
+const MAX_OUTPUT_CHARS = 4000
 
 const planRequestSchema = z.object({
-  prompt: z.string().max(12_000).optional().default(''),
+  prompt: z.string().max(MAX_PROMPT_CHARS).optional().default(''),
   planId: z.string().max(128).optional().default(''),
-  required_credits: z.number().int().min(0).max(3).optional().nullable(),
+  required_credits: z.number().int().min(0).max(1).optional().nullable(),
 })
 
 const planPayloadSchema = z.object({
@@ -174,6 +176,10 @@ async function parsePlanRequest(req: Request) {
         : null,
   }
 
+  if (input.prompt.length > MAX_PROMPT_CHARS) {
+    return { ok: false as const, error: 'PROMPT_TOO_LONG' as const }
+  }
+
   const parsed = planRequestSchema.safeParse(input)
   if (!parsed.success) {
     return { ok: false as const, error: parsed.error }
@@ -220,6 +226,43 @@ function sanitizeText(text: string) {
 }
 
 type PlanPayload = z.infer<typeof planPayloadSchema>
+
+function clampText(text: string) {
+  const raw = String(text ?? '')
+  return raw.length > MAX_OUTPUT_CHARS ? raw.slice(0, MAX_OUTPUT_CHARS) : raw
+}
+
+function clampPlanPayload(input: PlanPayload): PlanPayload {
+  return {
+    title: clampText(input.title),
+    language: input.language,
+    plan: {
+      blocks: input.plan.blocks.map((b) => ({
+        title: clampText(b.title),
+        duration_minutes: b.duration_minutes,
+        description: clampText(b.description),
+      })),
+    },
+    notes: {
+      markdown: clampText(input.notes.markdown),
+      quick_summary: clampText(input.notes.quick_summary),
+    },
+    daily: {
+      focus: clampText(input.daily.focus),
+      steps: input.daily.steps.map((s) => clampText(s)),
+      pomodoro_blocks: input.daily.pomodoro_blocks.map((b) => ({
+        title: clampText(b.title),
+        minutes: b.minutes,
+      })),
+    },
+    practice: {
+      questions: input.practice.questions.map((q) => ({
+        q: clampText(q.q),
+        a: clampText(q.a),
+      })),
+    },
+  }
+}
 
 function normalizePlanPayload(input: any): PlanPayload {
   const title = sanitizeText(String(input?.title ?? '').trim() || 'Study plan')
@@ -509,11 +552,18 @@ export async function POST(req: Request) {
 
     const parsedRequest = await parsePlanRequest(req)
     if (!parsedRequest.ok) {
+    if (parsedRequest.error === 'PROMPT_TOO_LONG') {
       return NextResponse.json(
-        { code: 'INVALID_REQUEST', message: 'Invalid request', details: parsedRequest.error.issues },
+        { code: 'PROMPT_TOO_LONG', message: 'Prompt too long (max 150 characters).' },
         { status: 400, headers: { 'cache-control': 'no-store' } }
       )
     }
+    const issues = parsedRequest.error instanceof z.ZodError ? parsedRequest.error.issues : []
+    return NextResponse.json(
+      { code: 'INVALID_REQUEST', message: 'Invalid request', details: issues },
+      { status: 400, headers: { 'cache-control': 'no-store' } }
+    )
+  }
 
     const promptRaw = parsedRequest.value.prompt
     const planId = parsedRequest.value.planId
@@ -725,7 +775,7 @@ export async function POST(req: Request) {
           result: null,
         })
         return NextResponse.json(
-          { code: 'NOTES_JSON_FAILED', message: 'Failed to parse AI JSON' },
+          { code: 'AI_JSON_PARSE_FAILED', message: 'Failed to parse AI JSON' },
           { status: 500, headers: { 'cache-control': 'no-store' } }
         )
       }
@@ -750,7 +800,7 @@ export async function POST(req: Request) {
       planPayload.practice.questions = fallback.practice.questions
     }
 
-    const plan = planPayload
+    const plan = clampPlanPayload(planPayload)
 
     await savePlanToDbBestEffort({
       id: idToUse,

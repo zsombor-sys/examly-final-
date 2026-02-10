@@ -32,15 +32,33 @@ export async function POST(req: Request) {
         return NextResponse.json({ error: 'Payment not completed' }, { status: 402 })
       }
 
-      const userId = session.client_reference_id ? String(session.client_reference_id) : ''
+      const userId =
+        (session.client_reference_id ? String(session.client_reference_id) : '') ||
+        (session.metadata?.user_id ? String(session.metadata.user_id) : '')
       if (!userId) {
-        return NextResponse.json({ error: 'Missing client_reference_id' }, { status: 400 })
+        return NextResponse.json({ error: 'Missing user id' }, { status: 400 })
       }
 
-      const creditsRaw = Number.parseInt(process.env.STRIPE_CREDITS_PER_PURCHASE ?? '30', 10)
-      const credits = Number.isFinite(creditsRaw) ? Math.trunc(creditsRaw) : 30
+      const creditsRaw = Number.parseInt(process.env.STRIPE_CREDITS_PER_PURCHASE ?? '20', 10)
+      const credits = Number.isFinite(creditsRaw) ? Math.trunc(creditsRaw) : 20
+      const email =
+        session.customer_details?.email ||
+        (typeof session.customer_email === 'string' ? session.customer_email : null)
 
       const sb = supabaseAdmin()
+      const { error: upErr } = await sb
+        .from('profiles')
+        .upsert(
+          {
+            id: userId,
+            user_id: userId,
+            email: email ?? null,
+            updated_at: new Date().toISOString(),
+          },
+          { onConflict: 'id' }
+        )
+      if (upErr) throw upErr
+
       console.log('stripe webhook processed', {
         session_id: session.id,
         user_id: userId,
@@ -68,11 +86,21 @@ export async function POST(req: Request) {
         throw insErr
       }
 
-      const { error: rpcErr } = await sb.rpc('add_credits', {
-        p_user_id: userId,
-        p_credits: credits,
-      })
-      if (rpcErr) throw rpcErr
+      let updated = false
+      try {
+        const { error: rpcErr } = await sb.rpc('increment_credits', {
+          p_user_id: userId,
+          p_amount: credits,
+        })
+        if (!rpcErr) updated = true
+      } catch {
+        updated = false
+      }
+      if (!updated) {
+        const { data: row } = await sb.from('profiles').select('credits').eq('id', userId).maybeSingle()
+        const next = Number(row?.credits ?? 0) + credits
+        await sb.from('profiles').update({ credits: next }).eq('id', userId)
+      }
 
       console.log('stripe webhook processed', {
         session_id: session.id,

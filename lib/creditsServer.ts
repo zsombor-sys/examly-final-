@@ -29,8 +29,8 @@ export type ProfileRow = {
 }
 
 export const STARTER_CREDITS = 5
-export const PRO_CREDITS_PER_PURCHASE = 30
-export const PRO_AMOUNT_HUF = 3500
+export const PRO_CREDITS_PER_PURCHASE = 20
+export const PRO_AMOUNT_HUF = 3490
 export const PRO_CURRENCY = 'huf'
 
 function nowIso() {
@@ -172,8 +172,8 @@ export async function maybeAutoRecharge(userId: string) {
         payment_method: p.stripe_payment_method_id,
         off_session: true,
         confirm: true,
-        description: 'Umenify Pro top-up (30 generations)',
-        metadata: { user_id: userId, product: 'examly_pro_30_credits_autorecharge' },
+        description: 'Umenify Pro top-up (20 generations)',
+        metadata: { user_id: userId, product: 'examly_pro_20_credits_autorecharge' },
       },
       { idempotencyKey }
     )

@@ -143,6 +143,7 @@ function Inner() {
   const [planId, setPlanId] = useState<string | null>(null)
   const pendingGenerateRef = useRef(false)
   const [error, setError] = useState<string | null>(null)
+  const promptChars = prompt.length
 
   const [saved, setSaved] = useState<SavedPlan[]>([])
   const [selectedId, setSelectedId] = useState<string | null>(null)
@@ -333,7 +334,7 @@ function Inner() {
     const userId = sess.data.session?.user?.id
     if (!userId) throw new Error('Not authenticated')
 
-    const list = (files || []).slice(0, 40)
+    const list = (files || []).slice(0, MAX_IMAGES)
     if (list.length === 0) return
 
     const MAX_BYTES = 10 * 1024 * 1024
@@ -403,6 +404,10 @@ function Inner() {
 
   async function generate() {
     setError(null)
+    if (prompt.trim().length > 150) {
+      setError('Prompt too long (max 150 characters).')
+      return
+    }
     if (files.length > MAX_IMAGES) {
       setError(`You can upload up to ${MAX_IMAGES} files.`)
       return
@@ -553,13 +558,7 @@ function Inner() {
     : result?.notes?.markdown
       ? result.notes.markdown
       : ''
-  const costEstimate = (() => {
-    try {
-      return calcCreditsFromFileCount(files.length || 0)
-    } catch {
-      return null
-    }
-  })()
+  const costEstimate = 1
   const pomodoroPlan = useMemo<DayPlan[]>(() => {
     if (!result) return []
     const blocksRaw = Array.isArray(result.daily?.pomodoro_blocks) ? result.daily.pomodoro_blocks : []
@@ -635,7 +634,9 @@ function Inner() {
             onChange={(e) => setPrompt(e.target.value)}
             placeholder="What’s your exam about? When is it? What material do you have?"
             className="mt-3 min-h-[110px]"
+            maxLength={150}
           />
+          <div className="mt-2 text-xs text-white/60">{promptChars}/150</div>
 
           <label className="mt-3 flex cursor-pointer items-center justify-between gap-3 rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm text-white/70 hover:bg-white/10">
             <span className="inline-flex items-center gap-2">
@@ -655,6 +656,7 @@ function Inner() {
                 } else {
                   setFiles(next)
                 }
+                setError(null)
                 setMaterials([])
                 setProcessedFiles(0)
                 setTotalFiles(0)
@@ -666,7 +668,7 @@ function Inner() {
 
           {files.length ? <div className="mt-2 text-xs text-white/60">Selected: {files.length} file(s)</div> : null}
           <div className="mt-2 text-xs text-white/60">
-            {costEstimate == null ? `Max ${MAX_IMAGES} files.` : `This will cost ${costEstimate} credits.`}
+            This will cost {costEstimate} credit.
           </div>
           {isGenerating && totalFiles > 0 ? (
             <div className="mt-2 text-xs text-white/60">

@@ -24,7 +24,7 @@ const QA = [
     q: 'Plans & limits (important)',
     a: `**Free (trial):** 10 generations for **48 hours**, **one-time only** per account. Activation requires **full name + email + phone**.
 
-**Pro:** 30 generations for **3500 Ft** (≈ €8.9). After you buy Pro once, Umenify can **auto-recharge** another 30 when you run out (best-effort, some banks may require confirmation).`
+**Pro:** 20 generations for **3490 Ft** (≈ €8.9). After you buy Pro once, Umenify can **auto-recharge** another 20 when you run out (best-effort, some banks may require confirmation).`
   },
   {
     q: 'What counts as 1 generation?',

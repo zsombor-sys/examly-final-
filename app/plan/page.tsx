@@ -11,7 +11,7 @@ import { supabase } from '@/lib/supabaseClient'
 import { buildMaterialObjectKey } from '@/lib/uploadClient'
 import HScroll from '@/components/HScroll'
 import Pomodoro from '@/components/Pomodoro'
-import { MAX_IMAGES, calcCreditsFromFileCount } from '@/lib/credits'
+import { MAX_IMAGES } from '@/lib/credits'
 
 type Block = { type: 'study' | 'break'; minutes: number; label: string }
 type DayPlan = { day: string; focus: string; tasks: string[]; minutes: number; blocks?: Block[] }
@@ -19,12 +19,10 @@ type PlanBlock = { title: string; duration_minutes: number; description: string 
 type PlanResult = {
   title?: string | null
   language?: 'hu' | 'en' | null
-  exam_date?: string | null
-  confidence?: number | null
   plan?: { blocks?: PlanBlock[] } | null
-  notes?: { quick_summary?: string; study_notes?: string; key_points?: string[] } | null
-  daily?: { days?: Array<{ day: number; focus: string; tasks: string[] }> } | null
-  practice?: { questions?: Array<{ q: string; answer: string; choices?: string[]; explanation?: string }> } | null
+  notes?: { bullets?: string[] } | null
+  daily?: { schedule?: Array<{ day: number; focus: string; tasks: string[] }> } | null
+  practice?: { questions?: Array<{ q: string; a: string }> } | null
 }
 
 type SavedPlan = { id: string; title: string; created_at: string }
@@ -415,7 +413,7 @@ function Inner() {
       setError(`You can upload up to ${MAX_IMAGES} files.`)
       return
     }
-    const cost = calcCreditsFromFileCount(files.length || 0)
+    const cost = 1
     if (credits != null && credits < cost) {
       setError(`Not enough credits. This will cost ${cost} credits.`)
       return
@@ -487,8 +485,10 @@ function Inner() {
       } else if (!res.ok) {
         const code = json?.error || json?.code
         let message = json?.details || json?.error || json?.message
-        if (code === 'CREDITS_LOOKUP_FAILED') {
+        if (code === 'SERVER_CANT_READ_CREDITS') {
           message = "Server can't read credits (env/RLS)."
+        } else if (code === 'INSUFFICIENT_CREDITS') {
+          message = 'Not enough credits.'
         } else if (code === 'UNAUTHENTICATED') {
           message = 'Please log in again.'
         }
@@ -561,16 +561,17 @@ function Inner() {
   const displayTitle = result?.title?.trim() ? result.title : 'Study plan'
   const displayInput = shortPrompt(prompt)
   const failedCount = materials.filter((m) => m.status === 'failed').length
-  const canGenerate = !loading && !isGenerating && (prompt.trim().length >= 6 || files.length > 0)
-  const summaryText = result?.notes?.quick_summary?.trim()
-    ? result.notes.quick_summary
-    : result?.notes?.study_notes
-      ? result.notes.study_notes
-      : ''
+  const canGenerate =
+    !loading &&
+    !isGenerating &&
+    prompt.trim().length <= 150 &&
+    files.length <= MAX_IMAGES &&
+    (prompt.trim().length >= 6 || files.length > 0)
+  const summaryText = (result?.notes?.bullets ?? []).join(' • ')
   const costEstimate = 1
   const pomodoroPlan = useMemo<DayPlan[]>(() => {
     if (!result) return []
-    const daysRaw = Array.isArray(result.daily?.days) ? result.daily.days : []
+    const daysRaw = Array.isArray(result.daily?.schedule) ? result.daily.schedule : []
     return daysRaw.map((d) => {
       const tasks = Array.isArray(d.tasks) ? d.tasks.filter(Boolean) : []
       const minutes = Math.max(20, Math.min(180, tasks.length * 30 || 60))
@@ -768,8 +769,8 @@ function Inner() {
                     {summaryText.slice(0, 300)}
                     {summaryText.length > 300 ? '…' : ''}
                   </div>
-                  {result?.daily?.days?.[0]?.focus ? (
-                    <div className="mt-3 text-xs text-white/60">Focus: {result.daily.days[0].focus}</div>
+                  {result?.daily?.schedule?.[0]?.focus ? (
+                    <div className="mt-3 text-xs text-white/60">Focus: {result.daily.schedule[0].focus}</div>
                   ) : null}
                 </div>
               )}
@@ -778,10 +779,9 @@ function Inner() {
               {tab === 'notes' && result && (
                 <div className="rounded-3xl border border-white/10 bg-white/[0.02] p-5 min-w-0 overflow-hidden">
                   <div className="text-xs uppercase tracking-[0.18em] text-white/55">Notes</div>
-                  <div className="mt-3 text-sm text-white/80 whitespace-pre-wrap">{result.notes?.study_notes || ''}</div>
-                  {(result.notes?.key_points ?? []).length > 0 ? (
+                  {(result.notes?.bullets ?? []).length > 0 ? (
                     <div className="mt-4 space-y-2 text-sm text-white/70">
-                      {(result.notes?.key_points ?? []).map((kp, i) => (
+                      {(result.notes?.bullets ?? []).map((kp, i) => (
                         <div key={`${kp}-${i}`} className="rounded-xl border border-white/10 bg-black/30 px-3 py-2">
                           {kp}
                         </div>
@@ -802,7 +802,7 @@ function Inner() {
                     <section className="w-full rounded-3xl border border-white/10 bg-white/[0.02] p-5 min-w-0 overflow-hidden">
                       <div className="text-xs uppercase tracking-[0.18em] text-white/55">Daily schedule</div>
                       <div className="mt-3 space-y-4 text-sm text-white/80">
-                        {(result.daily?.days ?? []).map((d) => (
+                        {(result.daily?.schedule ?? []).map((d) => (
                           <div key={`day-${d.day}`} className="rounded-2xl border border-white/10 bg-black/30 px-4 py-3">
                             <div className="text-white/90">Day {d.day}: {d.focus}</div>
                             <div className="mt-2 space-y-1 text-white/70">
@@ -829,10 +829,10 @@ function Inner() {
                       <div className="text-sm font-semibold text-white/90 min-w-0 break-words">
                         {qi + 1}. {q.q}
                       </div>
-                      {q.answer ? (
+                      {q.a ? (
                         <div className="mt-4 rounded-2xl border border-white/10 bg-black/30 p-4">
                           <div className="text-xs uppercase tracking-[0.18em] text-white/55">Answer</div>
-                          <div className="mt-2 text-sm text-white/80 break-words">{q.answer}</div>
+                          <div className="mt-2 text-sm text-white/80 break-words">{q.a}</div>
                         </div>
                       ) : null}
                     </section>

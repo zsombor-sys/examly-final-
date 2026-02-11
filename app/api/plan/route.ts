@@ -25,8 +25,6 @@ const planRequestSchema = z.object({
 const PlanResultSchema = z.object({
   title: z.string(),
   language: z.enum(['hu', 'en']),
-  exam_date: z.string().nullable(),
-  confidence: z.number().nullable(),
   plan: z.object({
     blocks: z.array(
       z.object({
@@ -37,12 +35,10 @@ const PlanResultSchema = z.object({
     ),
   }),
   notes: z.object({
-    quick_summary: z.string(),
-    study_notes: z.string(),
-    key_points: z.array(z.string()),
+    bullets: z.array(z.string()),
   }),
   daily: z.object({
-    days: z.array(
+    schedule: z.array(
       z.object({
         day: z.number(),
         focus: z.string(),
@@ -54,9 +50,7 @@ const PlanResultSchema = z.object({
     questions: z.array(
       z.object({
         q: z.string(),
-        choices: z.array(z.string()).optional(),
-        answer: z.string(),
-        explanation: z.string().optional(),
+        a: z.string(),
       })
     ),
   }),
@@ -68,8 +62,6 @@ const planResultJsonSchema = {
   properties: {
     title: { type: 'string' },
     language: { type: 'string', enum: ['hu', 'en'] },
-    exam_date: { type: ['string', 'null'] },
-    confidence: { type: ['number', 'null'] },
     plan: {
       type: 'object',
       additionalProperties: false,
@@ -94,17 +86,15 @@ const planResultJsonSchema = {
       type: 'object',
       additionalProperties: false,
       properties: {
-        quick_summary: { type: 'string' },
-        study_notes: { type: 'string' },
-        key_points: { type: 'array', items: { type: 'string' } },
+        bullets: { type: 'array', items: { type: 'string' } },
       },
-      required: ['quick_summary', 'study_notes', 'key_points'],
+      required: ['bullets'],
     },
     daily: {
       type: 'object',
       additionalProperties: false,
       properties: {
-        days: {
+        schedule: {
           type: 'array',
           items: {
             type: 'object',
@@ -118,7 +108,7 @@ const planResultJsonSchema = {
           },
         },
       },
-      required: ['days'],
+      required: ['schedule'],
     },
     practice: {
       type: 'object',
@@ -131,11 +121,9 @@ const planResultJsonSchema = {
             additionalProperties: false,
             properties: {
               q: { type: 'string' },
-              choices: { type: 'array', items: { type: 'string' } },
-              answer: { type: 'string' },
-              explanation: { type: 'string' },
+              a: { type: 'string' },
             },
-            required: ['q', 'answer'],
+            required: ['q', 'a'],
           },
         },
       },
@@ -271,49 +259,30 @@ function clampText(text: string) {
 
 function enforceTotalChars(payload: PlanPayload): PlanPayload {
   const refs: Array<{ get: () => string; set: (v: string) => void }> = [
-    { get: () => payload.notes.study_notes, set: (v) => (payload.notes.study_notes = v) },
-    { get: () => payload.notes.quick_summary, set: (v) => (payload.notes.quick_summary = v) },
-    ...payload.notes.key_points.map((_, i) => ({
-      get: () => payload.notes.key_points[i],
+    ...payload.notes.bullets.map((_, i) => ({
+      get: () => payload.notes.bullets[i],
       set: (v: string) => {
-        payload.notes.key_points[i] = v
+        payload.notes.bullets[i] = v
       },
     })),
-    ...payload.practice.questions.flatMap((q, i) => [
-      { get: () => payload.practice.questions[i].answer, set: (v: string) => (payload.practice.questions[i].answer = v) },
+    ...payload.practice.questions.flatMap((_, i) => [
+      { get: () => payload.practice.questions[i].a, set: (v: string) => (payload.practice.questions[i].a = v) },
       { get: () => payload.practice.questions[i].q, set: (v: string) => (payload.practice.questions[i].q = v) },
-      ...(payload.practice.questions[i].explanation != null
-        ? [
-            {
-              get: () => payload.practice.questions[i].explanation as string,
-              set: (v: string) => (payload.practice.questions[i].explanation = v),
-            },
-          ]
-        : []),
-      ...(payload.practice.questions[i].choices
-        ? payload.practice.questions[i].choices!.map((_, ci) => ({
-            get: () => payload.practice.questions[i].choices![ci],
-            set: (v: string) => {
-              payload.practice.questions[i].choices![ci] = v
-            },
-          }))
-        : []),
     ]),
-    ...payload.plan.blocks.flatMap((b, i) => [
+    ...payload.plan.blocks.flatMap((_, i) => [
       { get: () => payload.plan.blocks[i].description, set: (v: string) => (payload.plan.blocks[i].description = v) },
       { get: () => payload.plan.blocks[i].title, set: (v: string) => (payload.plan.blocks[i].title = v) },
     ]),
-    ...payload.daily.days.flatMap((d, i) => [
-      { get: () => payload.daily.days[i].focus, set: (v: string) => (payload.daily.days[i].focus = v) },
-      ...payload.daily.days[i].tasks.map((_, ti) => ({
-        get: () => payload.daily.days[i].tasks[ti],
+    ...payload.daily.schedule.flatMap((_, i) => [
+      { get: () => payload.daily.schedule[i].focus, set: (v: string) => (payload.daily.schedule[i].focus = v) },
+      ...payload.daily.schedule[i].tasks.map((_, ti) => ({
+        get: () => payload.daily.schedule[i].tasks[ti],
         set: (v: string) => {
-          payload.daily.days[i].tasks[ti] = v
+          payload.daily.schedule[i].tasks[ti] = v
         },
       })),
     ]),
     { get: () => payload.title, set: (v) => (payload.title = v) },
-    ...(payload.exam_date ? [{ get: () => payload.exam_date as string, set: (v: string) => (payload.exam_date = v) }] : []),
   ]
 
   let total = refs.reduce((sum, r) => sum + r.get().length, 0)
@@ -336,8 +305,6 @@ function clampPlanPayload(input: PlanPayload): PlanPayload {
   const payload: PlanPayload = {
     title: clampText(input.title),
     language: input.language,
-    exam_date: input.exam_date ? clampText(input.exam_date) : null,
-    confidence: input.confidence ?? null,
     plan: {
       blocks: input.plan.blocks.map((b) => ({
         title: clampText(b.title),
@@ -346,12 +313,10 @@ function clampPlanPayload(input: PlanPayload): PlanPayload {
       })),
     },
     notes: {
-      quick_summary: clampText(input.notes.quick_summary),
-      study_notes: clampText(input.notes.study_notes),
-      key_points: input.notes.key_points.map((k) => clampText(k)),
+      bullets: input.notes.bullets.map((b) => clampText(b)),
     },
     daily: {
-      days: input.daily.days.map((d) => ({
+      schedule: input.daily.schedule.map((d) => ({
         day: d.day,
         focus: clampText(d.focus),
         tasks: d.tasks.map((t) => clampText(t)),
@@ -360,9 +325,7 @@ function clampPlanPayload(input: PlanPayload): PlanPayload {
     practice: {
       questions: input.practice.questions.map((q) => ({
         q: clampText(q.q),
-        choices: q.choices ? q.choices.map((c) => clampText(c)) : undefined,
-        answer: clampText(q.answer),
-        explanation: q.explanation ? clampText(q.explanation) : undefined,
+        a: clampText(q.a),
       })),
     },
   }
@@ -372,19 +335,11 @@ function clampPlanPayload(input: PlanPayload): PlanPayload {
 
 type PlanBlockInput = { title?: string | null; duration_minutes?: number | null; description?: string | null }
 type DailyDayInput = { day?: number | null; focus?: string | null; tasks?: Array<string | null> | null }
-type PracticeQuestionInput = {
-  q?: string | null
-  choices?: Array<string | null> | null
-  answer?: string | null
-  explanation?: string | null
-}
+type PracticeQuestionInput = { q?: string | null; a?: string | null }
 
 function normalizePlanPayload(input: any): PlanPayload {
   const title = sanitizeText(String(input?.title ?? '').trim() || 'Study plan')
   const language = input?.language === 'hu' ? 'hu' : 'en'
-  const exam_date = input?.exam_date ? sanitizeText(String(input.exam_date).trim()) : null
-  const confidence = Number.isFinite(input?.confidence) ? Number(input.confidence) : null
-
   const planBlocksRaw = Array.isArray(input?.plan?.blocks) ? input.plan.blocks : []
   const planBlocks = planBlocksRaw.map((b: PlanBlockInput) => ({
     title: sanitizeText(String(b?.title ?? '').trim() || 'Block'),
@@ -392,12 +347,10 @@ function normalizePlanPayload(input: any): PlanPayload {
     description: sanitizeText(String(b?.description ?? '').trim() || 'Short study block.'),
   }))
 
-  const notesQuickSummary = sanitizeText(String(input?.notes?.quick_summary ?? '').trim() || 'Quick summary.')
-  const studyNotes = sanitizeText(String(input?.notes?.study_notes ?? '').trim() || 'Study notes.')
-  const keyPointsRaw = Array.isArray(input?.notes?.key_points) ? input.notes.key_points : []
-  const keyPoints = keyPointsRaw.map((k: string) => sanitizeText(String(k ?? '').trim())).filter(Boolean)
+  const bulletsRaw = Array.isArray(input?.notes?.bullets) ? input.notes.bullets : []
+  const bullets = bulletsRaw.map((k: string) => sanitizeText(String(k ?? '').trim())).filter(Boolean)
 
-  const dailyRaw = Array.isArray(input?.daily?.days) ? input.daily.days : []
+  const dailyRaw = Array.isArray(input?.daily?.schedule) ? input.daily.schedule : []
   const dailyDays = dailyRaw.map((d: DailyDayInput, idx: number) => ({
     day: Number(d?.day ?? idx + 1) || idx + 1,
     focus: sanitizeText(String(d?.focus ?? '').trim() || 'Focus'),
@@ -409,53 +362,38 @@ function normalizePlanPayload(input: any): PlanPayload {
   const practiceRaw = Array.isArray(input?.practice?.questions) ? input.practice.questions : []
   const practiceQuestions = practiceRaw.map((q: PracticeQuestionInput) => ({
     q: sanitizeText(String(q?.q ?? '').trim() || 'Question'),
-    choices: Array.isArray(q?.choices)
-      ? q?.choices.map((c) => sanitizeText(String(c ?? '').trim())).filter(Boolean)
-      : undefined,
-    answer: sanitizeText(String(q?.answer ?? '').trim() || 'Answer'),
-    explanation: q?.explanation ? sanitizeText(String(q.explanation).trim()) : undefined,
+    a: sanitizeText(String(q?.a ?? '').trim() || 'Answer'),
   }))
 
   return {
     title,
     language,
-    exam_date,
-    confidence,
     plan: {
       blocks: planBlocks.length ? planBlocks.slice(0, 8) : [],
     },
     notes: {
-      quick_summary: notesQuickSummary,
-      study_notes: studyNotes,
-      key_points: keyPoints.length ? keyPoints.slice(0, 12) : [],
+      bullets: bullets.length ? bullets.slice(0, 12) : [],
     },
     daily: {
-      days: dailyDays.length ? dailyDays.slice(0, 7) : [],
+      schedule: dailyDays.length ? dailyDays.slice(0, 7) : [],
     },
     practice: {
-      questions: practiceQuestions.length ? practiceQuestions.slice(0, 15) : [],
+      questions: practiceQuestions.length ? practiceQuestions.slice(0, 10) : [],
     },
   }
 }
 
-function countWords(text: string) {
-  return String(text || '')
-    .trim()
-    .split(/\s+/)
-    .filter(Boolean).length
-}
-
-function ensureNotesWordCount(studyNotes: string, minWords: number, isHu: boolean) {
-  const totalWords = countWords(studyNotes)
-  if (totalWords >= minWords) return studyNotes
-  const fillerSentence = isHu
-    ? 'Ez a resz attekinti a temakor legfontosabb fogalmait, kulcsotleteit es gyakori osszefuggeseit.'
-    : 'This section summarizes the most important concepts, key ideas, and common connections in the topic.'
-  const needed = minWords - totalWords
-  const extraWords = Math.max(needed, 1)
-  const repeats = Math.ceil(extraWords / countWords(fillerSentence))
-  const filler = Array.from({ length: repeats }, () => fillerSentence).join(' ')
-  return `${studyNotes} ${filler}`.trim()
+function ensureNotesWordCount(bullets: string[], minCount: number, isHu: boolean) {
+  if (bullets.length >= minCount) return bullets
+  const filler = isHu
+    ? ['Fo fogalmak', 'Definiciok', 'Fontos osszefuggesek']
+    : ['Key concepts', 'Definitions', 'Important connections']
+  const next = [...bullets]
+  for (const item of filler) {
+    if (next.length >= minCount) break
+    if (!next.includes(item)) next.push(item)
+  }
+  return next
 }
 
 function fallbackPlanPayload(prompt: string, fileNames: string[], isHu: boolean) {
@@ -464,8 +402,6 @@ function fallbackPlanPayload(prompt: string, fileNames: string[], isHu: boolean)
   return normalizePlanPayload({
     title: isHu && !titleBase ? 'Tanulasi terv' : title,
     language: isHu ? 'hu' : 'en',
-    exam_date: null,
-    confidence: 0.6,
     plan: {
       blocks: [
         {
@@ -491,14 +427,10 @@ function fallbackPlanPayload(prompt: string, fileNames: string[], isHu: boolean)
       ],
     },
     notes: {
-      quick_summary: isHu ? 'Rovid osszefoglalo a temarol.' : 'A short overview of the topic.',
-      study_notes: isHu
-        ? 'Reszletes jegyzetek a temakorhoz, definiciokkal es peldakkal.'
-        : 'Detailed notes on the topic with definitions and examples.',
-      key_points: isHu ? ['Fo fogalmak', 'Definiciok', 'Tipikus peldak'] : ['Key concepts', 'Definitions', 'Examples'],
+      bullets: isHu ? ['Fo fogalmak', 'Definiciok', 'Tipikus peldak'] : ['Key concepts', 'Definitions', 'Examples'],
     },
     daily: {
-      days: [
+      schedule: [
         {
           day: 1,
           focus: isHu ? 'Felkeszules' : 'Preparation',
@@ -520,24 +452,94 @@ function fallbackPlanPayload(prompt: string, fileNames: string[], isHu: boolean)
       questions: [
         {
           q: isHu ? 'Mi a legfontosabb definicio?' : 'What is the most important definition?',
-          answer: isHu ? 'Rovid valasz a kulcsfogalomrol.' : 'A short answer about the key concept.',
+          a: isHu ? 'Rovid valasz a kulcsfogalomrol.' : 'A short answer about the key concept.',
         },
         {
           q: isHu ? 'Sorolj fel kulcsotleteket.' : 'List the key ideas.',
-          answer: isHu ? 'Rovid, pontokba szedett valasz.' : 'A short, bullet-style answer.',
+          a: isHu ? 'Rovid, pontokba szedett valasz.' : 'A short, bullet-style answer.',
         },
         {
           q: isHu ? 'Adj egy tipikus peldat.' : 'Give a typical example.',
-          answer: isHu ? 'Rovid, konkret pelda.' : 'A brief, concrete example.',
+          a: isHu ? 'Rovid, konkret pelda.' : 'A brief, concrete example.',
         },
         {
           q: isHu ? 'Melyek a gyakori hibak?' : 'What are common mistakes?',
-          answer: isHu ? 'Rovid felsorolas.' : 'A short list of mistakes.',
+          a: isHu ? 'Rovid felsorolas.' : 'A short list of mistakes.',
         },
         {
           q: isHu ? 'Hogyan kapcsolodnak a fogalmak?' : 'How are the concepts connected?',
-          answer: isHu ? 'Rovid osszefugges.' : 'A short connection summary.',
+          a: isHu ? 'Rovid osszefugges.' : 'A short connection summary.',
         },
+        {
+          q: isHu ? 'Mi a kulonbseg ket fogalom kozott?' : 'What is the difference between two concepts?',
+          a: isHu ? 'Rovid osszehasonlitas.' : 'A short comparison.',
+        },
+        {
+          q: isHu ? 'Mikor alkalmaznad ezt a szabaly?' : 'When would you apply this rule?',
+          a: isHu ? 'Rovid alkalmazasi pelda.' : 'A brief application example.',
+        },
+        {
+          q: isHu ? 'Mi a kovetkezo lepes egy megoldasban?' : 'What is the next step in a solution?',
+          a: isHu ? 'Rovid leiras a kovetkezo lepesrol.' : 'A brief next-step description.',
+        },
+        {
+          q: isHu ? 'Nevezz meg egy gyakori felreertest.' : 'Name a common misconception.',
+          a: isHu ? 'Rovid figyelmeztetes a felreertesrol.' : 'A brief warning about the misconception.',
+        },
+        {
+          q: isHu ? 'Mi a legfontosabb osszefoglalas?' : 'What is the most important takeaway?',
+          a: isHu ? 'Rovid osszefoglalo.' : 'A short takeaway.',
+        },
+      ],
+    },
+  })
+}
+
+function minimalPlanPayload(isHu: boolean) {
+  return normalizePlanPayload({
+    title: isHu ? 'Rovid terv' : 'Quick plan',
+    language: isHu ? 'hu' : 'en',
+    plan: {
+      blocks: [
+        {
+          title: isHu ? 'Attekintes' : 'Review',
+          duration_minutes: 30,
+          description: isHu ? 'Fo temak atnezese.' : 'Review the main topics.',
+        },
+        {
+          title: isHu ? 'Jegyzetek' : 'Notes',
+          duration_minutes: 30,
+          description: isHu ? 'Rovid jegyzetek keszitese.' : 'Write short notes.',
+        },
+        {
+          title: isHu ? 'Gyakorlas' : 'Practice',
+          duration_minutes: 30,
+          description: isHu ? 'Rovid gyakorlo feladatok.' : 'Short practice tasks.',
+        },
+      ],
+    },
+    notes: {
+      bullets: isHu ? ['Fo fogalmak', 'Definiciok', 'Pelda'] : ['Key concepts', 'Definitions', 'Example'],
+    },
+    daily: {
+      schedule: [
+        { day: 1, focus: isHu ? 'Attekintes' : 'Review', tasks: isHu ? ['Attekintes'] : ['Review'] },
+        { day: 2, focus: isHu ? 'Jegyzetek' : 'Notes', tasks: isHu ? ['Jegyzetek'] : ['Notes'] },
+        { day: 3, focus: isHu ? 'Gyakorlas' : 'Practice', tasks: isHu ? ['Gyakorlas'] : ['Practice'] },
+      ],
+    },
+    practice: {
+      questions: [
+        { q: isHu ? 'Mi a legfontosabb definicio?' : 'What is the key definition?', a: isHu ? 'Rovid valasz.' : 'A short answer.' },
+        { q: isHu ? 'Sorolj fel kulcsotleteket.' : 'List key ideas.', a: isHu ? 'Rovid felsorolas.' : 'A short list.' },
+        { q: isHu ? 'Adj egy peldat.' : 'Give an example.', a: isHu ? 'Rovid pelda.' : 'A short example.' },
+        { q: isHu ? 'Mi a kovetkezo lepes?' : 'What is the next step?', a: isHu ? 'Rovid lepes.' : 'A short step.' },
+        { q: isHu ? 'Mikor alkalmaznad?' : 'When would you apply it?', a: isHu ? 'Rovid alkalmazas.' : 'A short application.' },
+        { q: isHu ? 'Melyek a hibak?' : 'What are common mistakes?', a: isHu ? 'Rovid felsorolas.' : 'A short list.' },
+        { q: isHu ? 'Mit kell megjegyezni?' : 'What should you remember?', a: isHu ? 'Rovid emlekezteto.' : 'A short reminder.' },
+        { q: isHu ? 'Hogyan kapcsolodnak?' : 'How are they connected?', a: isHu ? 'Rovid osszefugges.' : 'A short link.' },
+        { q: isHu ? 'Mi a cel?' : 'What is the goal?', a: isHu ? 'Rovid cel.' : 'A short goal.' },
+        { q: isHu ? 'Mi a lenyeg?' : 'What is the takeaway?', a: isHu ? 'Rovid lenyeg.' : 'A short takeaway.' },
       ],
     },
   })
@@ -913,27 +915,30 @@ export async function POST(req: Request) {
 
     const client = new OpenAI({ apiKey: openAiKey })
     const model = MODEL
-    const extractedText = String(materials.textFromFiles || '').slice(0, 20_000)
+    const extractedText = String(materials.textFromFiles || '').slice(0, 8000)
     const isHu = detectHungarian(prompt) || detectHungarian(extractedText)
-    const minNotesWords = 400
 
     const systemText = [
       'Return ONLY valid JSON matching the schema. No markdown. No prose. No extra keys.',
       `Language: ${isHu ? 'Hungarian' : 'English'} (use "hu" or "en" in the language field).`,
       'If information is missing, make reasonable assumptions and still fill all fields.',
-      'Notes must be detailed and plain text. Minimum 400 words in notes.study_notes.',
+      'Plan must include 4-8 blocks. Daily schedule must include 3-7 days.',
+      'Notes must be bulleted with at least 5 bullets.',
+      'Practice must include exactly 10 Q&A pairs.',
+      'Keep total output under 4000 characters.',
     ].join('\n')
     const shortSystemText = [
       'Return ONLY valid JSON matching the schema. No markdown. No prose. No extra keys.',
       `Language: ${isHu ? 'Hungarian' : 'English'} (use "hu" or "en" in the language field).`,
-      'Keep strings concise. notes.study_notes <= 2500 chars. notes.quick_summary <= 400 chars.',
+      'Keep strings concise. Notes bullets short; practice answers short.',
+      'Plan 4-6 blocks, daily schedule 3 days, practice 10 Q&A.',
       'If information is missing, make reasonable assumptions and still fill all fields.',
     ].join('\n')
     const userText = [
       `Prompt:\n${prompt || '(empty)'}`,
       `File names:\n${materials.fileNames.join(', ') || '(none)'}`,
       `Extracted text:\n${extractedText || '(none)'}`,
-      'Schema: title, language, exam_date, confidence, plan.blocks[{title,duration_minutes,description}], notes.quick_summary, notes.study_notes, notes.key_points, daily.days[{day,focus,tasks}], practice.questions[{q,choices,answer,explanation}]',
+      'Schema: title, language, plan.blocks[{title,duration_minutes,description}], notes.bullets[], daily.schedule[{day,focus,tasks}], practice.questions[{q,a}]',
     ].join('\n\n')
 
     const callModel = async (system: string) => {
@@ -976,47 +981,31 @@ export async function POST(req: Request) {
       } catch {
         const snippet = rawOutput.slice(0, 500)
         console.error('plan.generate json_parse_failed', { requestId, planId: idToUse, raw: snippet })
-        await savePlanToDbBestEffort({
-          id: idToUse,
-          userId: user.id,
-          prompt,
-          title: 'Plan generation failed',
-          language: null,
-          created_at: new Date().toISOString(),
-          result: null,
-          generationId: requestId,
-          creditsCharged: cost,
-          model,
-          materials: {
-            fileNames: materials.fileNames,
-            total: materials.total,
-            imageCount: materials.imageCount,
-          },
-        })
-        return NextResponse.json(
-          { error: 'AI_JSON_PARSE_FAILED', raw_preview: snippet },
-          { status: 500, headers: { 'cache-control': 'no-store' } }
-        )
+        planPayload = minimalPlanPayload(isHu)
       }
     }
 
-    planPayload.notes.study_notes = ensureNotesWordCount(planPayload.notes.study_notes, minNotesWords, isHu)
+    planPayload.notes.bullets = ensureNotesWordCount(planPayload.notes.bullets, 5, isHu)
     const fallback = fallbackPlanPayload(prompt, materials.fileNames, isHu)
     if (planPayload.plan.blocks.length < 4) {
       planPayload.plan.blocks = fallback.plan.blocks
     }
-    if (!planPayload.notes.study_notes) {
-      planPayload.notes.study_notes = fallback.notes.study_notes
-      planPayload.notes.study_notes = ensureNotesWordCount(planPayload.notes.study_notes, minNotesWords, isHu)
+    if (planPayload.notes.bullets.length < 5) {
+      planPayload.notes.bullets = ensureNotesWordCount(
+        [...planPayload.notes.bullets, ...fallback.notes.bullets],
+        5,
+        isHu
+      )
     }
-    if (planPayload.daily.days.length < 3) {
-      planPayload.daily.days = fallback.daily.days
+    if (planPayload.daily.schedule.length < 3) {
+      planPayload.daily.schedule = fallback.daily.schedule
     }
-    if (planPayload.notes.key_points.length < 3) {
-      planPayload.notes.key_points = fallback.notes.key_points
+    if (planPayload.practice.questions.length < 10) {
+      const merged = [...planPayload.practice.questions, ...fallback.practice.questions]
+      planPayload.practice.questions = merged.slice(0, 10)
     }
-    if (planPayload.practice.questions.length < 8) {
-      planPayload.practice.questions = fallback.practice.questions
+    if (planPayload.practice.questions.length > 10) {
+      planPayload.practice.questions = planPayload.practice.questions.slice(0, 10)
     }
 
     const plan = clampPlanPayload(planPayload)

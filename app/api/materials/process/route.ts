@@ -1,106 +1,16 @@
 import { NextResponse } from 'next/server'
-import { requireUser } from '@/lib/authServer'
-import { supabaseAdmin } from '@/lib/supabaseServer'
-import OpenAI from 'openai'
-import pdfParse from 'pdf-parse'
-import { z } from 'zod'
-import { MAX_IMAGES } from '@/lib/credits'
-
-const MODEL = process.env.OPENAI_MODEL || 'gpt-4.1'
-const BATCH_SIZE = 5
-const TIME_BUDGET_MS = 90_000
 
 export const runtime = 'nodejs'
 export const maxDuration = 300
 
-const ocrBatchSchema = z.object({
-  items: z.array(
-    z.object({
-      index: z.number().int().min(0),
-      text: z.string(),
-    })
-  ),
-})
-
-const ocrBatchJsonSchema = {
-  type: 'object',
-  additionalProperties: false,
-  properties: {
-    items: {
-      type: 'array',
-      items: {
-        type: 'object',
-        additionalProperties: false,
-        properties: {
-          index: { type: 'integer', minimum: 0 },
-          text: { type: 'string' },
-        },
-        required: ['index', 'text'],
-      },
-    },
-  },
-  required: ['items'],
-}
-
-function isImage(path: string, mime: string | null) {
-  if (mime && mime.startsWith('image/')) return true
-  return /\.(png|jpe?g|webp)$/i.test(path)
-}
-
-function isPdf(path: string, mime: string | null) {
-  if (mime === 'application/pdf') return true
-  return /\.pdf$/i.test(path)
-}
-
-async function withTimeout<T>(ms: number, fn: (signal: AbortSignal) => Promise<T>) {
-  const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), ms)
-  try {
-    return await fn(controller.signal)
-  } finally {
-    clearTimeout(timer)
-  }
-}
-
-async function runOcrBatch(
-  openai: OpenAI,
-  model: string,
-  images: Array<{ mime: string; b64: string }>,
-  strict: boolean
-) {
-  const content: any[] = [
-    {
-      type: 'text',
-      text: strict
-        ? 'Return ONLY valid JSON matching the schema. Use index 0..N-1 for the image order. Text must be Hungarian, concise but complete for studying.'
-        : 'Extract study-relevant text from each image. Return JSON matching the schema. Use index 0..N-1 for the image order. Text must be Hungarian, concise but complete for studying.',
-    },
-  ]
-  for (const img of images) {
-    content.push({ type: 'image_url', image_url: { url: `data:${img.mime};base64,${img.b64}` } })
-  }
-  const resp = await withTimeout(45_000, (signal) =>
-    openai.chat.completions.create(
-      {
-        model,
-        messages: [
-          { role: 'system', content: 'You are an OCR extractor.' },
-          { role: 'user', content: content as any },
-        ],
-        temperature: 0,
-        response_format: {
-          type: 'json_schema',
-          json_schema: { name: 'ocr_batch', schema: ocrBatchJsonSchema },
-        },
-      },
-      { signal }
-    )
-  )
-  const raw = String(resp.choices?.[0]?.message?.content ?? '').trim()
-  return ocrBatchSchema.parse(JSON.parse(raw))
-}
-
 export async function POST(req: Request) {
+  return NextResponse.json(
+    { error: 'MATERIALS_PROCESS_DISABLED', message: 'Materials processing disabled; send images to /api/plan.' },
+    { status: 410 }
+  )
+}
+
+/* Previous implementation disabled:
   try {
     const user = await requireUser(req)
     const { searchParams } = new URL(req.url)
@@ -292,3 +202,4 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: e?.message ?? 'Server error' }, { status: e?.status ?? 500 })
   }
 }
+*/

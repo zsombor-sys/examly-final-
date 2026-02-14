@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server'
 import { requireUser } from '@/lib/authServer'
 import { supabaseAdmin } from '@/lib/supabaseServer'
-import { MAX_IMAGES } from '@/lib/credits'
+import { MAX_IMAGES } from '@/lib/limits'
 
 export const runtime = 'nodejs'
 

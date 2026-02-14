@@ -1,17 +1,16 @@
 'use client'
 
 import Link from 'next/link'
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { Button, Textarea } from '@/components/ui'
 import MarkdownMath from '@/components/MarkdownMath'
 import { FileUp, Loader2, Trash2, ArrowLeft, Send } from 'lucide-react'
 import AuthGate from '@/components/AuthGate'
 import { authedFetch } from '@/lib/authClient'
 import { supabase } from '@/lib/supabaseClient'
-import { buildMaterialObjectKey } from '@/lib/uploadClient'
 import HScroll from '@/components/HScroll'
 import Pomodoro from '@/components/Pomodoro'
-import { MAX_IMAGES } from '@/lib/credits'
+import { MAX_IMAGES, MAX_PROMPT_CHARS, CREDITS_PER_GENERATION } from '@/lib/limits'
 
 type Block = { type: 'study' | 'break'; minutes: number; label: string }
 type DayPlan = { day: string; focus: string; tasks: string[]; minutes: number; blocks?: Block[] }
@@ -138,11 +137,6 @@ function Inner() {
   const [files, setFiles] = useState<File[]>([])
   const [loading, setLoading] = useState(false)
   const [isGenerating, setIsGenerating] = useState(false)
-  const [materials, setMaterials] = useState<Array<{ id: string; status: string; error?: string | null }>>([])
-  const [processedFiles, setProcessedFiles] = useState(0)
-  const [totalFiles, setTotalFiles] = useState(0)
-  const [planId, setPlanId] = useState<string | null>(null)
-  const pendingGenerateRef = useRef(false)
   const [error, setError] = useState<string | null>(null)
   const promptChars = prompt.length
 
@@ -278,11 +272,6 @@ function Inner() {
     setAskError(null)
     setAskText('')
     setError(null)
-    setMaterials([])
-    setProcessedFiles(0)
-    setTotalFiles(0)
-    setPlanId(null)
-    pendingGenerateRef.current = false
   }
 
   async function compressImage(file: File) {
@@ -316,20 +305,7 @@ function Inner() {
     return new File([blob], file.name.replace(/\.\w+$/, '.jpg'), { type: 'image/jpeg' })
   }
 
-  async function uploadWithTimeout(path: string, file: File) {
-    const bucket = supabase.storage.from('uploads')
-    const uploadPromise = bucket.upload(path, file, {
-      upsert: false,
-      contentType: file.type || undefined,
-      cacheControl: '3600',
-    })
-    const timeoutPromise = new Promise((_, reject) =>
-      setTimeout(() => reject(new Error('Upload timed out')), 60_000)
-    )
-    return (await Promise.race([uploadPromise, timeoutPromise])) as { data?: { path?: string }; error?: any }
-  }
-
-  async function uploadMaterials(nextPlanId: string) {
+  async function uploadMaterials() {
     if (!supabase) throw new Error('Auth is not configured (missing Supabase env vars).')
     const sess = await supabase.auth.getSession()
     const userId = sess.data.session?.user?.id
@@ -344,149 +320,43 @@ function Inner() {
         throw new Error(`File too large (max 10MB): ${f.name}`)
       }
     }
-
-    setTotalFiles(list.length)
-    setProcessedFiles(0)
-    const uploaded: Array<{ file_path: string; mime_type: string; status: 'uploaded'; type: 'image' | 'pdf' | 'file' }> = []
-
-    for (const f of list) {
-      try {
-        const file = f.type.startsWith('image/') ? await compressImage(f) : f
-        const path = buildMaterialObjectKey(userId, file)
-        const { data: upData, error: upErr } = await uploadWithTimeout(path, file)
-        if (upErr) throw new Error(upErr.message || 'Upload failed')
-        const storedPath = upData?.path || path
-        console.log('Uploaded material', {
-          name: file.name,
-          size: file.size,
-          mime: file.type,
-          path: storedPath,
-        })
-        const kind = file.type.startsWith('image/') ? 'image' : file.type === 'application/pdf' ? 'pdf' : 'file'
-        uploaded.push({
-          file_path: storedPath,
-          mime_type: file.type || 'application/octet-stream',
-          status: 'uploaded',
-          type: kind,
-        })
-      } catch (err: any) {
-        setError(`${f.name}: ${err?.message ?? 'Upload failed'}`)
-      } finally {
-        setProcessedFiles((v) => v + 1)
-      }
-    }
-
-    if (uploaded.length > 0) {
-      const res = await authedFetch('/api/materials/upload', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ plan_id: nextPlanId, items: uploaded }),
-      })
-      const json = await res.json().catch(() => ({} as any))
-      console.log('Materials upload response', json)
-      if (!res.ok) throw new Error(json?.error ?? 'Upload failed')
-    }
-  }
-
-  async function fetchStatus(nextPlanId: string) {
-    const res = await authedFetch(`/api/materials/status?planId=${encodeURIComponent(nextPlanId)}`)
-    const json = await res.json().catch(() => ({} as any))
-    if (!res.ok) throw new Error(json?.error ?? 'Failed to load materials status')
-    const items = Array.isArray(json?.items) ? json.items : []
-    setMaterials(items)
-    return items as Array<{ id: string; status: string; error?: string | null }>
-  }
-
-  async function kickProcessing(nextPlanId: string) {
-    const res = await authedFetch(`/api/materials/process?planId=${encodeURIComponent(nextPlanId)}`, { method: 'POST' })
-    const json = await res.json().catch(() => ({} as any))
-    if (!res.ok) throw new Error(json?.error ?? 'Failed to process materials')
   }
 
   async function generate() {
     setError(null)
-    if (prompt.trim().length > 150) {
-      setError('Prompt too long (max 150 characters).')
+    if (prompt.trim().length > MAX_PROMPT_CHARS) {
+      setError(`Prompt too long (max ${MAX_PROMPT_CHARS} characters).`)
       return
     }
     if (files.length > MAX_IMAGES) {
       setError(`You can upload up to ${MAX_IMAGES} files.`)
       return
     }
-    const cost = 1
-    if (credits != null && credits < cost) {
-      setError(`Not enough credits. This will cost ${cost} credits.`)
-      return
-    }
+    const cost = CREDITS_PER_GENERATION
     setLoading(true)
     setIsGenerating(true)
     try {
-      const nextPlanId = planId || crypto.randomUUID()
-      if (!planId) setPlanId(nextPlanId)
-
-      if (files.length > 0 && materials.length === 0) {
-        await uploadMaterials(nextPlanId)
-        await fetchStatus(nextPlanId)
-      }
-
-      // Process pending materials with bounded loop
-      const start = Date.now()
-      while (true) {
-        const items = await fetchStatus(nextPlanId)
-        const pending = items.filter((x) => x.status === 'uploaded' || x.status === 'processing')
-        if (pending.length === 0) break
-        await kickProcessing(nextPlanId)
-        if (Date.now() - start > 120_000) {
-          setError('Processing timed out. Generating with available materials.')
-          break
-        }
-        await new Promise((r) => setTimeout(r, 1200))
-      }
-
+      await uploadMaterials()
       const form = new FormData()
       const promptToSend =
         prompt.trim() ||
         (files.length > 0 ? 'Create structured study notes and a study plan based on the uploaded materials.' : '')
       form.append('prompt', promptToSend)
-      form.append('planId', nextPlanId)
       form.append('required_credits', String(cost))
+      for (const f of files.slice(0, MAX_IMAGES)) {
+        const file = f.type.startsWith('image/') ? await compressImage(f) : f
+        form.append('files', file)
+      }
 
       const res = await authedFetch('/api/plan', { method: 'POST', body: form })
       let json = await res.json().catch(() => ({} as any))
-      if (res.status === 202) {
-        setError(`Processing materials… (${json?.processed ?? 0}/${json?.total ?? 0})`)
-        const start2 = Date.now()
-        let shouldRetry = false
-        while (Date.now() - start2 < 60_000) {
-          await kickProcessing(nextPlanId)
-          const items = await fetchStatus(nextPlanId)
-          const processed = items.filter((x) => x.status === 'processed').length
-          const pending = items.filter((x) => x.status === 'uploaded' || x.status === 'processing')
-          if (processed > 0) {
-            shouldRetry = true
-            break
-          }
-          if (pending.length === 0) {
-            shouldRetry = true
-            break
-          }
-          await new Promise((r) => setTimeout(r, 2000))
-        }
-        if (shouldRetry) {
-          const retry = await authedFetch('/api/plan', { method: 'POST', body: form })
-          json = await retry.json().catch(() => ({} as any))
-          if (!retry.ok) {
-            const message = json?.details || json?.error || json?.message
-            throw new Error(message ?? `Generation failed (${retry.status})`)
-          }
-        } else {
-          throw new Error('Processing materials timed out. Please try again.')
-        }
-      } else if (!res.ok) {
+      if (!res.ok) {
         const code = json?.error || json?.code
         let message = json?.details || json?.error || json?.message
         if (code === 'SERVER_CANT_READ_CREDITS') {
           message = "Server can't read credits (env/RLS)."
+        } else if (code === 'PLANS_SCHEMA_MISMATCH') {
+          message = 'Server plans table schema mismatch. Run latest migrations.'
         } else if (code === 'INSUFFICIENT_CREDITS') {
           message = 'Not enough credits.'
         } else if (code === 'UNAUTHENTICATED') {
@@ -504,6 +374,15 @@ function Inner() {
 
       await loadPlan(serverId)
       await loadHistory(userId)
+      if (userId) {
+        authedFetch('/api/me')
+          .then((res) => res.json())
+          .then((json2) => {
+            const c2 = Number(json2?.entitlement?.credits)
+            setCredits(Number.isFinite(c2) ? c2 : null)
+          })
+          .catch(() => setCredits(null))
+      }
     } catch (e: any) {
       setError(e?.message ?? 'Error')
     } finally {
@@ -560,15 +439,16 @@ function Inner() {
 
   const displayTitle = result?.title?.trim() ? result.title : 'Study plan'
   const displayInput = shortPrompt(prompt)
-  const failedCount = materials.filter((m) => m.status === 'failed').length
+  const creditsOk = credits == null ? true : credits >= 1
   const canGenerate =
     !loading &&
     !isGenerating &&
-    prompt.trim().length <= 150 &&
+    creditsOk &&
+    prompt.trim().length <= MAX_PROMPT_CHARS &&
     files.length <= MAX_IMAGES &&
     (prompt.trim().length >= 6 || files.length > 0)
   const summaryText = (result?.notes?.bullets ?? []).join(' • ')
-  const costEstimate = 1
+  const costEstimate = CREDITS_PER_GENERATION
   const pomodoroPlan = useMemo<DayPlan[]>(() => {
     if (!result) return []
     const daysRaw = Array.isArray(result.daily?.schedule) ? result.daily.schedule : []
@@ -637,9 +517,9 @@ function Inner() {
             onChange={(e) => setPrompt(e.target.value)}
             placeholder="What’s your exam about? When is it? What material do you have?"
             className="mt-3 min-h-[110px]"
-            maxLength={150}
+            maxLength={MAX_PROMPT_CHARS}
           />
-          <div className="mt-2 text-xs text-white/60">{promptChars}/150</div>
+          <div className="mt-2 text-xs text-white/60">{promptChars}/{MAX_PROMPT_CHARS}</div>
 
           <label className="mt-3 flex cursor-pointer items-center justify-between gap-3 rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm text-white/70 hover:bg-white/10">
             <span className="inline-flex items-center gap-2">
@@ -660,11 +540,6 @@ function Inner() {
                   setFiles(next)
                 }
                 setError(null)
-                setMaterials([])
-                setProcessedFiles(0)
-                setTotalFiles(0)
-                setPlanId(null)
-                pendingGenerateRef.current = false
               }}
             />
           </label>
@@ -673,27 +548,7 @@ function Inner() {
           <div className="mt-2 text-xs text-white/60">
             This will cost {costEstimate} credit.
           </div>
-          {isGenerating && totalFiles > 0 ? (
-            <div className="mt-2 text-xs text-white/60">
-              Processing {processedFiles}/{totalFiles}…
-              {failedCount > 0 ? ` (${failedCount} failed)` : ''}
-            </div>
-          ) : null}
-          {materials.length > 0 ? (
-            <div className="mt-2 space-y-1 text-xs text-white/60">
-                  {materials.map((m, i) => (
-                    <div key={m.id}>
-                      File {i + 1}: {m.status}
-                      {m.status === 'failed' && m.error ? ` — ${m.error}` : ''}
-                    </div>
-                  ))}
-            </div>
-          ) : null}
-          {failedCount > 0 ? (
-            <div className="mt-2 text-xs text-yellow-400">
-              Some files failed to process. You can still generate using the available materials.
-            </div>
-          ) : null}
+          {!creditsOk ? <div className="mt-2 text-xs text-red-400">Insufficient credits.</div> : null}
 
           <Button className="mt-4 w-full" onClick={generate} disabled={!canGenerate}>
             {loading ? (

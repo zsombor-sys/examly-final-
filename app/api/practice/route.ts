@@ -6,6 +6,7 @@ import { supabaseAdmin } from '@/lib/supabaseServer'
 import { getPlan, updatePlan } from '@/app/api/plan/store'
 import { TABLE_PLANS } from '@/lib/dbTables'
 import { throwIfMissingTable } from '@/lib/supabaseErrors'
+import { OPENAI_MODEL } from '@/lib/limits'
 
 export const runtime = 'nodejs'
 
@@ -212,7 +213,7 @@ export async function POST(req: Request) {
     if (!apiKey) return NextResponse.json({ error: 'OPENAI_KEY_MISSING' }, { status: 500 })
 
     const client = new OpenAI({ apiKey })
-    const model = process.env.OPENAI_MODEL || 'gpt-4.1'
+    const model = OPENAI_MODEL
     const system = [
       'Return ONLY valid JSON matching the schema. No markdown or extra text.',
       'Generate at least 12 questions total.',

@@ -28,7 +28,7 @@ export type ProfileRow = {
   updated_at?: string
 }
 
-export const STARTER_CREDITS = 5
+export const STARTER_CREDITS = 20
 export const PRO_CREDITS_PER_PURCHASE = 20
 export const PRO_AMOUNT_HUF = 3490
 export const PRO_CURRENCY = 'huf'

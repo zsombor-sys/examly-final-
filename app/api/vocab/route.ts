@@ -4,6 +4,7 @@ import { consumeGeneration } from '@/lib/creditsServer'
 import { supabaseAdmin } from '@/lib/supabaseServer'
 import OpenAI from 'openai'
 import { z } from 'zod'
+import { OPENAI_MODEL } from '@/lib/limits'
 
 export const runtime = 'nodejs'
 
@@ -176,7 +177,7 @@ export async function POST(req: Request) {
     }
 
     const openai = new OpenAI({ apiKey })
-    const model = process.env.OPENAI_MODEL || 'gpt-4.1'
+    const model = OPENAI_MODEL
 
     // If there are many images, do OCR in batches, then build the final set from text.
     let extractedText = ''

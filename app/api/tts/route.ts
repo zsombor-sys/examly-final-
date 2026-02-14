@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server'
 import { requireUser } from '@/lib/authServer'
 import { consumeGeneration } from '@/lib/creditsServer'
 import OpenAI from 'openai'
+import { OPENAI_MODEL } from '@/lib/limits'
 
 export const runtime = 'nodejs'
 
@@ -27,7 +28,7 @@ export async function POST(req: Request) {
 
     const voice = String(body?.voice ?? 'alloy')
     const format = (String(body?.format ?? 'mp3') === 'wav' ? 'wav' : 'mp3') as 'mp3' | 'wav'
-    const model = process.env.OPENAI_MODEL || 'gpt-4.1'
+    const model = OPENAI_MODEL
 
     const openai = new OpenAI({ apiKey })
 

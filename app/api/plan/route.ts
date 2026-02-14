@@ -4,22 +4,19 @@ import { requireUser } from '@/lib/authServer'
 import OpenAI from 'openai'
 import { getPlan, upsertPlanInMemory } from '@/app/api/plan/store'
 import { assertAdminEnv, supabaseAdmin } from '@/lib/supabaseAdmin'
-import { MAX_IMAGES, getCredits, chargeCredits } from '@/lib/credits'
+import { CREDITS_PER_GENERATION, MAX_IMAGES, MAX_OUTPUT_CHARS, MAX_PROMPT_CHARS, OPENAI_MODEL } from '@/lib/limits'
+import { getCredits, chargeCredits } from '@/lib/credits'
 import { TABLE_PLANS } from '@/lib/dbTables'
 import { throwIfMissingTable } from '@/lib/supabaseErrors'
 
 export const runtime = 'nodejs'
 export const maxDuration = 300
 
-const MODEL = process.env.OPENAI_MODEL || 'gpt-4.1'
+const MODEL = OPENAI_MODEL
 const MAX_OUTPUT_TOKENS = 1200
-const MAX_PROMPT_CHARS = 150
-const MAX_OUTPUT_CHARS = 4000
 
 const planRequestSchema = z.object({
   prompt: z.string().max(MAX_PROMPT_CHARS).optional().default(''),
-  planId: z.string().max(128).optional().default(''),
-  required_credits: z.number().int().min(0).max(1).optional().nullable(),
 })
 
 const PlanResultSchema = z.object({
@@ -134,10 +131,6 @@ const planResultJsonSchema = {
 }
 
 
-function isImage(name: string, type: string) {
-  return type.startsWith('image/') || /\.(png|jpg|jpeg|webp)$/i.test(name)
-}
-
 async function withTimeout<T>(ms: number, fn: (signal: AbortSignal) => Promise<T>) {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), ms)
@@ -152,6 +145,7 @@ async function withTimeout<T>(ms: number, fn: (signal: AbortSignal) => Promise<T
 async function parsePlanRequest(req: Request) {
   const contentType = req.headers.get('content-type') || ''
   let raw: any = null
+  let files: File[] = []
 
   if (contentType.includes('application/json')) {
     raw = await req.json().catch(() => null)
@@ -159,17 +153,12 @@ async function parsePlanRequest(req: Request) {
     const form = await req.formData()
     raw = {
       prompt: form.get('prompt'),
-      planId: form.get('planId'),
     }
+    files = form.getAll('files').filter((f): f is File => f instanceof File)
   }
 
   const input = {
     prompt: raw?.prompt != null ? String(raw.prompt) : '',
-    planId: raw?.planId != null ? String(raw.planId) : '',
-    required_credits:
-      raw?.required_credits != null && String(raw.required_credits).trim() !== ''
-        ? Number(raw.required_credits)
-        : null,
   }
 
   if (input.prompt.length > MAX_PROMPT_CHARS) {
@@ -181,12 +170,15 @@ async function parsePlanRequest(req: Request) {
     return { ok: false as const, error: parsed.error }
   }
 
+  if (files.length > MAX_IMAGES) {
+    return { ok: false as const, error: 'TOO_MANY_FILES' as const }
+  }
+
   return {
     ok: true as const,
     value: {
       prompt: parsed.data.prompt.trim(),
-      planId: parsed.data.planId.trim() || null,
-      requiredCredits: parsed.data.required_credits ?? null,
+      files,
     },
   }
 }
@@ -197,23 +189,11 @@ function detectHungarian(text: string) {
 
 function extractJsonCandidate(text: string) {
   const raw = String(text ?? '')
-  const objStart = raw.indexOf('{')
-  const arrStart = raw.indexOf('[')
-  let start = -1
-  let end = -1
-
-  if (objStart >= 0 && (arrStart < 0 || objStart < arrStart)) {
-    start = objStart
-    end = raw.lastIndexOf('}')
-  } else if (arrStart >= 0) {
-    start = arrStart
-    end = raw.lastIndexOf(']')
-  }
-
-  if (start >= 0 && end > start) {
-    return raw.slice(start, end + 1)
-  }
-  throw new Error('AI_JSON_PARSE_FAILED')
+  const start = raw.indexOf('{')
+  if (start < 0) throw new Error('AI_JSON_PARSE_FAILED')
+  const end = raw.lastIndexOf('}')
+  if (end <= start) throw new Error('AI_JSON_PARSE_FAILED')
+  return raw.slice(start, end + 1)
 }
 
 function safeParseJson(text: string) {
@@ -545,42 +525,6 @@ function minimalPlanPayload(isHu: boolean) {
   })
 }
 
-async function loadMaterialsForPlan(userId: string, planId: string) {
-  const sb = supabaseAdmin
-  const { data, error } = await sb
-    .from('materials')
-    .select('file_path, extracted_text, status, mime_type')
-    .eq('user_id', userId)
-    .eq('plan_id', planId)
-  if (error) throw error
-
-  const items = Array.isArray(data) ? data : []
-  const total = items.length
-  const processed = items.filter((m: any) => m.status === 'processed').length
-  const failed = items.filter((m: any) => m.status === 'failed').length
-  if (total > 0 && processed === 0 && failed === 0) {
-    return { status: 'processing' as const, processed, total }
-  }
-
-  const textParts: string[] = []
-  const fileNames: string[] = []
-  let imageCount = 0
-
-  for (const m of items) {
-    if (isImage(String(m.file_path || ''), typeof m.mime_type === 'string' ? m.mime_type : '')) {
-      imageCount += 1
-    }
-    const path = String(m.file_path || '')
-    const name = path.split('/').pop() || 'file'
-    fileNames.push(name)
-    if (m.status !== 'processed') continue
-    if (m.extracted_text) textParts.push(`--- ${name} ---\n${String(m.extracted_text)}`)
-  }
-
-  const textFromFiles = textParts.join('\n\n').slice(0, 80_000)
-  return { status: 'ready' as const, textFromFiles, fileNames, imageCount, total }
-}
-
 async function setCurrentPlanBestEffort(userId: string, planId: string) {
   try {
     const sb = supabaseAdmin
@@ -593,15 +537,14 @@ async function setCurrentPlanBestEffort(userId: string, planId: string) {
 type SavePlanRow = {
   id: string
   userId: string
-  prompt?: string | null
+  prompt: string
   title: string
-  language?: string | null
+  language: 'hu' | 'en'
   created_at: string
-  result: any
-  model?: string | null
-  materials?: any
-  generationId?: string | null
+  result: PlanPayload
   creditsCharged?: number | null
+  inputChars?: number | null
+  imagesCount?: number | null
 }
 
 async function savePlanToDbBestEffort(row: SavePlanRow) {
@@ -610,52 +553,38 @@ async function savePlanToDbBestEffort(row: SavePlanRow) {
     const payload: Record<string, any> = {
       id: row.id,
       user_id: row.userId,
-      prompt: row.prompt ?? null,
+      prompt: row.prompt,
       title: row.title,
-      language: row.language ?? null,
+      language: row.language,
+      model: OPENAI_MODEL,
       created_at: row.created_at,
-      model: row.model ?? null,
       credits_charged: row.creditsCharged ?? null,
-      generation_id: row.generationId ?? null,
-      materials: row.materials ?? null,
-      result: row.result,
+      input_chars: row.inputChars ?? null,
+      images_count: row.imagesCount ?? null,
+      plan_json: row.result.plan,
+      notes_json: row.result.notes,
+      daily_json: row.result.daily,
+      practice_json: row.result.practice,
     }
     const { error } = await sb.from(TABLE_PLANS).upsert(payload, { onConflict: 'id' })
     if (!error) return
 
     const message = String(error?.message ?? '')
-    if (message.includes('does not exist')) {
-      const fallbackPayload: Record<string, any> = {
-        id: row.id,
-        user_id: row.userId,
-        title: row.title,
-        created_at: row.created_at,
-        result: row.result,
-      }
-      const { error: retryErr } = await sb.from(TABLE_PLANS).upsert(fallbackPayload, { onConflict: 'id' })
-      if (!retryErr) return
-      throw retryErr
+    if (message.includes('does not exist') || message.includes('PGRST204')) {
+      const err: any = new Error(`Schema mismatch on public.plans: ${message}`)
+      err.status = 500
+      throw err
     }
 
     throw error
   } catch (err: any) {
     logSupabaseError('plan.save', err)
-    try {
-      throwIfMissingTable(err, TABLE_PLANS)
-    } catch {
-      upsertPlanInMemory({
-        id: row.id,
-        userId: row.userId,
-        title: row.title,
-        created_at: row.created_at,
-        result: row.result,
-      })
-      return
-    }
+    throwIfMissingTable(err, TABLE_PLANS)
     console.warn('plan.save db failed', {
       id: row.id,
       message: err?.message ?? 'unknown',
     })
+    throw err
   }
 }
 
@@ -675,7 +604,7 @@ export async function GET(req: Request) {
     const sb = supabaseAdmin
     const { data, error } = await sb
       .from(TABLE_PLANS)
-      .select('result, title, language')
+      .select('plan_json, notes_json, daily_json, practice_json, title, language')
       .eq('user_id', user.id)
       .eq('id', id)
       .maybeSingle()
@@ -707,8 +636,16 @@ export async function GET(req: Request) {
       return NextResponse.json({ result: normalizePlanPayload(row.result) }, { headers: { 'cache-control': 'no-store' } })
     }
 
-    if (data.result) {
-      return NextResponse.json({ result: normalizePlanPayload(data.result) }, { headers: { 'cache-control': 'no-store' } })
+    if (data.plan_json && data.notes_json && data.daily_json && data.practice_json) {
+      const result = normalizePlanPayload({
+        title: data.title ?? 'Study plan',
+        language: data.language ?? 'en',
+        plan: data.plan_json,
+        notes: data.notes_json,
+        daily: data.daily_json,
+        practice: data.practice_json,
+      })
+      return NextResponse.json({ result }, { headers: { 'cache-control': 'no-store' } })
     }
 
     return NextResponse.json(
@@ -736,94 +673,52 @@ export async function POST(req: Request) {
 
     const parsedRequest = await parsePlanRequest(req)
     if (!parsedRequest.ok) {
-    if (parsedRequest.error === 'PROMPT_TOO_LONG') {
+      if (parsedRequest.error === 'TOO_MANY_FILES') {
+        return NextResponse.json(
+          { error: 'TOO_MANY_FILES', message: 'Too many files' },
+          { status: 400, headers: { 'cache-control': 'no-store' } }
+        )
+      }
+      if (parsedRequest.error === 'PROMPT_TOO_LONG') {
+        return NextResponse.json(
+          { code: 'PROMPT_TOO_LONG', message: 'Prompt too long (max 150 characters).' },
+          { status: 400, headers: { 'cache-control': 'no-store' } }
+        )
+      }
+      const issues = parsedRequest.error instanceof z.ZodError ? parsedRequest.error.issues : []
       return NextResponse.json(
-        { code: 'PROMPT_TOO_LONG', message: 'Prompt too long (max 150 characters).' },
+        { code: 'INVALID_REQUEST', message: 'Invalid request', details: issues },
         { status: 400, headers: { 'cache-control': 'no-store' } }
       )
     }
-    const issues = parsedRequest.error instanceof z.ZodError ? parsedRequest.error.issues : []
-    return NextResponse.json(
-      { code: 'INVALID_REQUEST', message: 'Invalid request', details: issues },
-      { status: 400, headers: { 'cache-control': 'no-store' } }
-    )
-  }
 
     const promptRaw = parsedRequest.value.prompt
-    const planId = parsedRequest.value.planId
-    const requiredCredits = parsedRequest.value.requiredCredits
-    const idToUse = planId || crypto.randomUUID()
-
-    // Files are uploaded client-side to Supabase Storage; server downloads by path.
+    const files = parsedRequest.value.files
+    const idToUse = crypto.randomUUID()
 
     const openAiKey = process.env.OPENAI_API_KEY
 
-    let materials = {
-      status: 'ready' as const,
-      textFromFiles: '',
-      fileNames: [] as string[],
-      imageCount: 0,
-      total: 0,
-    }
-    if (planId) {
-      const loaded = await loadMaterialsForPlan(user.id, planId)
-      if (loaded.status === 'processing') {
-        console.log('plan.generate materials processing', {
-          requestId,
-          planId,
-          total: loaded.total,
-          processed: loaded.processed,
-        })
-        return NextResponse.json({ status: 'processing', processed: loaded.processed, total: loaded.total }, { status: 202 })
-      }
-      materials = loaded
-    }
-
-    if (materials.total > MAX_IMAGES) {
+    const imageFiles = files.filter((f) => f.type.startsWith('image/'))
+    if (imageFiles.length > MAX_IMAGES) {
       return NextResponse.json(
-        { code: 'TOO_MANY_FILES', message: 'Too many files' },
+        { error: 'TOO_MANY_FILES', message: 'Too many files' },
         { status: 400, headers: { 'cache-control': 'no-store' } }
       )
     }
 
     const prompt =
       promptRaw.trim() ||
-      (materials.fileNames.length ? 'Create structured study notes and a study plan based on the uploaded materials.' : '')
+      (imageFiles.length ? 'Create structured study notes and a study plan based on the uploaded materials.' : '')
+    const isHu = detectHungarian(prompt)
 
-    cost = 1
-    if (requiredCredits != null && requiredCredits !== cost) {
-      return NextResponse.json(
-        { code: 'REQUIRED_CREDITS_MISMATCH', message: 'Required credits mismatch', required: cost },
-        { status: 400, headers: { 'cache-control': 'no-store' } }
-      )
-    }
+    cost = CREDITS_PER_GENERATION
 
     console.log('plan.generate start', {
       requestId,
-      planId: planId || idToUse,
-      files: materials.total,
-      images: materials.imageCount,
-      extracted_chars: materials.textFromFiles.length,
-      imageCount: materials.imageCount,
+      planId: idToUse,
+      files: imageFiles.length,
+      images: imageFiles.length,
       creditsRequired: cost,
-    })
-
-    await savePlanToDbBestEffort({
-      id: idToUse,
-      userId: user.id,
-      prompt,
-      title: 'Generating plan',
-      language: null,
-      created_at: new Date().toISOString(),
-      result: null,
-      generationId: requestId,
-      creditsCharged: cost,
-      model: MODEL,
-      materials: {
-        fileNames: materials.fileNames,
-        total: materials.total,
-        imageCount: materials.imageCount,
-      },
     })
 
     if (cost > 0) {
@@ -865,24 +760,6 @@ export async function POST(req: Request) {
           { status: 500, headers: { 'cache-control': 'no-store' } }
         )
       }
-
-      await savePlanToDbBestEffort({
-        id: idToUse,
-        userId: user.id,
-        prompt,
-        title: 'Generating plan',
-        language: null,
-        created_at: new Date().toISOString(),
-        result: null,
-        generationId: requestId,
-        creditsCharged: cost,
-        model: MODEL,
-        materials: {
-          fileNames: materials.fileNames,
-          total: materials.total,
-          imageCount: materials.imageCount,
-        },
-      })
       console.log('plan.generate credits_charged', {
         requestId,
         planId: idToUse,
@@ -891,7 +768,7 @@ export async function POST(req: Request) {
     }
 
     if (!openAiKey) {
-      const fallback = fallbackPlanPayload(prompt, materials.fileNames, detectHungarian(prompt))
+      const fallback = fallbackPlanPayload(prompt, imageFiles.map((f) => f.name), isHu)
       await savePlanToDbBestEffort({
         id: idToUse,
         userId: user.id,
@@ -900,14 +777,9 @@ export async function POST(req: Request) {
         language: fallback.language,
         created_at: new Date().toISOString(),
         result: fallback,
-        generationId: requestId,
         creditsCharged: cost,
-        model: MODEL,
-        materials: {
-          fileNames: materials.fileNames,
-          total: materials.total,
-          imageCount: materials.imageCount,
-        },
+        inputChars: prompt.length,
+        imagesCount: imageFiles.length,
       })
       await setCurrentPlanBestEffort(user.id, idToUse)
       return NextResponse.json({ id: idToUse }, { headers: { 'cache-control': 'no-store', 'x-examly-plan': 'mock' } })
@@ -915,9 +787,6 @@ export async function POST(req: Request) {
 
     const client = new OpenAI({ apiKey: openAiKey })
     const model = MODEL
-    const extractedText = String(materials.textFromFiles || '').slice(0, 8000)
-    const isHu = detectHungarian(prompt) || detectHungarian(extractedText)
-
     const systemText = [
       'Return ONLY valid JSON matching the schema. No markdown. No prose. No extra keys.',
       `Language: ${isHu ? 'Hungarian' : 'English'} (use "hu" or "en" in the language field).`,
@@ -932,23 +801,29 @@ export async function POST(req: Request) {
       `Language: ${isHu ? 'Hungarian' : 'English'} (use "hu" or "en" in the language field).`,
       'Keep strings concise. Notes bullets short; practice answers short.',
       'Plan 4-6 blocks, daily schedule 3 days, practice 10 Q&A.',
+      'Repair JSON if needed.',
       'If information is missing, make reasonable assumptions and still fill all fields.',
     ].join('\n')
     const userText = [
       `Prompt:\n${prompt || '(empty)'}`,
-      `File names:\n${materials.fileNames.join(', ') || '(none)'}`,
-      `Extracted text:\n${extractedText || '(none)'}`,
+      `File names:\n${imageFiles.map((f) => f.name).join(', ') || '(none)'}`,
       'Schema: title, language, plan.blocks[{title,duration_minutes,description}], notes.bullets[], daily.schedule[{day,focus,tasks}], practice.questions[{q,a}]',
     ].join('\n\n')
 
     const callModel = async (system: string) => {
+      const content: any[] = [{ type: 'text', text: userText }]
+      for (const file of imageFiles) {
+        const buf = Buffer.from(await file.arrayBuffer())
+        const b64 = buf.toString('base64')
+        content.push({ type: 'image_url', image_url: { url: `data:${file.type};base64,${b64}` } })
+      }
       const resp = await withTimeout(45_000, (signal) =>
         client.chat.completions.create(
           {
             model,
             messages: [
               { role: 'system', content: system },
-              { role: 'user', content: userText },
+              { role: 'user', content: content as any },
             ],
             temperature: 0.2,
             max_tokens: MAX_OUTPUT_TOKENS,
@@ -986,7 +861,7 @@ export async function POST(req: Request) {
     }
 
     planPayload.notes.bullets = ensureNotesWordCount(planPayload.notes.bullets, 5, isHu)
-    const fallback = fallbackPlanPayload(prompt, materials.fileNames, isHu)
+    const fallback = fallbackPlanPayload(prompt, imageFiles.map((f) => f.name), isHu)
     if (planPayload.plan.blocks.length < 4) {
       planPayload.plan.blocks = fallback.plan.blocks
     }
@@ -1018,14 +893,9 @@ export async function POST(req: Request) {
       language: plan.language,
       created_at: new Date().toISOString(),
       result: plan,
-      generationId: requestId,
       creditsCharged: cost,
-      model,
-      materials: {
-        fileNames: materials.fileNames,
-        total: materials.total,
-        imageCount: materials.imageCount,
-      },
+      inputChars: prompt.length,
+      imagesCount: imageFiles.length,
     })
     await setCurrentPlanBestEffort(user.id, idToUse)
 
@@ -1042,10 +912,22 @@ export async function POST(req: Request) {
       message: e?.message,
       stack: e?.stack,
     })
+    if (String(e?.message || '').includes('SERVER_MISCONFIGURED')) {
+      return NextResponse.json(
+        { error: 'SERVER_MISCONFIGURED', message: e?.message ?? 'Server misconfigured' },
+        { status: 500, headers: { 'cache-control': 'no-store' } }
+      )
+    }
     if (Number(e?.status) === 401 || Number(e?.status) === 403) {
       return NextResponse.json(
         { error: 'UNAUTHENTICATED' },
         { status: 401, headers: { 'cache-control': 'no-store' } }
+      )
+    }
+    if (String(e?.message || '').includes('Schema mismatch on public.plans')) {
+      return NextResponse.json(
+        { error: 'PLANS_SCHEMA_MISMATCH', message: String(e?.message || 'Schema mismatch') },
+        { status: 500, headers: { 'cache-control': 'no-store' } }
       )
     }
     const details = String(e?.message || 'Server error').slice(0, 300)

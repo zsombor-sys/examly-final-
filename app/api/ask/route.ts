@@ -3,6 +3,7 @@ import { requireUser } from '@/lib/authServer'
 import { consumeGeneration } from '@/lib/creditsServer'
 import OpenAI from 'openai'
 import { z } from 'zod'
+import { OPENAI_MODEL } from '@/lib/limits'
 
 export const runtime = 'nodejs'
 
@@ -63,7 +64,7 @@ Language:
 - If language is Hungarian, answer in Hungarian.
 - If language is English, answer in English.`
 
-    const model = process.env.OPENAI_MODEL || 'gpt-4.1'
+    const model = OPENAI_MODEL
 
     const resp = await openai.chat.completions.create({
       model,

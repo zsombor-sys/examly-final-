@@ -4,6 +4,7 @@ import { requireUser } from '@/lib/authServer'
 import { consumeGeneration } from '@/lib/creditsServer'
 import OpenAI from 'openai'
 import { z } from 'zod'
+import { OPENAI_MODEL } from '@/lib/limits'
 
 export const runtime = 'nodejs'
 
@@ -137,7 +138,7 @@ Rules:
       `User request:\n${prompt}\n\n` +
       `Guidelines:\n- 15-20 questions (minimum 15)\n- Mix MCQ and short answer\n- Provide answers and explanations\n- duration_minutes 15-25 unless user specifies`
 
-    const model = process.env.OPENAI_MODEL || 'gpt-4.1'
+    const model = OPENAI_MODEL
 
     const resp = await openai.chat.completions.create({
       model,

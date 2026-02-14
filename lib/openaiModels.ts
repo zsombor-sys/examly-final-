@@ -1,4 +1,6 @@
+import { OPENAI_MODEL } from '@/lib/limits'
+
 export function getOpenAIModels() {
-  const model = process.env.OPENAI_MODEL || 'gpt-4.1'
+  const model = OPENAI_MODEL
   return { visionModel: model, textModel: model }
 }

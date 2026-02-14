@@ -1,8 +1,8 @@
-export const MAX_IMAGES = 7
+import { CREDITS_PER_GENERATION, MAX_IMAGES } from '@/lib/limits'
 
 export function creditsForImages(n: number) {
-  if (n <= 0) return 1
-  if (n <= MAX_IMAGES) return 1
+  if (n <= 0) return CREDITS_PER_GENERATION
+  if (n <= MAX_IMAGES) return CREDITS_PER_GENERATION
   throw new Error('MAX_IMAGES_EXCEEDED')
 }
 
@@ -14,7 +14,7 @@ export async function getCredits(userId: string) {
   if (!userId) throw new Error('Missing user id')
   const { createServerClient } = await import('@/lib/supabase/server')
   const sb = createServerClient()
-  const { data, error } = await sb.from('user_credits').select('credits').eq('user_id', userId).maybeSingle()
+  const { data, error } = await sb.from('profiles').select('credits').eq('id', userId).maybeSingle()
   if (error) throw error
   return Number(data?.credits ?? 0)
 }
@@ -23,7 +23,7 @@ export async function chargeCredits(userId: string, amount = 1) {
   if (!userId) throw new Error('Missing user id')
   const { createServerClient } = await import('@/lib/supabase/server')
   const sb = createServerClient()
-  const { data: row, error: selErr } = await sb.from('user_credits').select('credits').eq('user_id', userId).maybeSingle()
+  const { data: row, error: selErr } = await sb.from('profiles').select('credits').eq('id', userId).maybeSingle()
   if (selErr) throw selErr
   const current = Number(row?.credits ?? 0)
   if (current < amount) {
@@ -33,9 +33,9 @@ export async function chargeCredits(userId: string, amount = 1) {
     throw err
   }
   const { data: updated, error: updErr } = await sb
-    .from('user_credits')
+    .from('profiles')
     .update({ credits: current - amount })
-    .eq('user_id', userId)
+    .eq('id', userId)
     .gte('credits', amount)
     .select('credits')
     .maybeSingle()

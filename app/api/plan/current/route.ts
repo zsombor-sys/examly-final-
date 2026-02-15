@@ -8,10 +8,22 @@ export async function GET(req: Request) {
   try {
     const user = await requireUser(req)
     const sb = supabaseAdmin()
-    const { data, error } = await sb.from('profiles').select('current_plan_id').eq('id', user.id).maybeSingle()
+    const { data, error } = await sb
+      .from('plans')
+      .select('id')
+      .eq('user_id', user.id)
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .maybeSingle()
     if (error) throw error
+    if (!data?.id) {
+      return NextResponse.json(
+        { error: 'NOT_FOUND' },
+        { status: 404, headers: { 'cache-control': 'no-store' } }
+      )
+    }
     return NextResponse.json(
-      { current_plan_id: data?.current_plan_id ?? null },
+      { current_plan_id: data.id },
       { headers: { 'cache-control': 'no-store' } }
     )
   } catch (e: any) {

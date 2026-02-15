@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server'
 import { requireUser } from '@/lib/authServer'
 import { entitlementSnapshot, ensureProfileFromUser, getOrCreateProfile, maybeGrantStarterCredits } from '@/lib/creditsServer'
-import { createServiceSupabase } from '@/lib/supabaseServer'
+import { createServerAdminClient } from '@/lib/supabase/server'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -18,8 +18,8 @@ export async function GET(req: Request) {
 
     const profile = await getOrCreateProfile(user.id)
     const ent = entitlementSnapshot(profile as any)
-    const sb = createServiceSupabase()
-    const { data: userRow, error: userErr } = await sb.from('users').select('credits').eq('id', user.id).maybeSingle()
+    const sb = createServerAdminClient()
+    const { data: userRow, error: userErr } = await sb.from('profiles').select('credits').eq('id', user.id).maybeSingle()
     if (userErr) throw userErr
     const credits = Number(userRow?.credits ?? ent.credits ?? 0)
 

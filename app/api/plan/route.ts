@@ -3,7 +3,7 @@ import { z } from 'zod'
 import { requireUser } from '@/lib/authServer'
 import OpenAI from 'openai'
 import { getPlan, upsertPlanInMemory } from '@/app/api/plan/store'
-import { assertServiceEnv, createServiceSupabase } from '@/lib/supabaseServer'
+import { createServerAdminClient } from '@/lib/supabase/server'
 import { CREDITS_PER_GENERATION, MAX_IMAGES, MAX_OUTPUT_CHARS, MAX_PROMPT_CHARS, OPENAI_MODEL } from '@/lib/limits'
 import { getCredits, chargeCredits, refundCredits } from '@/lib/credits'
 import { TABLE_PLANS } from '@/lib/dbTables'
@@ -540,7 +540,7 @@ function minimalPlanPayload(isHu: boolean) {
 
 async function setCurrentPlanBestEffort(userId: string, planId: string) {
   try {
-    const sb = createServiceSupabase()
+    const sb = createServerAdminClient()
     await sb.from('plan_current').upsert({ user_id: userId, plan_id: planId }, { onConflict: 'user_id' })
   } catch {
     // ignore
@@ -567,7 +567,7 @@ type SavePlanRow = {
 
 async function savePlanToDbBestEffort(row: SavePlanRow) {
   try {
-    const sb = createServiceSupabase()
+    const sb = createServerAdminClient()
     const basePayload: Record<string, any> = {
       id: row.id,
       user_id: row.userId,
@@ -634,7 +634,7 @@ export async function GET(req: Request) {
       )
     }
 
-    const sb = createServiceSupabase()
+    const sb = createServerAdminClient()
     const { data, error } = await sb
       .from(TABLE_PLANS)
       .select('plan_json, notes_json, daily_json, practice_json, title, language')
@@ -695,7 +695,6 @@ export async function GET(req: Request) {
 
 /** POST /api/plan : generate + SAVE + set current */
 export async function POST(req: Request) {
-  assertServiceEnv()
   const requestId = crypto.randomUUID()
   let cost = 0
   let userId: string | null = null

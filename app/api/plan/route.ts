@@ -638,7 +638,7 @@ export async function GET(req: Request) {
     const id = searchParams.get('id')
     if (!id) {
       return NextResponse.json(
-        { code: 'MISSING_ID', message: 'Missing id' },
+        { error: 'MISSING_ID' },
         { status: 400, headers: { 'cache-control': 'no-store' } }
       )
     }
@@ -646,7 +646,7 @@ export async function GET(req: Request) {
     const sb = createServerAdminClient()
     const { data, error } = await sb
       .from(TABLE_PLANS)
-      .select('plan_json, notes_json, daily_json, practice_json, title, language')
+      .select('id, user_id, prompt, language, plan, notes_json, daily_json, practice_json, materials, status, credits_charged, generation_id, created_at, updated_at')
       .eq('user_id', user.id)
       .eq('id', id)
       .maybeSingle()
@@ -656,47 +656,25 @@ export async function GET(req: Request) {
         throwIfMissingTable(error, TABLE_PLANS)
       } catch {
         const row = getPlan(user.id, id)
-        if (row?.result) {
-          return NextResponse.json({ result: normalizePlanPayload(row.result) }, { headers: { 'cache-control': 'no-store' } })
-        }
         return NextResponse.json(
-          { code: 'NOT_FOUND', message: 'Not found' },
-          { status: 404, headers: { 'cache-control': 'no-store' } }
+          { plan: null, error: 'NOT_FOUND' },
+          { status: 200, headers: { 'cache-control': 'no-store' } }
         )
       }
       throw error
     }
 
     if (!data) {
-      const row = getPlan(user.id, id)
-      if (!row) {
-        return NextResponse.json(
-          { code: 'NOT_FOUND', message: 'Not found' },
-          { status: 404, headers: { 'cache-control': 'no-store' } }
-        )
-      }
-      return NextResponse.json({ result: normalizePlanPayload(row.result) }, { headers: { 'cache-control': 'no-store' } })
+      return NextResponse.json(
+        { plan: null, error: 'NOT_FOUND' },
+        { status: 200, headers: { 'cache-control': 'no-store' } }
+      )
     }
 
-    if (data.plan_json && data.notes_json && data.daily_json && data.practice_json) {
-      const result = normalizePlanPayload({
-        title: data.title ?? 'Study plan',
-        language: data.language ?? 'en',
-        plan: data.plan_json,
-        notes: data.notes_json,
-        daily: data.daily_json,
-        practice: data.practice_json,
-      })
-      return NextResponse.json({ result }, { headers: { 'cache-control': 'no-store' } })
-    }
-
-    return NextResponse.json(
-      { code: 'NOT_FOUND', message: 'Plan result missing' },
-      { status: 404, headers: { 'cache-control': 'no-store' } }
-    )
+    return NextResponse.json({ plan: data }, { headers: { 'cache-control': 'no-store' } })
   } catch (e: any) {
     return NextResponse.json(
-      { code: 'PLAN_GET_FAILED', message: e?.message ?? 'Server error' },
+      { error: 'PLAN_GET_FAILED', message: e?.message ?? 'Server error' },
       { status: e?.status ?? 400, headers: { 'cache-control': 'no-store' } }
     )
   }

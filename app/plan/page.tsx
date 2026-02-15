@@ -30,6 +30,16 @@ type PlanResult = {
 
 type SavedPlan = { id: string; title: string; created_at: string }
 type LocalSavedPlan = SavedPlan & { result: PlanResult }
+type PlanRow = {
+  id: string
+  title: string | null
+  language: 'hu' | 'en' | null
+  plan: { blocks?: PlanBlock[] } | null
+  notes_json: { bullets?: string[] } | null
+  daily_json: { schedule?: Array<{ day: number; focus: string; tasks: string[] }> } | null
+  practice_json: { questions?: Array<{ q: string; a: string }> } | null
+  created_at: string | null
+}
 
 function historyKeyForUser(userId: string | null) {
   return userId ? `examly_plans_v1:${userId}` : null
@@ -236,9 +246,36 @@ function Inner() {
       const res = await authedFetch(`/api/plan?id=${encodeURIComponent(id)}`)
       const json = await res.json().catch(() => ({} as any))
       if (!res.ok) throw new Error(json?.error ?? 'Failed to load')
+      if (json?.plan === null && json?.error === 'NOT_FOUND') {
+        const filtered = saved.filter((p) => p.id !== id)
+        setSaved(filtered)
+        if (userId) {
+          const existing = loadLocalPlans(userId).filter((p) => p.id !== id)
+          const key = historyKeyForUser(userId)
+          if (key) window.localStorage.setItem(key, JSON.stringify(existing))
+        }
+        setSelectedId(null)
+        setResult(null)
+        setTab('plan')
+        setError('Plan not found, removed from history')
+        return
+      }
 
-      setSelectedId(id)
-      setResult(json?.result ?? null)
+      const plan = json?.plan as PlanRow | undefined
+      if (plan) {
+        setSelectedId(id)
+        setResult({
+          title: plan.title ?? null,
+          language: plan.language ?? null,
+          plan: plan.plan ?? null,
+          notes_json: plan.notes_json ?? null,
+          daily_json: plan.daily_json ?? null,
+          practice_json: plan.practice_json ?? null,
+        })
+      } else {
+        setSelectedId(id)
+        setResult(json?.result ?? null)
+      }
 
       setAskAnswer(null)
       setAskError(null)

@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server'
 import { requireUser } from '@/lib/authServer'
 import { entitlementSnapshot, ensureProfileFromUser, getOrCreateProfile, maybeGrantStarterCredits } from '@/lib/creditsServer'
+import { createServiceSupabase } from '@/lib/supabaseServer'
 
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
@@ -17,6 +18,10 @@ export async function GET(req: Request) {
 
     const profile = await getOrCreateProfile(user.id)
     const ent = entitlementSnapshot(profile as any)
+    const sb = createServiceSupabase()
+    const { data: userRow, error: userErr } = await sb.from('users').select('credits').eq('id', user.id).maybeSingle()
+    if (userErr) throw userErr
+    const credits = Number(userRow?.credits ?? ent.credits ?? 0)
 
     return NextResponse.json(
       {
@@ -24,7 +29,7 @@ export async function GET(req: Request) {
         profile,
         entitlement: {
           ok: !!ent.ok,
-          credits: Number(ent.credits ?? 0),
+          credits,
         },
       },
       {

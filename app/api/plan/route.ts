@@ -3,9 +3,9 @@ import { z } from 'zod'
 import { requireUser } from '@/lib/authServer'
 import OpenAI from 'openai'
 import { getPlan, upsertPlanInMemory } from '@/app/api/plan/store'
-import { assertAdminEnv, supabaseAdmin } from '@/lib/supabaseAdmin'
+import { assertServiceEnv, createServiceSupabase } from '@/lib/supabaseServer'
 import { CREDITS_PER_GENERATION, MAX_IMAGES, MAX_OUTPUT_CHARS, MAX_PROMPT_CHARS, OPENAI_MODEL } from '@/lib/limits'
-import { getCredits, chargeCredits } from '@/lib/credits'
+import { getCredits, chargeCredits, refundCredits } from '@/lib/credits'
 import { TABLE_PLANS } from '@/lib/dbTables'
 import { throwIfMissingTable } from '@/lib/supabaseErrors'
 
@@ -278,6 +278,19 @@ function enforceTotalChars(payload: PlanPayload): PlanPayload {
     total -= Math.min(curr.length, excess)
   }
 
+  let jsonLen = JSON.stringify(payload).length
+  if (jsonLen <= MAX_OUTPUT_CHARS) return payload
+
+  for (const ref of refs) {
+    if (jsonLen <= MAX_OUTPUT_CHARS) break
+    const curr = ref.get()
+    const excess = jsonLen - MAX_OUTPUT_CHARS
+    if (excess <= 0) break
+    const nextLen = Math.max(0, curr.length - excess)
+    ref.set(curr.slice(0, nextLen))
+    jsonLen = JSON.stringify(payload).length
+  }
+
   return payload
 }
 
@@ -527,7 +540,7 @@ function minimalPlanPayload(isHu: boolean) {
 
 async function setCurrentPlanBestEffort(userId: string, planId: string) {
   try {
-    const sb = supabaseAdmin
+    const sb = createServiceSupabase()
     await sb.from('plan_current').upsert({ user_id: userId, plan_id: planId }, { onConflict: 'user_id' })
   } catch {
     // ignore
@@ -545,12 +558,17 @@ type SavePlanRow = {
   creditsCharged?: number | null
   inputChars?: number | null
   imagesCount?: number | null
+  outputChars?: number | null
+  status?: string | null
+  generationId?: string | null
+  materials?: string[] | null
+  error?: string | null
 }
 
 async function savePlanToDbBestEffort(row: SavePlanRow) {
   try {
-    const sb = supabaseAdmin
-    const payload: Record<string, any> = {
+    const sb = createServiceSupabase()
+    const basePayload: Record<string, any> = {
       id: row.id,
       user_id: row.userId,
       prompt: row.prompt,
@@ -561,22 +579,37 @@ async function savePlanToDbBestEffort(row: SavePlanRow) {
       credits_charged: row.creditsCharged ?? null,
       input_chars: row.inputChars ?? null,
       images_count: row.imagesCount ?? null,
+      output_chars: row.outputChars ?? null,
+      status: row.status ?? null,
+      generation_id: row.generationId ?? null,
+      materials: row.materials ?? null,
+      error: row.error ?? null,
+      plan: row.result.plan,
       plan_json: row.result.plan,
       notes_json: row.result.notes,
       daily_json: row.result.daily,
       practice_json: row.result.practice,
     }
-    const { error } = await sb.from(TABLE_PLANS).upsert(payload, { onConflict: 'id' })
+    const payload = { ...basePayload }
+    const tryUpsert = async (data: Record<string, any>) =>
+      sb.from(TABLE_PLANS).upsert(data, { onConflict: 'id' })
+
+    let { error } = await tryUpsert(payload)
     if (!error) return
 
     const message = String(error?.message ?? '')
-    if (message.includes('does not exist') || message.includes('PGRST204')) {
-      const err: any = new Error(`Schema mismatch on public.plans: ${message}`)
-      err.status = 500
-      throw err
+    if (message.includes('PGRST204') || message.includes('does not exist')) {
+      // Drop missing columns and retry once.
+      for (const key of ['plan_json', 'plan', 'notes_json', 'daily_json', 'practice_json', 'materials', 'generation_id', 'output_chars', 'status', 'error']) {
+        if (message.includes(key)) delete payload[key]
+      }
+      ;({ error } = await tryUpsert(payload))
+      if (!error) return
     }
 
-    throw error
+    const err: any = new Error(`Schema mismatch on public.plans: ${message}`)
+    err.status = 500
+    throw err
   } catch (err: any) {
     logSupabaseError('plan.save', err)
     throwIfMissingTable(err, TABLE_PLANS)
@@ -601,7 +634,7 @@ export async function GET(req: Request) {
       )
     }
 
-    const sb = supabaseAdmin
+    const sb = createServiceSupabase()
     const { data, error } = await sb
       .from(TABLE_PLANS)
       .select('plan_json, notes_json, daily_json, practice_json, title, language')
@@ -662,11 +695,12 @@ export async function GET(req: Request) {
 
 /** POST /api/plan : generate + SAVE + set current */
 export async function POST(req: Request) {
-  assertAdminEnv()
+  assertServiceEnv()
   const requestId = crypto.randomUUID()
   let cost = 0
   let userId: string | null = null
   const startedAt = Date.now()
+  let charged = false
   try {
     const user = await requireUser(req)
     userId = user.id
@@ -751,24 +785,11 @@ export async function POST(req: Request) {
           { status: 402, headers: { 'cache-control': 'no-store' } }
         )
       }
-
-      try {
-        await chargeCredits(user.id, cost)
-      } catch (debitErr: any) {
-        return NextResponse.json(
-          { error: 'SERVER_CANT_READ_CREDITS', hint: 'Check SUPABASE_SERVICE_ROLE_KEY and credit table name' },
-          { status: 500, headers: { 'cache-control': 'no-store' } }
-        )
-      }
-      console.log('plan.generate credits_charged', {
-        requestId,
-        planId: idToUse,
-        credits_charged: cost,
-      })
     }
 
     if (!openAiKey) {
       const fallback = fallbackPlanPayload(prompt, imageFiles.map((f) => f.name), isHu)
+      const outputChars = JSON.stringify(fallback).length
       await savePlanToDbBestEffort({
         id: idToUse,
         userId: user.id,
@@ -780,6 +801,11 @@ export async function POST(req: Request) {
         creditsCharged: cost,
         inputChars: prompt.length,
         imagesCount: imageFiles.length,
+        outputChars,
+        status: 'fallback',
+        generationId: requestId,
+        materials: imageFiles.map((f) => f.name),
+        error: 'OPENAI_KEY_MISSING',
       })
       await setCurrentPlanBestEffort(user.id, idToUse)
       return NextResponse.json({ id: idToUse }, { headers: { 'cache-control': 'no-store', 'x-examly-plan': 'mock' } })
@@ -844,19 +870,23 @@ export async function POST(req: Request) {
 
     let planPayload: PlanPayload
     let rawOutput = ''
+    let parseOk = false
     try {
       rawOutput = await callModel(systemText)
       const parsed = safeParseJson(rawOutput)
       planPayload = normalizePlanPayload(validateOrThrow(parsed))
+      parseOk = true
     } catch {
       try {
         rawOutput = await callModel(shortSystemText)
         const parsed = safeParseJson(rawOutput)
         planPayload = normalizePlanPayload(validateOrThrow(parsed))
+        parseOk = true
       } catch {
         const snippet = rawOutput.slice(0, 500)
         console.error('plan.generate json_parse_failed', { requestId, planId: idToUse, raw: snippet })
         planPayload = minimalPlanPayload(isHu)
+        parseOk = false
       }
     }
 
@@ -884,6 +914,7 @@ export async function POST(req: Request) {
     }
 
     const plan = clampPlanPayload(planPayload)
+    const outputChars = JSON.stringify(plan).length
 
     await savePlanToDbBestEffort({
       id: idToUse,
@@ -893,10 +924,48 @@ export async function POST(req: Request) {
       language: plan.language,
       created_at: new Date().toISOString(),
       result: plan,
-      creditsCharged: cost,
+      creditsCharged: parseOk ? cost : 0,
       inputChars: prompt.length,
       imagesCount: imageFiles.length,
+      outputChars,
+      status: parseOk ? 'complete' : 'fallback',
+      generationId: requestId,
+      materials: imageFiles.map((f) => f.name),
+      error: parseOk ? null : 'AI_JSON_PARSE_FAILED',
     })
+    if (parseOk && cost > 0) {
+      try {
+        await chargeCredits(user.id, cost)
+        charged = true
+      } catch (debitErr: any) {
+        await savePlanToDbBestEffort({
+          id: idToUse,
+          userId: user.id,
+          prompt,
+          title: plan.title,
+          language: plan.language,
+          created_at: new Date().toISOString(),
+          result: plan,
+          creditsCharged: 0,
+          inputChars: prompt.length,
+          imagesCount: imageFiles.length,
+          outputChars,
+          status: 'failed',
+          generationId: requestId,
+          materials: imageFiles.map((f) => f.name),
+          error: 'INSUFFICIENT_CREDITS',
+        })
+        return NextResponse.json(
+          { error: 'INSUFFICIENT_CREDITS' },
+          { status: 402, headers: { 'cache-control': 'no-store' } }
+        )
+      }
+      console.log('plan.generate credits_charged', {
+        requestId,
+        planId: idToUse,
+        credits_charged: cost,
+      })
+    }
     await setCurrentPlanBestEffort(user.id, idToUse)
 
     console.log('plan.generate done', {
@@ -912,6 +981,13 @@ export async function POST(req: Request) {
       message: e?.message,
       stack: e?.stack,
     })
+    if (charged && userId) {
+      try {
+        await refundCredits(userId, cost)
+      } catch (refundErr: any) {
+        console.error('plan.generate refund_failed', { requestId, message: refundErr?.message ?? 'unknown' })
+      }
+    }
     if (String(e?.message || '').includes('SERVER_MISCONFIGURED')) {
       return NextResponse.json(
         { error: 'SERVER_MISCONFIGURED', message: e?.message ?? 'Server misconfigured' },

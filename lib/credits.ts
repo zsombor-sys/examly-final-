@@ -12,18 +12,18 @@ export function calcCreditsFromFileCount(n: number) {
 
 export async function getCredits(userId: string) {
   if (!userId) throw new Error('Missing user id')
-  const { createServerClient } = await import('@/lib/supabase/server')
-  const sb = createServerClient()
-  const { data, error } = await sb.from('profiles').select('credits').eq('id', userId).maybeSingle()
+  const { createServiceSupabase } = await import('@/lib/supabaseServer')
+  const sb = createServiceSupabase()
+  const { data, error } = await sb.from('users').select('credits').eq('id', userId).maybeSingle()
   if (error) throw error
   return Number(data?.credits ?? 0)
 }
 
 export async function chargeCredits(userId: string, amount = 1) {
   if (!userId) throw new Error('Missing user id')
-  const { createServerClient } = await import('@/lib/supabase/server')
-  const sb = createServerClient()
-  const { data: row, error: selErr } = await sb.from('profiles').select('credits').eq('id', userId).maybeSingle()
+  const { createServiceSupabase } = await import('@/lib/supabaseServer')
+  const sb = createServiceSupabase()
+  const { data: row, error: selErr } = await sb.from('users').select('credits').eq('id', userId).maybeSingle()
   if (selErr) throw selErr
   const current = Number(row?.credits ?? 0)
   if (current < amount) {
@@ -33,7 +33,7 @@ export async function chargeCredits(userId: string, amount = 1) {
     throw err
   }
   const { data: updated, error: updErr } = await sb
-    .from('profiles')
+    .from('users')
     .update({ credits: current - amount })
     .eq('id', userId)
     .gte('credits', amount)
@@ -46,5 +46,22 @@ export async function chargeCredits(userId: string, amount = 1) {
     err.code = 'INSUFFICIENT_CREDITS'
     throw err
   }
+  return Number(updated?.credits ?? 0)
+}
+
+export async function refundCredits(userId: string, amount = 1) {
+  if (!userId) throw new Error('Missing user id')
+  const { createServiceSupabase } = await import('@/lib/supabaseServer')
+  const sb = createServiceSupabase()
+  const { data: row, error: selErr } = await sb.from('users').select('credits').eq('id', userId).maybeSingle()
+  if (selErr) throw selErr
+  const current = Number(row?.credits ?? 0)
+  const { data: updated, error: updErr } = await sb
+    .from('users')
+    .update({ credits: current + amount })
+    .eq('id', userId)
+    .select('credits')
+    .maybeSingle()
+  if (updErr) throw updErr
   return Number(updated?.credits ?? 0)
 }

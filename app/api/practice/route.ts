@@ -262,9 +262,19 @@ export async function POST(req: Request) {
     updatePlan(user.id, planId, nextResult)
     try {
       const sb = supabaseAdmin()
+      const safePlan = result?.plan ?? {}
+      const safeNotes = result?.notes ?? {}
+      const safeDaily = result?.daily ?? {}
+      const safeLanguage = result?.language ?? 'hu'
       const { error: upErr } = await sb
         .from(TABLE_PLANS)
-        .update({ result: nextResult })
+        .update({
+          practice_json: { questions: practiceQuestions },
+          plan_json: safePlan,
+          notes_json: safeNotes,
+          daily_json: safeDaily,
+          language: safeLanguage,
+        })
         .eq('user_id', user.id)
         .eq('id', planId)
       if (upErr) {

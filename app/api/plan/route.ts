@@ -568,12 +568,16 @@ type SavePlanRow = {
 async function savePlanToDbBestEffort(row: SavePlanRow) {
   try {
     const sb = createServerAdminClient()
+    const safePlan = row.result?.plan ?? {}
+    const safeNotes = row.result?.notes ?? {}
+    const safeDaily = row.result?.daily ?? {}
+    const safePractice = row.result?.practice ?? {}
     const basePayload: Record<string, any> = {
       id: row.id,
       user_id: row.userId,
       prompt: row.prompt,
       title: row.title,
-      language: row.language,
+      language: row.language || 'hu',
       model: OPENAI_MODEL,
       created_at: row.created_at,
       credits_charged: row.creditsCharged ?? null,
@@ -584,11 +588,11 @@ async function savePlanToDbBestEffort(row: SavePlanRow) {
       generation_id: row.generationId ?? null,
       materials: row.materials ?? null,
       error: row.error ?? null,
-      plan: row.result.plan,
-      plan_json: row.result.plan,
-      notes_json: row.result.notes,
-      daily_json: row.result.daily,
-      practice_json: row.result.practice,
+      plan: safePlan,
+      plan_json: safePlan,
+      notes_json: safeNotes,
+      daily_json: safeDaily,
+      practice_json: safePractice,
     }
     const payload = { ...basePayload }
     const tryUpsert = async (data: Record<string, any>) =>
@@ -607,9 +611,14 @@ async function savePlanToDbBestEffort(row: SavePlanRow) {
       if (!error) return
     }
 
-    const err: any = new Error(`Schema mismatch on public.plans: ${message}`)
-    err.status = 500
-    throw err
+    const requiredMissing = ['id', 'user_id'].some((key) => message.includes(key))
+    if (requiredMissing) {
+      const err: any = new Error(`Schema mismatch on public.plans: ${message}`)
+      err.status = 500
+      throw err
+    }
+    console.warn('plan.save schema_mismatch_optional', { message })
+    return
   } catch (err: any) {
     logSupabaseError('plan.save', err)
     throwIfMissingTable(err, TABLE_PLANS)

@@ -22,6 +22,10 @@ type PlanResult = {
   notes?: { bullets?: string[] } | null
   daily?: { schedule?: Array<{ day: number; focus: string; tasks: string[] }> } | null
   practice?: { questions?: Array<{ q: string; a: string }> } | null
+  plan_json?: { blocks?: PlanBlock[] } | null
+  notes_json?: { bullets?: string[] } | null
+  daily_json?: { schedule?: Array<{ day: number; focus: string; tasks: string[] }> } | null
+  practice_json?: { questions?: Array<{ q: string; a: string }> } | null
 }
 
 type SavedPlan = { id: string; title: string; created_at: string }
@@ -447,11 +451,15 @@ function Inner() {
     prompt.trim().length <= MAX_PROMPT_CHARS &&
     files.length <= MAX_IMAGES &&
     (prompt.trim().length >= 6 || files.length > 0)
-  const summaryText = (result?.notes?.bullets ?? []).join(' • ')
+  const summaryText = (result?.notes_json?.bullets ?? result?.notes?.bullets ?? []).join(' • ')
   const costEstimate = CREDITS_PER_GENERATION
   const pomodoroPlan = useMemo<DayPlan[]>(() => {
     if (!result) return []
-    const daysRaw = Array.isArray(result.daily?.schedule) ? result.daily.schedule : []
+    const daysRaw = Array.isArray(result.daily_json?.schedule)
+      ? result.daily_json.schedule
+      : Array.isArray(result.daily?.schedule)
+        ? result.daily.schedule
+        : []
     return daysRaw.map((d) => {
       const tasks = Array.isArray(d.tasks) ? d.tasks.filter(Boolean) : []
       const minutes = Math.max(20, Math.min(180, tasks.length * 30 || 60))
@@ -624,8 +632,10 @@ function Inner() {
                     {summaryText.slice(0, 300)}
                     {summaryText.length > 300 ? '…' : ''}
                   </div>
-                  {result?.daily?.schedule?.[0]?.focus ? (
-                    <div className="mt-3 text-xs text-white/60">Focus: {result.daily.schedule[0].focus}</div>
+                  {(result?.daily_json?.schedule?.[0]?.focus || result?.daily?.schedule?.[0]?.focus) ? (
+                    <div className="mt-3 text-xs text-white/60">
+                      Focus: {(result?.daily_json?.schedule?.[0]?.focus ?? result?.daily?.schedule?.[0]?.focus) || ''}
+                    </div>
                   ) : null}
                 </div>
               )}
@@ -634,9 +644,9 @@ function Inner() {
               {tab === 'notes' && result && (
                 <div className="rounded-3xl border border-white/10 bg-white/[0.02] p-5 min-w-0 overflow-hidden">
                   <div className="text-xs uppercase tracking-[0.18em] text-white/55">Notes</div>
-                  {(result.notes?.bullets ?? []).length > 0 ? (
+                  {(result.notes_json?.bullets ?? result.notes?.bullets ?? []).length > 0 ? (
                     <div className="mt-4 space-y-2 text-sm text-white/70">
-                      {(result.notes?.bullets ?? []).map((kp, i) => (
+                      {(result.notes_json?.bullets ?? result.notes?.bullets ?? []).map((kp, i) => (
                         <div key={`${kp}-${i}`} className="rounded-xl border border-white/10 bg-black/30 px-3 py-2">
                           {kp}
                         </div>
@@ -657,7 +667,7 @@ function Inner() {
                     <section className="w-full rounded-3xl border border-white/10 bg-white/[0.02] p-5 min-w-0 overflow-hidden">
                       <div className="text-xs uppercase tracking-[0.18em] text-white/55">Daily schedule</div>
                       <div className="mt-3 space-y-4 text-sm text-white/80">
-                        {(result.daily?.schedule ?? []).map((d) => (
+                        {(result.daily_json?.schedule ?? result.daily?.schedule ?? []).map((d) => (
                           <div key={`day-${d.day}`} className="rounded-2xl border border-white/10 bg-black/30 px-4 py-3">
                             <div className="text-white/90">Day {d.day}: {d.focus}</div>
                             <div className="mt-2 space-y-1 text-white/70">
@@ -676,7 +686,7 @@ function Inner() {
               {/* PRACTICE */}
               {tab === 'practice' && result && (
                 <div className="space-y-6 min-w-0">
-                  {(result.practice?.questions ?? []).map((q, qi) => (
+                  {(result.practice_json?.questions ?? result.practice?.questions ?? []).map((q, qi) => (
                     <section
                       key={`${qi}-${q.q}`}
                       className="rounded-3xl border border-white/10 bg-white/[0.02] p-5 min-w-0 overflow-hidden"

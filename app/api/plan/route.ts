@@ -31,26 +31,9 @@ const PlanResultSchema = z.object({
       })
     ),
   }),
-  notes: z.object({
-    bullets: z.array(z.string()),
-  }),
-  daily: z.object({
-    schedule: z.array(
-      z.object({
-        day: z.number(),
-        focus: z.string(),
-        tasks: z.array(z.string()),
-      })
-    ),
-  }),
-  practice: z.object({
-    questions: z.array(
-      z.object({
-        q: z.string(),
-        a: z.string(),
-      })
-    ),
-  }),
+  notes: z.record(z.any()).optional(),
+  daily: z.record(z.any()).optional(),
+  practice: z.record(z.any()).optional(),
 })
 
 const planResultJsonSchema = {
@@ -79,55 +62,11 @@ const planResultJsonSchema = {
       },
       required: ['blocks'],
     },
-    notes: {
-      type: 'object',
-      additionalProperties: false,
-      properties: {
-        bullets: { type: 'array', items: { type: 'string' } },
-      },
-      required: ['bullets'],
-    },
-    daily: {
-      type: 'object',
-      additionalProperties: false,
-      properties: {
-        schedule: {
-          type: 'array',
-          items: {
-            type: 'object',
-            additionalProperties: false,
-            properties: {
-              day: { type: 'number' },
-              focus: { type: 'string' },
-              tasks: { type: 'array', items: { type: 'string' } },
-            },
-            required: ['day', 'focus', 'tasks'],
-          },
-        },
-      },
-      required: ['schedule'],
-    },
-    practice: {
-      type: 'object',
-      additionalProperties: false,
-      properties: {
-        questions: {
-          type: 'array',
-          items: {
-            type: 'object',
-            additionalProperties: false,
-            properties: {
-              q: { type: 'string' },
-              a: { type: 'string' },
-            },
-            required: ['q', 'a'],
-          },
-        },
-      },
-      required: ['questions'],
-    },
+    notes: { type: 'object' },
+    daily: { type: 'object' },
+    practice: { type: 'object' },
   },
-  required: ['title', 'language', 'plan', 'notes', 'daily', 'practice'],
+  required: ['title', 'language', 'plan'],
 }
 
 
@@ -230,7 +169,14 @@ function sanitizeText(text: string) {
     .trim()
 }
 
-type PlanPayload = z.infer<typeof PlanResultSchema>
+type PlanPayload = {
+  title: string
+  language: 'hu' | 'en'
+  plan: { blocks: Array<{ title: string; duration_minutes: number; description: string }> }
+  notes: { bullets: string[] }
+  daily: { schedule: Array<{ day: number; focus: string; tasks: string[] }> }
+  practice: { questions: Array<{ q: string; a: string }> }
+}
 
 function clampText(text: string) {
   const raw = String(text ?? '')
@@ -332,7 +278,7 @@ type PracticeQuestionInput = { q?: string | null; a?: string | null }
 
 function normalizePlanPayload(input: any): PlanPayload {
   const title = sanitizeText(String(input?.title ?? '').trim() || 'Study plan')
-  const language = input?.language === 'hu' ? 'hu' : 'en'
+  const language = input?.language === 'en' ? 'en' : 'hu'
   const planBlocksRaw = Array.isArray(input?.plan?.blocks) ? input.plan.blocks : []
   const planBlocks = planBlocksRaw.map((b: PlanBlockInput) => ({
     title: sanitizeText(String(b?.title ?? '').trim() || 'Block'),
@@ -572,6 +518,7 @@ async function savePlanToDbBestEffort(row: SavePlanRow) {
     const safeNotes = row.result?.notes ?? {}
     const safeDaily = row.result?.daily ?? {}
     const safePractice = row.result?.practice ?? {}
+    const safeMaterials = Array.isArray(row.materials) ? row.materials : []
     const basePayload: Record<string, any> = {
       id: row.id,
       user_id: row.userId,
@@ -580,45 +527,30 @@ async function savePlanToDbBestEffort(row: SavePlanRow) {
       language: row.language || 'hu',
       model: OPENAI_MODEL,
       created_at: row.created_at,
-      credits_charged: row.creditsCharged ?? null,
+      credits_charged: 1,
       input_chars: row.inputChars ?? null,
       images_count: row.imagesCount ?? null,
       output_chars: row.outputChars ?? null,
       status: row.status ?? null,
       generation_id: row.generationId ?? null,
-      materials: row.materials ?? null,
+      materials: safeMaterials,
       error: row.error ?? null,
       plan: safePlan,
-      plan_json: safePlan,
-      notes_json: safeNotes,
+      notes: safeNotes,
       daily_json: safeDaily,
       practice_json: safePractice,
     }
-    const payload = { ...basePayload }
-    const tryUpsert = async (data: Record<string, any>) =>
-      sb.from(TABLE_PLANS).upsert(data, { onConflict: 'id' })
-
-    let { error } = await tryUpsert(payload)
+    const { error } = await sb.from(TABLE_PLANS).upsert(basePayload, { onConflict: 'id' })
     if (!error) return
 
     const message = String(error?.message ?? '')
     if (message.includes('PGRST204') || message.includes('does not exist')) {
-      // Drop missing columns and retry once.
-      for (const key of ['plan_json', 'plan', 'notes_json', 'daily_json', 'practice_json', 'materials', 'generation_id', 'output_chars', 'status', 'error']) {
-        if (message.includes(key)) delete payload[key]
-      }
-      ;({ error } = await tryUpsert(payload))
-      if (!error) return
-    }
-
-    const requiredMissing = ['id', 'user_id'].some((key) => message.includes(key))
-    if (requiredMissing) {
-      const err: any = new Error(`Schema mismatch on public.plans: ${message}`)
+      const err: any = new Error(`PLANS_SCHEMA_MISMATCH: ${message}`)
       err.status = 500
       throw err
     }
-    console.warn('plan.save schema_mismatch_optional', { message })
-    return
+
+    throw error
   } catch (err: any) {
     logSupabaseError('plan.save', err)
     throwIfMissingTable(err, TABLE_PLANS)
@@ -646,7 +578,7 @@ export async function GET(req: Request) {
     const sb = createServerAdminClient()
     const { data, error } = await sb
       .from(TABLE_PLANS)
-      .select('id, user_id, prompt, language, plan, notes_json, daily_json, practice_json, materials, status, credits_charged, generation_id, created_at, updated_at')
+      .select('id, user_id, prompt, language, plan, notes, daily_json, practice_json, materials, status, credits_charged, generation_id, created_at, updated_at')
       .eq('user_id', user.id)
       .eq('id', id)
       .maybeSingle()
@@ -752,8 +684,15 @@ export async function POST(req: Request) {
           credits: null,
           error: { code: creditsErr?.code, message: creditsErr?.message },
         })
+        const message = String(creditsErr?.message || '')
+        if (message.includes('SERVER_MISCONFIGURED')) {
+          return NextResponse.json(
+            { error: message },
+            { status: 500, headers: { 'cache-control': 'no-store' } }
+          )
+        }
         return NextResponse.json(
-          { error: 'SERVER_CANT_READ_CREDITS', hint: 'Check SUPABASE_SERVICE_ROLE_KEY and credit table name' },
+          { error: 'CREDITS_READ_FAILED' },
           { status: 500, headers: { 'cache-control': 'no-store' } }
         )
       }
@@ -767,7 +706,7 @@ export async function POST(req: Request) {
 
       if (creditsAvailable < cost) {
         return NextResponse.json(
-          { error: 'INSUFFICIENT_CREDITS' },
+          { code: 'INSUFFICIENT_CREDITS' },
           { status: 402, headers: { 'cache-control': 'no-store' } }
         )
       }
@@ -856,23 +795,22 @@ export async function POST(req: Request) {
 
     let planPayload: PlanPayload
     let rawOutput = ''
-    let parseOk = false
     try {
       rawOutput = await callModel(systemText)
       const parsed = safeParseJson(rawOutput)
       planPayload = normalizePlanPayload(validateOrThrow(parsed))
-      parseOk = true
     } catch {
       try {
         rawOutput = await callModel(shortSystemText)
         const parsed = safeParseJson(rawOutput)
         planPayload = normalizePlanPayload(validateOrThrow(parsed))
-        parseOk = true
       } catch {
         const snippet = rawOutput.slice(0, 500)
         console.error('plan.generate json_parse_failed', { requestId, planId: idToUse, raw: snippet })
-        planPayload = minimalPlanPayload(isHu)
-        parseOk = false
+        return NextResponse.json(
+          { code: 'AI_JSON_PARSE_FAILED' },
+          { status: 500, headers: { 'cache-control': 'no-store' } }
+        )
       }
     }
 
@@ -910,40 +848,36 @@ export async function POST(req: Request) {
       language: plan.language,
       created_at: new Date().toISOString(),
       result: plan,
-      creditsCharged: parseOk ? cost : 0,
+      creditsCharged: cost,
       inputChars: prompt.length,
       imagesCount: imageFiles.length,
       outputChars,
-      status: parseOk ? 'complete' : 'fallback',
+      status: 'complete',
       generationId: requestId,
       materials: imageFiles.map((f) => f.name),
-      error: parseOk ? null : 'AI_JSON_PARSE_FAILED',
+      error: null,
     })
-    if (parseOk && cost > 0) {
+    if (cost > 0) {
       try {
         await chargeCredits(user.id, cost)
         charged = true
       } catch (debitErr: any) {
-        await savePlanToDbBestEffort({
-          id: idToUse,
-          userId: user.id,
-          prompt,
-          title: plan.title,
-          language: plan.language,
-          created_at: new Date().toISOString(),
-          result: plan,
-          creditsCharged: 0,
-          inputChars: prompt.length,
-          imagesCount: imageFiles.length,
-          outputChars,
-          status: 'failed',
-          generationId: requestId,
-          materials: imageFiles.map((f) => f.name),
-          error: 'INSUFFICIENT_CREDITS',
-        })
+        const message = String(debitErr?.message || '')
+        if (message.includes('INSUFFICIENT_CREDITS')) {
+          return NextResponse.json(
+            { code: 'INSUFFICIENT_CREDITS' },
+            { status: 402, headers: { 'cache-control': 'no-store' } }
+          )
+        }
+        if (message.includes('SERVER_MISCONFIGURED')) {
+          return NextResponse.json(
+            { error: message },
+            { status: 500, headers: { 'cache-control': 'no-store' } }
+          )
+        }
         return NextResponse.json(
-          { error: 'INSUFFICIENT_CREDITS' },
-          { status: 402, headers: { 'cache-control': 'no-store' } }
+          { error: 'CREDITS_CHARGE_FAILED' },
+          { status: 500, headers: { 'cache-control': 'no-store' } }
         )
       }
       console.log('plan.generate credits_charged', {
@@ -986,7 +920,7 @@ export async function POST(req: Request) {
         { status: 401, headers: { 'cache-control': 'no-store' } }
       )
     }
-    if (String(e?.message || '').includes('Schema mismatch on public.plans')) {
+    if (String(e?.message || '').includes('PLANS_SCHEMA_MISMATCH')) {
       return NextResponse.json(
         { error: 'PLANS_SCHEMA_MISMATCH', message: String(e?.message || 'Schema mismatch') },
         { status: 500, headers: { 'cache-control': 'no-store' } }

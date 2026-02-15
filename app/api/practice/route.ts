@@ -270,8 +270,8 @@ export async function POST(req: Request) {
         .from(TABLE_PLANS)
         .update({
           practice_json: { questions: practiceQuestions },
-          plan_json: safePlan,
-          notes_json: safeNotes,
+          plan: safePlan,
+          notes: safeNotes,
           daily_json: safeDaily,
           language: safeLanguage,
         })

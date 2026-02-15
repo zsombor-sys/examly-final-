@@ -23,7 +23,6 @@ type PlanResult = {
   daily?: { schedule?: Array<{ day: number; focus: string; tasks: string[] }> } | null
   practice?: { questions?: Array<{ q: string; a: string }> } | null
   plan_json?: { blocks?: PlanBlock[] } | null
-  notes_json?: { bullets?: string[] } | null
   daily_json?: { schedule?: Array<{ day: number; focus: string; tasks: string[] }> } | null
   practice_json?: { questions?: Array<{ q: string; a: string }> } | null
 }
@@ -35,7 +34,7 @@ type PlanRow = {
   title: string | null
   language: 'hu' | 'en' | null
   plan: { blocks?: PlanBlock[] } | null
-  notes_json: { bullets?: string[] } | null
+  notes: { bullets?: string[] } | null
   daily_json: { schedule?: Array<{ day: number; focus: string; tasks: string[] }> } | null
   practice_json: { questions?: Array<{ q: string; a: string }> } | null
   created_at: string | null
@@ -268,7 +267,7 @@ function Inner() {
           title: plan.title ?? null,
           language: plan.language ?? null,
           plan: plan.plan ?? null,
-          notes_json: plan.notes_json ?? null,
+          notes: plan.notes ?? null,
           daily_json: plan.daily_json ?? null,
           practice_json: plan.practice_json ?? null,
         })
@@ -488,7 +487,7 @@ function Inner() {
     prompt.trim().length <= MAX_PROMPT_CHARS &&
     files.length <= MAX_IMAGES &&
     (prompt.trim().length >= 6 || files.length > 0)
-  const summaryText = (result?.notes_json?.bullets ?? result?.notes?.bullets ?? []).join(' • ')
+  const summaryText = (result?.notes?.bullets ?? []).join(' • ')
   const costEstimate = CREDITS_PER_GENERATION
   const pomodoroPlan = useMemo<DayPlan[]>(() => {
     if (!result) return []
@@ -681,9 +680,9 @@ function Inner() {
               {tab === 'notes' && result && (
                 <div className="rounded-3xl border border-white/10 bg-white/[0.02] p-5 min-w-0 overflow-hidden">
                   <div className="text-xs uppercase tracking-[0.18em] text-white/55">Notes</div>
-                  {(result.notes_json?.bullets ?? result.notes?.bullets ?? []).length > 0 ? (
+                  {(result.notes?.bullets ?? []).length > 0 ? (
                     <div className="mt-4 space-y-2 text-sm text-white/70">
-                      {(result.notes_json?.bullets ?? result.notes?.bullets ?? []).map((kp, i) => (
+                      {(result.notes?.bullets ?? []).map((kp, i) => (
                         <div key={`${kp}-${i}`} className="rounded-xl border border-white/10 bg-black/30 px-3 py-2">
                           {kp}
                         </div>

@@ -515,7 +515,13 @@ async function savePlanToDbBestEffort(row: SavePlanRow) {
   try {
     const sb = createServerAdminClient()
     const safePlan = row.result?.plan ?? {}
-    const safeNotes = typeof row.result?.notes === 'string' ? row.result.notes : ''
+    const notesSource = row.result?.notes as any
+    const safeNotes =
+      typeof notesSource === 'string'
+        ? notesSource
+        : Array.isArray(notesSource?.bullets)
+          ? notesSource.bullets.map((b: string) => String(b || '').trim()).filter(Boolean).join('\n')
+          : ''
     const safeDaily = row.result?.daily ?? {}
     const safePractice = row.result?.practice ?? {}
     const safeMaterials = Array.isArray(row.materials) ? row.materials : []
@@ -537,7 +543,9 @@ async function savePlanToDbBestEffort(row: SavePlanRow) {
       error: row.error ?? null,
       plan: safePlan,
       notes: safeNotes,
+      daily: safeDaily,
       daily_json: safeDaily,
+      practice: safePractice,
       practice_json: safePractice,
     }
     const { error } = await sb.from(TABLE_PLANS).upsert(basePayload, { onConflict: 'id' })
@@ -640,11 +648,11 @@ export async function POST(req: Request) {
         )
       }
       if (parsedRequest.error === 'PROMPT_TOO_LONG') {
-        return NextResponse.json(
-          { error: { code: 'PROMPT_TOO_LONG', message: 'Prompt too long (max 150 characters).' } },
-          { status: 400, headers: { 'cache-control': 'no-store' } }
-        )
-      }
+      return NextResponse.json(
+        { error: { code: 'PROMPT_TOO_LONG', message: 'Prompt too long (max 150 characters).' } },
+        { status: 400, headers: { 'cache-control': 'no-store' } }
+      )
+    }
       const issues = parsedRequest.error instanceof z.ZodError ? parsedRequest.error.issues : []
       return NextResponse.json(
         { error: { code: 'INVALID_REQUEST', message: 'Invalid request', details: issues } },
@@ -721,7 +729,7 @@ export async function POST(req: Request) {
     }
 
     if (!openAiKey) {
-      const fallback = fallbackPlanPayload(prompt, imageFiles.map((f) => f.name), isHu)
+      const fallback = minimalPlanPayload(isHu)
       const outputChars = JSON.stringify(fallback).length
       await savePlanToDbBestEffort({
         id: idToUse,
@@ -817,14 +825,15 @@ export async function POST(req: Request) {
       } catch {
         const snippet = rawOutput.slice(0, 500)
         console.error('plan.generate json_parse_failed', { requestId, planId: idToUse, raw: snippet })
+        const fallback = minimalPlanPayload(isHu)
         await savePlanToDbBestEffort({
           id: idToUse,
           userId: user.id,
           prompt,
-          title: 'Parse failed',
-          language: isHu ? 'hu' : 'en',
+          title: fallback.title,
+          language: fallback.language,
           created_at: new Date().toISOString(),
-          result: minimalPlanPayload(isHu),
+          result: fallback,
           creditsCharged: 0,
           inputChars: prompt.length,
           imagesCount: imageFiles.length,
@@ -835,8 +844,8 @@ export async function POST(req: Request) {
           error: `AI_JSON_PARSE_FAILED: ${snippet}`,
         })
         return NextResponse.json(
-          { error: { code: 'AI_JSON_PARSE_FAILED', message: 'Failed to parse AI JSON' } },
-          { status: 502, headers: { 'cache-control': 'no-store' } }
+          { error: { code: 'AI_JSON_PARSE_FAILED', message: 'Failed to parse AI JSON' }, plan: fallback },
+          { status: 200, headers: { 'cache-control': 'no-store' } }
         )
       }
     }

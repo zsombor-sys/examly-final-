@@ -16,14 +16,9 @@ export async function GET(req: Request) {
       .limit(1)
       .maybeSingle()
     if (error) throw error
-    if (!data?.id) {
-      return NextResponse.json(
-        { error: { code: 'NOT_FOUND', message: 'No plans found' } },
-        { status: 404, headers: { 'cache-control': 'no-store' } }
-      )
-    }
+    const currentPlanId = data?.id ?? null
     return NextResponse.json(
-      { id: data.id, current_plan_id: data.id },
+      { currentPlanId, current_plan_id: currentPlanId, id: currentPlanId },
       { headers: { 'cache-control': 'no-store' } }
     )
   } catch (e: any) {

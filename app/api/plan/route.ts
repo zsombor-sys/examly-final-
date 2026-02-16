@@ -515,19 +515,19 @@ async function savePlanToDbBestEffort(row: SavePlanRow) {
   try {
     const sb = createServerAdminClient()
     const safePlan = row.result?.plan ?? {}
-    const safeNotes = row.result?.notes ?? {}
+    const safeNotes = row.result?.notes ?? ''
     const safeDaily = row.result?.daily ?? {}
     const safePractice = row.result?.practice ?? {}
     const safeMaterials = Array.isArray(row.materials) ? row.materials : []
     const basePayload: Record<string, any> = {
       id: row.id,
       user_id: row.userId,
-      prompt: row.prompt,
+      prompt: row.prompt || '',
       title: row.title,
       language: row.language || 'hu',
       model: OPENAI_MODEL,
       created_at: row.created_at,
-      credits_charged: 1,
+      credits_charged: row.creditsCharged ?? 1,
       input_chars: row.inputChars ?? null,
       images_count: row.imagesCount ?? null,
       output_chars: row.outputChars ?? null,
@@ -570,7 +570,7 @@ export async function GET(req: Request) {
     const id = searchParams.get('id')
     if (!id) {
       return NextResponse.json(
-        { error: 'MISSING_ID' },
+        { error: { code: 'MISSING_ID', message: 'Missing id' } },
         { status: 400, headers: { 'cache-control': 'no-store' } }
       )
     }
@@ -578,7 +578,7 @@ export async function GET(req: Request) {
     const sb = createServerAdminClient()
     const { data, error } = await sb
       .from(TABLE_PLANS)
-      .select('id, user_id, prompt, language, plan, notes, daily_json, practice_json, materials, status, credits_charged, generation_id, created_at, updated_at')
+      .select('id, user_id, prompt, title, language, plan, notes, daily_json, practice_json, materials, status, credits_charged, generation_id, created_at, updated_at')
       .eq('user_id', user.id)
       .eq('id', id)
       .maybeSingle()
@@ -589,7 +589,7 @@ export async function GET(req: Request) {
       } catch {
         const row = getPlan(user.id, id)
         return NextResponse.json(
-          { plan: null, error: 'NOT_FOUND' },
+          { plan: null, error: { code: 'NOT_FOUND', message: 'Not found' } },
           { status: 200, headers: { 'cache-control': 'no-store' } }
         )
       }
@@ -598,15 +598,23 @@ export async function GET(req: Request) {
 
     if (!data) {
       return NextResponse.json(
-        { plan: null, error: 'NOT_FOUND' },
+        { plan: null, error: { code: 'NOT_FOUND', message: 'Not found' } },
         { status: 200, headers: { 'cache-control': 'no-store' } }
       )
     }
 
-    return NextResponse.json({ plan: data }, { headers: { 'cache-control': 'no-store' } })
+    const result = {
+      title: data.title ?? 'Study plan',
+      language: data.language ?? 'hu',
+      plan: data.plan ?? {},
+      notes: data.notes ?? {},
+      daily: data.daily_json ?? {},
+      practice: data.practice_json ?? {},
+    }
+    return NextResponse.json({ plan: data, result }, { headers: { 'cache-control': 'no-store' } })
   } catch (e: any) {
     return NextResponse.json(
-      { error: 'PLAN_GET_FAILED', message: e?.message ?? 'Server error' },
+      { error: { code: 'PLAN_GET_FAILED', message: e?.message ?? 'Server error' } },
       { status: e?.status ?? 400, headers: { 'cache-control': 'no-store' } }
     )
   }
@@ -627,19 +635,19 @@ export async function POST(req: Request) {
     if (!parsedRequest.ok) {
       if (parsedRequest.error === 'TOO_MANY_FILES') {
         return NextResponse.json(
-          { error: 'TOO_MANY_FILES', message: 'Too many files' },
+          { error: { code: 'TOO_MANY_FILES', message: 'Too many files' } },
           { status: 400, headers: { 'cache-control': 'no-store' } }
         )
       }
       if (parsedRequest.error === 'PROMPT_TOO_LONG') {
         return NextResponse.json(
-          { code: 'PROMPT_TOO_LONG', message: 'Prompt too long (max 150 characters).' },
+          { error: { code: 'PROMPT_TOO_LONG', message: 'Prompt too long (max 150 characters).' } },
           { status: 400, headers: { 'cache-control': 'no-store' } }
         )
       }
       const issues = parsedRequest.error instanceof z.ZodError ? parsedRequest.error.issues : []
       return NextResponse.json(
-        { code: 'INVALID_REQUEST', message: 'Invalid request', details: issues },
+        { error: { code: 'INVALID_REQUEST', message: 'Invalid request', details: issues } },
         { status: 400, headers: { 'cache-control': 'no-store' } }
       )
     }
@@ -653,7 +661,7 @@ export async function POST(req: Request) {
     const imageFiles = files.filter((f) => f.type.startsWith('image/'))
     if (imageFiles.length > MAX_IMAGES) {
       return NextResponse.json(
-        { error: 'TOO_MANY_FILES', message: 'Too many files' },
+        { error: { code: 'TOO_MANY_FILES', message: 'Too many files' } },
         { status: 400, headers: { 'cache-control': 'no-store' } }
       )
     }
@@ -687,12 +695,12 @@ export async function POST(req: Request) {
         const message = String(creditsErr?.message || '')
         if (message.includes('SERVER_MISCONFIGURED')) {
           return NextResponse.json(
-            { error: message },
+            { error: { code: 'SERVER_MISCONFIGURED', message } },
             { status: 500, headers: { 'cache-control': 'no-store' } }
           )
         }
         return NextResponse.json(
-          { error: 'CREDITS_READ_FAILED' },
+          { error: { code: 'CREDITS_READ_FAILED', message: 'Credits read failed' } },
           { status: 500, headers: { 'cache-control': 'no-store' } }
         )
       }
@@ -706,7 +714,7 @@ export async function POST(req: Request) {
 
       if (creditsAvailable < cost) {
         return NextResponse.json(
-          { code: 'INSUFFICIENT_CREDITS' },
+          { error: { code: 'INSUFFICIENT_CREDITS', message: 'Not enough credits' } },
           { status: 402, headers: { 'cache-control': 'no-store' } }
         )
       }
@@ -723,17 +731,19 @@ export async function POST(req: Request) {
         language: fallback.language,
         created_at: new Date().toISOString(),
         result: fallback,
-        creditsCharged: cost,
+        creditsCharged: 0,
         inputChars: prompt.length,
         imagesCount: imageFiles.length,
         outputChars,
-        status: 'fallback',
+        status: 'failed',
         generationId: requestId,
         materials: imageFiles.map((f) => f.name),
         error: 'OPENAI_KEY_MISSING',
       })
-      await setCurrentPlanBestEffort(user.id, idToUse)
-      return NextResponse.json({ id: idToUse }, { headers: { 'cache-control': 'no-store', 'x-examly-plan': 'mock' } })
+      return NextResponse.json(
+        { error: { code: 'OPENAI_KEY_MISSING', message: 'Missing OPENAI_API_KEY' } },
+        { status: 500, headers: { 'cache-control': 'no-store' } }
+      )
     }
 
     const client = new OpenAI({ apiKey: openAiKey })
@@ -807,9 +817,26 @@ export async function POST(req: Request) {
       } catch {
         const snippet = rawOutput.slice(0, 500)
         console.error('plan.generate json_parse_failed', { requestId, planId: idToUse, raw: snippet })
+        await savePlanToDbBestEffort({
+          id: idToUse,
+          userId: user.id,
+          prompt,
+          title: 'Parse failed',
+          language: isHu ? 'hu' : 'en',
+          created_at: new Date().toISOString(),
+          result: minimalPlanPayload(isHu),
+          creditsCharged: 0,
+          inputChars: prompt.length,
+          imagesCount: imageFiles.length,
+          outputChars: snippet.length,
+          status: 'failed',
+          generationId: requestId,
+          materials: imageFiles.map((f) => f.name),
+          error: `AI_JSON_PARSE_FAILED: ${snippet}`,
+        })
         return NextResponse.json(
-          { code: 'AI_JSON_PARSE_FAILED' },
-          { status: 500, headers: { 'cache-control': 'no-store' } }
+          { error: { code: 'AI_JSON_PARSE_FAILED', message: 'Failed to parse AI JSON' } },
+          { status: 502, headers: { 'cache-control': 'no-store' } }
         )
       }
     }
@@ -865,18 +892,18 @@ export async function POST(req: Request) {
         const message = String(debitErr?.message || '')
         if (message.includes('INSUFFICIENT_CREDITS')) {
           return NextResponse.json(
-            { code: 'INSUFFICIENT_CREDITS' },
+            { error: { code: 'INSUFFICIENT_CREDITS', message: 'Not enough credits' } },
             { status: 402, headers: { 'cache-control': 'no-store' } }
           )
         }
         if (message.includes('SERVER_MISCONFIGURED')) {
           return NextResponse.json(
-            { error: message },
+            { error: { code: 'SERVER_MISCONFIGURED', message } },
             { status: 500, headers: { 'cache-control': 'no-store' } }
           )
         }
         return NextResponse.json(
-          { error: 'CREDITS_CHARGE_FAILED' },
+          { error: { code: 'CREDITS_CHARGE_FAILED', message: 'Credits charge failed' } },
           { status: 500, headers: { 'cache-control': 'no-store' } }
         )
       }
@@ -893,7 +920,10 @@ export async function POST(req: Request) {
       planId: idToUse,
       elapsed_ms: Date.now() - startedAt,
     })
-    return NextResponse.json({ id: idToUse }, { headers: { 'cache-control': 'no-store', 'x-examly-plan': 'ok' } })
+    return NextResponse.json(
+      { planId: idToUse, plan },
+      { headers: { 'cache-control': 'no-store', 'x-examly-plan': 'ok' } }
+    )
   } catch (e: any) {
     console.error('[plan.error]', {
       requestId,
@@ -910,25 +940,25 @@ export async function POST(req: Request) {
     }
     if (String(e?.message || '').includes('SERVER_MISCONFIGURED')) {
       return NextResponse.json(
-        { error: 'SERVER_MISCONFIGURED', message: e?.message ?? 'Server misconfigured' },
+        { error: { code: 'SERVER_MISCONFIGURED', message: e?.message ?? 'Server misconfigured' } },
         { status: 500, headers: { 'cache-control': 'no-store' } }
       )
     }
     if (Number(e?.status) === 401 || Number(e?.status) === 403) {
       return NextResponse.json(
-        { error: 'UNAUTHENTICATED' },
+        { error: { code: 'UNAUTHENTICATED', message: 'Not authenticated' } },
         { status: 401, headers: { 'cache-control': 'no-store' } }
       )
     }
     if (String(e?.message || '').includes('PLANS_SCHEMA_MISMATCH')) {
       return NextResponse.json(
-        { error: 'PLANS_SCHEMA_MISMATCH', message: String(e?.message || 'Schema mismatch') },
+        { error: { code: 'PLANS_SCHEMA_MISMATCH', message: String(e?.message || 'Schema mismatch') } },
         { status: 500, headers: { 'cache-control': 'no-store' } }
       )
     }
     const details = String(e?.message || 'Server error').slice(0, 300)
     return NextResponse.json(
-      { code: 'PLAN_GENERATE_FAILED', message: details },
+      { error: { code: 'PLAN_GENERATE_FAILED', message: details } },
       { status: 500, headers: { 'cache-control': 'no-store' } }
     )
   }

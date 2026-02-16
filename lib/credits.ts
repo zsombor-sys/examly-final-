@@ -23,30 +23,11 @@ export async function chargeCredits(userId: string, amount = 1) {
   if (!userId) throw new Error('Missing user id')
   const { createServerAdminClient } = await import('@/lib/supabase/server')
   const sb = createServerAdminClient()
-  const { data: row, error: selErr } = await sb.from('profiles').select('credits').eq('id', userId).maybeSingle()
-  if (selErr) throw selErr
-  const current = Number(row?.credits ?? 0)
-  if (current < amount) {
-    const err: any = new Error('INSUFFICIENT_CREDITS')
-    err.status = 402
-    err.code = 'INSUFFICIENT_CREDITS'
-    throw err
-  }
-  const { data: updated, error: updErr } = await sb
-    .from('profiles')
-    .update({ credits: current - amount })
-    .eq('id', userId)
-    .gte('credits', amount)
-    .select('credits')
-    .maybeSingle()
-  if (updErr) throw updErr
-  if (!updated) {
-    const err: any = new Error('INSUFFICIENT_CREDITS')
-    err.status = 402
-    err.code = 'INSUFFICIENT_CREDITS'
-    throw err
-  }
-  return Number(updated?.credits ?? 0)
+  const { error: rpcErr } = await sb.rpc('consume_credits', { user_id: userId, cost: amount })
+  if (rpcErr) throw rpcErr
+  const { data, error } = await sb.from('profiles').select('credits').eq('id', userId).maybeSingle()
+  if (error) throw error
+  return Number(data?.credits ?? 0)
 }
 
 export async function refundCredits(userId: string, amount = 1) {

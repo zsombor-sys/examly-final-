@@ -24,7 +24,7 @@ After running migrations that change tables, reload PostgREST schema:
 select pg_notify('pgrst','reload schema');
 ```
 3) Supabase Dashboard → Settings → API:
-   - Project URL → `NEXT_PUBLIC_SUPABASE_URL`
+   - Project URL → `SUPABASE_URL` (server) or `NEXT_PUBLIC_SUPABASE_URL` (fallback)
    - anon public key → `NEXT_PUBLIC_SUPABASE_ANON_KEY`
    - service_role key → `SUPABASE_SERVICE_ROLE_KEY` (server-only)
 4) Supabase Dashboard → Authentication → Providers → Email:
@@ -60,6 +60,7 @@ See **.env.example**.
 
 Important:
 - `SUPABASE_SERVICE_ROLE_KEY` must be set on Vercel (Server env) and NEVER exposed to the browser.
+- Server accepts `SUPABASE_URL` and falls back to `NEXT_PUBLIC_SUPABASE_URL` if needed.
 - `NEXT_PUBLIC_SITE_URL` should be your final domain so Stripe redirect URLs are correct.
 
 ## Deploy to Vercel

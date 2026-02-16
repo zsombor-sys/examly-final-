@@ -244,8 +244,8 @@ function Inner() {
     try {
       const res = await authedFetch(`/api/plan?id=${encodeURIComponent(id)}`)
       const json = await res.json().catch(() => ({} as any))
-      if (!res.ok) throw new Error(json?.error ?? 'Failed to load')
-      if (json?.plan === null && json?.error === 'NOT_FOUND') {
+      if (!res.ok) throw new Error(json?.error?.message ?? json?.error ?? 'Failed to load')
+      if (json?.plan === null && json?.error?.code === 'NOT_FOUND') {
         const filtered = saved.filter((p) => p.id !== id)
         setSaved(filtered)
         if (userId) {
@@ -391,8 +391,8 @@ function Inner() {
       const res = await authedFetch('/api/plan', { method: 'POST', body: form })
       let json = await res.json().catch(() => ({} as any))
       if (!res.ok) {
-        const code = json?.error || json?.code
-        let message = json?.details || json?.error || json?.message
+        const code = json?.error?.code ?? json?.code ?? json?.error
+        let message = json?.error?.message ?? json?.details ?? json?.message ?? json?.error
         if (code === 'SERVER_CANT_READ_CREDITS') {
           message = "Server can't read credits (env/RLS)."
         } else if (code === 'PLANS_SCHEMA_MISMATCH') {
@@ -405,11 +405,11 @@ function Inner() {
         throw new Error(message ?? `Generation failed (${res.status})`)
       }
       if (json?.ok === false) {
-        setError(json?.error || 'Generation failed.')
+        setError(json?.error?.message || json?.error || 'Generation failed.')
         return
       }
 
-      const serverId = typeof json?.id === 'string' ? (json.id as string) : null
+      const serverId = typeof json?.planId === 'string' ? (json.planId as string) : null
       if (!serverId) throw new Error('Server returned no plan id')
 
       await loadPlan(serverId)
@@ -436,7 +436,7 @@ function Inner() {
     try {
       const res = await authedFetch('/api/plan/history', { method: 'DELETE' })
       const json = await res.json().catch(() => ({} as any))
-      if (!res.ok) throw new Error(json?.error ?? 'Failed')
+      if (!res.ok) throw new Error(json?.error?.message ?? json?.error ?? 'Failed')
       setSaved([])
       setSelectedId(null)
       clearLocalPlans(userId)
@@ -467,7 +467,7 @@ function Inner() {
         body: JSON.stringify({ question: q, language: lang }),
       })
       const json = await res.json().catch(() => ({} as any))
-      if (!res.ok) throw new Error(json?.error ?? 'Ask failed')
+      if (!res.ok) throw new Error(json?.error?.message ?? json?.error ?? 'Ask failed')
 
       setAskAnswer(String(json?.display ?? json?.speech ?? ''))
     } catch (e: any) {

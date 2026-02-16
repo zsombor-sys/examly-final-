@@ -19,7 +19,7 @@ type PlanResult = {
   title?: string | null
   language?: 'hu' | 'en' | null
   plan?: { blocks?: PlanBlock[] } | null
-  notes?: { bullets?: string[] } | null
+  notes?: { bullets?: string[] } | string | null
   daily?: { schedule?: Array<{ day: number; focus: string; tasks: string[] }> } | null
   practice?: { questions?: Array<{ q: string; a: string }> } | null
   plan_json?: { blocks?: PlanBlock[] } | null
@@ -34,7 +34,7 @@ type PlanRow = {
   title: string | null
   language: 'hu' | 'en' | null
   plan: { blocks?: PlanBlock[] } | null
-  notes: { bullets?: string[] } | null
+  notes: { bullets?: string[] } | string | null
   daily_json: { schedule?: Array<{ day: number; focus: string; tasks: string[] }> } | null
   practice_json: { questions?: Array<{ q: string; a: string }> } | null
   created_at: string | null
@@ -135,6 +135,17 @@ function shortPrompt(p: string) {
   const t = p.trim().replace(/\s+/g, ' ')
   if (!t) return ''
   return t.length > 120 ? t.slice(0, 120) + '…' : t
+}
+
+function notesToBullets(notes: PlanResult['notes']) {
+  if (!notes) return []
+  if (typeof notes === 'string') {
+    return notes
+      .split(/\n+/)
+      .map((t) => t.trim())
+      .filter(Boolean)
+  }
+  return Array.isArray(notes.bullets) ? notes.bullets.filter(Boolean) : []
 }
 
 export default function PlanPage() {
@@ -487,7 +498,7 @@ function Inner() {
     prompt.trim().length <= MAX_PROMPT_CHARS &&
     files.length <= MAX_IMAGES &&
     (prompt.trim().length >= 6 || files.length > 0)
-  const summaryText = (result?.notes?.bullets ?? []).join(' • ')
+  const summaryText = notesToBullets(result?.notes).join(' • ')
   const costEstimate = CREDITS_PER_GENERATION
   const pomodoroPlan = useMemo<DayPlan[]>(() => {
     if (!result) return []
@@ -680,9 +691,9 @@ function Inner() {
               {tab === 'notes' && result && (
                 <div className="rounded-3xl border border-white/10 bg-white/[0.02] p-5 min-w-0 overflow-hidden">
                   <div className="text-xs uppercase tracking-[0.18em] text-white/55">Notes</div>
-                  {(result.notes?.bullets ?? []).length > 0 ? (
+                  {notesToBullets(result?.notes).length > 0 ? (
                     <div className="mt-4 space-y-2 text-sm text-white/70">
-                      {(result.notes?.bullets ?? []).map((kp, i) => (
+                      {notesToBullets(result?.notes).map((kp, i) => (
                         <div key={`${kp}-${i}`} className="rounded-xl border border-white/10 bg-black/30 px-3 py-2">
                           {kp}
                         </div>

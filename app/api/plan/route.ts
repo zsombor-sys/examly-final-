@@ -515,7 +515,7 @@ async function savePlanToDbBestEffort(row: SavePlanRow) {
   try {
     const sb = createServerAdminClient()
     const safePlan = row.result?.plan ?? {}
-    const safeNotes = row.result?.notes ?? ''
+    const safeNotes = typeof row.result?.notes === 'string' ? row.result.notes : ''
     const safeDaily = row.result?.daily ?? {}
     const safePractice = row.result?.practice ?? {}
     const safeMaterials = Array.isArray(row.materials) ? row.materials : []

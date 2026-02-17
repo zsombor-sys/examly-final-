@@ -17,19 +17,12 @@ const MAX_OUTPUT_TOKENS = 1200
 const GENERATION_COST = 1
 const OPENAI_TIMEOUT_MS = 45_000
 
-type PlanBlock = {
-  id: string
-  title: string
-  description: string
-  duration_minutes: number
-}
-
 type GeneratedResult = {
   title: string
   language: 'hu' | 'en'
-  plan: { blocks: PlanBlock[] }
+  plan: { blocks: Array<{ title: string; description: string; duration_minutes: number }> }
   notes: { content: string }
-  daily: { schedule: Array<{ day: number; focus: string; block_ids: string[] }> }
+  daily: { schedule: Array<{ day: number; focus: string; tasks: string[] }> }
   practice: { questions: Array<{ q: string; a: string }> }
 }
 
@@ -49,16 +42,17 @@ const planSchema = {
       properties: {
         blocks: {
           type: 'array',
+          minItems: 5,
+          maxItems: 7,
           items: {
             type: 'object',
             additionalProperties: false,
             properties: {
-              id: { type: 'string' },
               title: { type: 'string' },
-              description: { type: 'string' },
+              description: { type: 'string', maxLength: 200 },
               duration_minutes: { type: 'integer', minimum: 5, maximum: 120 },
             },
-            required: ['id', 'title', 'description', 'duration_minutes'],
+            required: ['title', 'description', 'duration_minutes'],
           },
         },
       },
@@ -68,7 +62,7 @@ const planSchema = {
       type: 'object',
       additionalProperties: false,
       properties: {
-        content: { type: 'string' },
+        content: { type: 'string', minLength: 3000, maxLength: 4000 },
       },
       required: ['content'],
     },
@@ -78,15 +72,17 @@ const planSchema = {
       properties: {
         schedule: {
           type: 'array',
+          minItems: 3,
+          maxItems: 6,
           items: {
             type: 'object',
             additionalProperties: false,
             properties: {
               day: { type: 'integer', minimum: 1, maximum: 30 },
               focus: { type: 'string' },
-              block_ids: { type: 'array', items: { type: 'string' } },
+              tasks: { type: 'array', items: { type: 'string' } },
             },
-            required: ['day', 'focus', 'block_ids'],
+            required: ['day', 'focus', 'tasks'],
           },
         },
       },
@@ -98,6 +94,8 @@ const planSchema = {
       properties: {
         questions: {
           type: 'array',
+          minItems: 5,
+          maxItems: 8,
           items: {
             type: 'object',
             additionalProperties: false,
@@ -168,20 +166,18 @@ function normalizeResult(input: any, fallback: GeneratedResult): GeneratedResult
   const title = String(input?.title ?? fallback.title).trim() || fallback.title
 
   const rawBlocks = Array.isArray(input?.plan?.blocks) ? input.plan.blocks : []
-  const blocks: PlanBlock[] = rawBlocks.map((b: any, i: number) => ({
-    id: String(b?.id ?? '').trim() || `block-${i + 1}`,
+  const blocks = rawBlocks.map((b: any, i: number) => ({
     title: String(b?.title ?? '').trim() || `Block ${i + 1}`,
-    description: String(b?.description ?? '').trim() || 'Study block',
+    description: String(b?.description ?? '').trim().slice(0, 200) || 'Study block',
     duration_minutes: Math.max(5, Math.min(120, Number(b?.duration_minutes ?? 25) || 25)),
   }))
 
-  const knownIds = new Set(blocks.map((b) => b.id))
   const rawSchedule = Array.isArray(input?.daily?.schedule) ? input.daily.schedule : []
   const schedule = rawSchedule.map((d: any, i: number) => ({
     day: Math.max(1, Math.min(30, Number(d?.day ?? i + 1) || i + 1)),
     focus: String(d?.focus ?? '').trim() || `Day ${i + 1}`,
-    block_ids: Array.isArray(d?.block_ids)
-      ? d.block_ids.map((x: any) => String(x ?? '').trim()).filter((x: string) => knownIds.has(x))
+    tasks: Array.isArray(d?.tasks)
+      ? d.tasks.map((x: any) => String(x ?? '').trim()).filter(Boolean)
       : [],
   }))
 
@@ -243,8 +239,23 @@ async function callOpenAI(prompt: string, images: File[], isHu: boolean) {
         {
           type: 'input_text',
           text:
-            'Return valid JSON only. Follow schema exactly. No markdown. No extra keys. '
-            + `Language: ${isHu ? 'Hungarian' : 'English'}.`,
+            'You are an academic study planner AI.\n'
+            + 'Return STRICT VALID JSON only.\n'
+            + 'No markdown.\n'
+            + 'No explanations outside JSON.\n'
+            + 'No code fences.\n'
+            + `Language: ${isHu ? 'Hungarian' : 'English'}.\n\n`
+            + 'GOAL:\n'
+            + '- PLAN: concise, structured, short descriptions\n'
+            + '- NOTES: detailed, structured, 3000-4000 characters\n'
+            + '- DAILY: short structured schedule\n'
+            + '- PRACTICE: 5-8 quality practice questions with short solutions\n\n'
+            + 'RULES:\n'
+            + '1) PLAN: 5-7 blocks max, each description max 200 chars, duration_minutes required.\n'
+            + '2) NOTES: 3000-4000 chars, deep explanation, definitions, step-by-step examples, important formulas, key mistakes, use paragraph + bullet style inside text.\n'
+            + '3) DAILY: 3-6 days, short titles.\n'
+            + '4) PRACTICE: 5-8 problems with short solution outline.\n'
+            + 'Follow the JSON schema exactly.',
         },
       ],
     },
@@ -255,7 +266,7 @@ async function callOpenAI(prompt: string, images: File[], isHu: boolean) {
           type: 'input_text',
           text:
             `Prompt: ${prompt || '(empty)'}\n` +
-            'Generate: title, language, plan blocks, notes.content, daily.schedule with block_ids, practice.questions.',
+            'Generate: title, language, plan.blocks, notes.content, daily.schedule with tasks, practice.questions.',
         },
       ],
     },

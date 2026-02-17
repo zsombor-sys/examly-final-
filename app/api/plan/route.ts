@@ -5,7 +5,6 @@ import OpenAI from 'openai'
 import { getPlan, upsertPlanInMemory } from '@/app/api/plan/store'
 import { createServerAdminClient } from '@/lib/supabase/server'
 import { CREDITS_PER_GENERATION, MAX_IMAGES, MAX_OUTPUT_CHARS, MAX_PROMPT_CHARS, OPENAI_MODEL } from '@/lib/limits'
-import { getCredits, chargeCredits, refundCredits } from '@/lib/credits'
 import { TABLE_PLANS } from '@/lib/dbTables'
 import { throwIfMissingTable } from '@/lib/supabaseErrors'
 
@@ -128,6 +127,19 @@ function detectHungarian(text: string) {
 
 function extractJsonCandidate(text: string) {
   const raw = String(text ?? '')
+  const fenced = raw.match(/```json\s*([\s\S]*?)```/i)
+  if (fenced?.[1]?.trim()) return fenced[1].trim()
+
+  const anyFence = raw.match(/```\s*([\s\S]*?)```/i)
+  if (anyFence?.[1]?.trim()) {
+    const inner = anyFence[1].trim()
+    if (inner.includes('{') && inner.includes('}')) {
+      const innerStart = inner.indexOf('{')
+      const innerEnd = inner.lastIndexOf('}')
+      if (innerEnd > innerStart) return inner.slice(innerStart, innerEnd + 1)
+    }
+  }
+
   const start = raw.indexOf('{')
   if (start < 0) throw new Error('AI_JSON_PARSE_FAILED')
   const end = raw.lastIndexOf('}')
@@ -641,13 +653,10 @@ export async function GET(req: Request) {
 /** POST /api/plan : generate + SAVE + set current */
 export async function POST(req: Request) {
   const requestId = crypto.randomUUID()
-  let cost = 0
-  let userId: string | null = null
+  const cost = CREDITS_PER_GENERATION
   const startedAt = Date.now()
-  let charged = false
   try {
     const user = await requireUser(req)
-    userId = user.id
 
     const parsedRequest = await parsePlanRequest(req)
     if (!parsedRequest.ok) {
@@ -689,8 +698,6 @@ export async function POST(req: Request) {
       (imageFiles.length ? 'Create structured study notes and a study plan based on the uploaded materials.' : '')
     const isHu = detectHungarian(prompt)
 
-    cost = CREDITS_PER_GENERATION
-
     console.log('plan.generate start', {
       requestId,
       planId: idToUse,
@@ -698,45 +705,6 @@ export async function POST(req: Request) {
       images: imageFiles.length,
       creditsRequired: cost,
     })
-
-    if (cost > 0) {
-      let creditsAvailable = 0
-      try {
-        creditsAvailable = await getCredits(user.id)
-      } catch (creditsErr: any) {
-        console.log('plan.generate credits_lookup', {
-          userId: user.id,
-          requiredCredits: cost,
-          credits: null,
-          error: { code: creditsErr?.code, message: creditsErr?.message },
-        })
-        const message = String(creditsErr?.message || '')
-        if (message.includes('SERVER_MISCONFIGURED')) {
-          return NextResponse.json(
-            { error: { code: 'SERVER_MISCONFIGURED', message } },
-            { status: 500, headers: { 'cache-control': 'no-store' } }
-          )
-        }
-        return NextResponse.json(
-          { error: { code: 'CREDITS_READ_FAILED', message: 'Credits read failed' } },
-          { status: 500, headers: { 'cache-control': 'no-store' } }
-        )
-      }
-
-      console.log('plan.generate credits_lookup', {
-        userId: user.id,
-        requiredCredits: cost,
-        credits: creditsAvailable,
-        error: null,
-      })
-
-      if (creditsAvailable < cost) {
-        return NextResponse.json(
-          { error: { code: 'INSUFFICIENT_CREDITS', message: 'Not enough credits' } },
-          { status: 402, headers: { 'cache-control': 'no-store' } }
-        )
-      }
-    }
 
     if (!openAiKey) {
       const fallback = minimalPlanPayload(isHu)
@@ -762,6 +730,29 @@ export async function POST(req: Request) {
         { error: { code: 'OPENAI_KEY_MISSING', message: 'Missing OPENAI_API_KEY' } },
         { status: 500, headers: { 'cache-control': 'no-store' } }
       )
+    }
+
+    if (cost > 0) {
+      const sb = createServerAdminClient()
+      const { error: rpcErr } = await sb.rpc('consume_credits', { user_id: user.id, cost })
+      if (rpcErr) {
+        const message = String(rpcErr?.message || '')
+        if (message.includes('INSUFFICIENT_CREDITS')) {
+          return NextResponse.json(
+            { error: { code: 'INSUFFICIENT_CREDITS', message: 'Not enough credits' } },
+            { status: 402, headers: { 'cache-control': 'no-store' } }
+          )
+        }
+        return NextResponse.json(
+          { error: { code: 'CREDITS_CHARGE_FAILED', message: 'Credits charge failed' } },
+          { status: 500, headers: { 'cache-control': 'no-store' } }
+        )
+      }
+      console.log('plan.generate credits_charged', {
+        requestId,
+        planId: idToUse,
+        credits_charged: cost,
+      })
     }
 
     const client = new OpenAI({ apiKey: openAiKey })
@@ -884,35 +875,6 @@ export async function POST(req: Request) {
       materials: imageFiles.map((f) => f.name),
       error: parseFallbackMessage,
     })
-    if (cost > 0) {
-      try {
-        await chargeCredits(user.id, cost)
-        charged = true
-      } catch (debitErr: any) {
-        const message = String(debitErr?.message || '')
-        if (message.includes('INSUFFICIENT_CREDITS')) {
-          return NextResponse.json(
-            { error: { code: 'INSUFFICIENT_CREDITS', message: 'Not enough credits' } },
-            { status: 402, headers: { 'cache-control': 'no-store' } }
-          )
-        }
-        if (message.includes('SERVER_MISCONFIGURED')) {
-          return NextResponse.json(
-            { error: { code: 'SERVER_MISCONFIGURED', message } },
-            { status: 500, headers: { 'cache-control': 'no-store' } }
-          )
-        }
-        return NextResponse.json(
-          { error: { code: 'CREDITS_CHARGE_FAILED', message: 'Credits charge failed' } },
-          { status: 500, headers: { 'cache-control': 'no-store' } }
-        )
-      }
-      console.log('plan.generate credits_charged', {
-        requestId,
-        planId: idToUse,
-        credits_charged: cost,
-      })
-    }
     await setCurrentPlanBestEffort(user.id, idToUse)
 
     console.log('plan.generate done', {
@@ -938,13 +900,6 @@ export async function POST(req: Request) {
       message: e?.message,
       stack: e?.stack,
     })
-    if (charged && userId) {
-      try {
-        await refundCredits(userId, cost)
-      } catch (refundErr: any) {
-        console.error('plan.generate refund_failed', { requestId, message: refundErr?.message ?? 'unknown' })
-      }
-    }
     if (String(e?.message || '').includes('SERVER_MISCONFIGURED')) {
       return NextResponse.json(
         { error: { code: 'SERVER_MISCONFIGURED', message: e?.message ?? 'Server misconfigured' } },

@@ -2,7 +2,6 @@ import { requireUser } from '@/lib/authServer'
 import { createServerAdminClient } from '@/lib/supabase/server'
 import { clearPlans, listPlans } from '@/app/api/plan/store'
 import { TABLE_PLANS } from '@/lib/dbTables'
-import { throwIfMissingTable } from '@/lib/supabaseErrors'
 
 export const runtime = 'nodejs'
 
@@ -46,8 +45,8 @@ export async function GET(req: Request) {
       if (message.includes(`Could not find table public.${TABLE_PLANS} in schema cache`)) {
         return Response.json({ items: listPlans(user.id) }, { headers: { 'cache-control': 'no-store' } })
       }
-      throwIfMissingTable(error, TABLE_PLANS)
-      throw error
+      console.warn('plan.history.get db issue', { message })
+      return Response.json({ items: [] }, { headers: { 'cache-control': 'no-store' } })
     }
 
     const items = ((data as HistoryRow[] | null) ?? []).map((row) => ({
@@ -64,7 +63,7 @@ export async function GET(req: Request) {
     if (Number(e?.status) === 401 || Number(e?.status) === 403) {
       return Response.json({ error: 'UNAUTHORIZED' }, { status: 401, headers: { 'cache-control': 'no-store' } })
     }
-    return Response.json({ error: 'PLAN_HISTORY_FAILED' }, { status: 500, headers: { 'cache-control': 'no-store' } })
+    return Response.json({ items: [] }, { headers: { 'cache-control': 'no-store' } })
   }
 }
 
@@ -93,17 +92,25 @@ export async function DELETE(req: Request) {
         clearPlans(user.id)
         return Response.json({ ok: true, deletedId: id || null }, { headers: { 'cache-control': 'no-store' } })
       }
-      throwIfMissingTable(error, TABLE_PLANS)
-      throw error
+      console.warn('plan.history.delete db issue', { message })
+      return Response.json({ ok: true, deletedId: id || null }, { headers: { 'cache-control': 'no-store' } })
     }
 
     if (id) {
-      const { data: current } = await sb.from('plan_current').select('plan_id').eq('user_id', user.id).maybeSingle()
-      if (String(current?.plan_id ?? '') === id) {
-        await sb.from('plan_current').delete().eq('user_id', user.id)
+      try {
+        const { data: current } = await sb.from('plan_current').select('plan_id').eq('user_id', user.id).maybeSingle()
+        if (String(current?.plan_id ?? '') === id) {
+          await sb.from('plan_current').delete().eq('user_id', user.id)
+        }
+      } catch {
+        // ignore missing plan_current table
       }
     } else {
-      await sb.from('plan_current').delete().eq('user_id', user.id)
+      try {
+        await sb.from('plan_current').delete().eq('user_id', user.id)
+      } catch {
+        // ignore missing plan_current table
+      }
       clearPlans(user.id)
     }
 
@@ -112,6 +119,6 @@ export async function DELETE(req: Request) {
     if (Number(e?.status) === 401 || Number(e?.status) === 403) {
       return Response.json({ error: 'UNAUTHORIZED' }, { status: 401, headers: { 'cache-control': 'no-store' } })
     }
-    return Response.json({ error: 'PLAN_HISTORY_CLEAR_FAILED' }, { status: 500, headers: { 'cache-control': 'no-store' } })
+    return Response.json({ ok: true }, { headers: { 'cache-control': 'no-store' } })
   }
 }

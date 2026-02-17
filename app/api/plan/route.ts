@@ -157,10 +157,6 @@ function safeParseJson(text: string) {
   }
 }
 
-function validateOrThrow(obj: unknown) {
-  return PlanResultSchema.parse(obj)
-}
-
 function logSupabaseError(context: string, error: any) {
   console.error('supabase.error', {
     context,
@@ -510,6 +506,27 @@ function minimalPlanPayload(isHu: boolean) {
   })
 }
 
+function fromPlainTextToPlanPayload(rawText: string, prompt: string, fileNames: string[], isHu: boolean): PlanPayload {
+  const text = String(rawText || '').trim()
+  const fallback = fallbackPlanPayload(prompt, fileNames, isHu)
+  const bullets = text
+    .split(/\n+/)
+    .map((line) => sanitizeText(line.replace(/^[-*]\s*/, '').trim()))
+    .filter(Boolean)
+    .slice(0, 12)
+
+  return normalizePlanPayload({
+    title: fallback.title,
+    language: isHu ? 'hu' : 'en',
+    plan: fallback.plan,
+    notes: {
+      bullets: bullets.length > 0 ? bullets : fallback.notes.bullets,
+    },
+    daily: fallback.daily,
+    practice: fallback.practice,
+  })
+}
+
 async function setCurrentPlanBestEffort(userId: string, planId: string) {
   try {
     const sb = createServerAdminClient()
@@ -766,14 +783,6 @@ export async function POST(req: Request) {
       'Practice must include exactly 10 Q&A pairs.',
       'Keep total output under 4000 characters.',
     ].join('\n')
-    const shortSystemText = [
-      'Return ONLY valid JSON matching the schema. No markdown. No prose. No extra keys.',
-      `Language: ${isHu ? 'Hungarian' : 'English'} (use "hu" or "en" in the language field).`,
-      'Keep strings concise. Notes bullets short; practice answers short.',
-      'Plan 4-6 blocks, daily schedule 3 days, practice 10 Q&A.',
-      'Repair JSON if needed.',
-      'If information is missing, make reasonable assumptions and still fill all fields.',
-    ].join('\n')
     const userText = [
       `Prompt:\n${prompt || '(empty)'}`,
       `File names:\n${imageFiles.map((f) => f.name).join(', ') || '(none)'}`,
@@ -781,35 +790,46 @@ export async function POST(req: Request) {
     ].join('\n\n')
 
     const callModel = async (system: string) => {
-      const content: any[] = [{ type: 'text', text: userText }]
+      const userContent: any[] = [{ type: 'input_text', text: userText }]
       for (const file of imageFiles) {
         const buf = Buffer.from(await file.arrayBuffer())
         const b64 = buf.toString('base64')
-        content.push({ type: 'image_url', image_url: { url: `data:${file.type};base64,${b64}` } })
+        userContent.push({ type: 'input_image', image_url: `data:${file.type};base64,${b64}` })
       }
       const resp = await withTimeout(45_000, (signal) =>
-        client.chat.completions.create(
+        client.responses.create(
           {
             model,
-            messages: [
-              { role: 'system', content: system },
-              { role: 'user', content: content as any },
+            input: [
+              { role: 'system', content: [{ type: 'input_text', text: system }] },
+              { role: 'user', content: userContent as any },
             ],
             temperature: 0.2,
-            max_tokens: MAX_OUTPUT_TOKENS,
-            response_format: {
-              type: 'json_schema',
-              json_schema: {
+            max_output_tokens: MAX_OUTPUT_TOKENS,
+            text: {
+              format: {
+                type: 'json_schema',
                 name: 'study_plan',
                 schema: planResultJsonSchema,
                 strict: true,
               },
             },
           },
-          { signal }
+          { signal } as any
         )
       )
-      return String(resp.choices?.[0]?.message?.content ?? '').trim()
+      console.log('OPENAI RAW RESPONSE:', resp)
+      const outputText = String((resp as any)?.output_text ?? '').trim()
+      if (outputText) return outputText
+      const chunks = Array.isArray((resp as any)?.output) ? (resp as any).output : []
+      const parts: string[] = []
+      for (const item of chunks) {
+        const content = Array.isArray(item?.content) ? item.content : []
+        for (const c of content) {
+          if (typeof c?.text === 'string') parts.push(c.text)
+        }
+      }
+      return parts.join('\n').trim()
     }
 
     let planPayload: PlanPayload
@@ -817,19 +837,38 @@ export async function POST(req: Request) {
     let rawOutput = ''
     try {
       rawOutput = await callModel(systemText)
-      const parsed = safeParseJson(rawOutput)
-      planPayload = normalizePlanPayload(validateOrThrow(parsed))
-    } catch {
-      try {
-        rawOutput = await callModel(shortSystemText)
-        const parsed = safeParseJson(rawOutput)
-        planPayload = normalizePlanPayload(validateOrThrow(parsed))
-      } catch {
-        const snippet = rawOutput.slice(0, 500)
-        console.error('plan.generate json_parse_failed', { requestId, planId: idToUse, raw: snippet })
-        parseFallbackMessage = `AI_JSON_PARSE_FAILED: ${snippet}`
+      if (!rawOutput) {
+        parseFallbackMessage = 'AI_EMPTY_OUTPUT'
         planPayload = minimalPlanPayload(isHu)
+      } else {
+        try {
+          const parsed = safeParseJson(rawOutput)
+          const validated = PlanResultSchema.safeParse(parsed)
+          planPayload = validated.success
+            ? normalizePlanPayload(validated.data)
+            : normalizePlanPayload(parsed)
+        } catch {
+          console.warn('plan.generate json_parse_failed_plain_text_fallback', {
+            requestId,
+            planId: idToUse,
+            raw: rawOutput.slice(0, 500),
+          })
+          parseFallbackMessage = 'AI_JSON_PARSE_FAILED_PLAIN_TEXT_WRAPPED'
+          planPayload = fromPlainTextToPlanPayload(
+            rawOutput,
+            prompt,
+            imageFiles.map((f) => f.name),
+            isHu
+          )
+        }
       }
+    } catch (openAiErr: any) {
+      const msg = String(openAiErr?.message || 'OpenAI call failed').slice(0, 300)
+      console.error('plan.generate openai_failed', { requestId, planId: idToUse, message: msg })
+      return NextResponse.json(
+        { error: { code: 'OPENAI_CALL_FAILED', message: msg } },
+        { status: 500, headers: { 'cache-control': 'no-store' } }
+      )
     }
 
     planPayload.notes.bullets = ensureNotesWordCount(planPayload.notes.bullets, 5, isHu)

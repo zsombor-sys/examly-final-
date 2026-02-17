@@ -5,12 +5,12 @@ import { requireUser } from '@/lib/authServer'
 import { createServerAdminClient } from '@/lib/supabase/server'
 import { getPlan, upsertPlanInMemory } from '@/app/api/plan/store'
 import { TABLE_PLANS } from '@/lib/dbTables'
-import { CREDITS_PER_GENERATION, MAX_IMAGES, MAX_OUTPUT_CHARS, MAX_PROMPT_CHARS, OPENAI_MODEL } from '@/lib/limits'
+import { CREDITS_PER_GENERATION, MAX_IMAGES, MAX_OUTPUT_CHARS, MAX_PROMPT_CHARS } from '@/lib/limits'
 
 export const runtime = 'nodejs'
 export const maxDuration = 60
 
-const MODEL = OPENAI_MODEL
+const MODEL = 'gpt-4.1'
 const MAX_NOTES_CHARS = MAX_OUTPUT_CHARS
 const MAX_OUTPUT_TOKENS = 1200
 const GENERATION_COST = CREDITS_PER_GENERATION
@@ -18,11 +18,11 @@ const OPENAI_TIMEOUT_MS = 45_000
 
 type GeneratedResult = {
   title: string
-  language: 'hu' | 'en'
+  language: string
   plan: { blocks: Array<{ title: string; description: string; duration_minutes: number }> }
   notes: { content: string }
   daily: { schedule: Array<{ day: number; focus: string; tasks: string[] }> }
-  practice: { questions: Array<{ q: string; a: string }> }
+  practice: { questions: Array<{ question: string; answer: string; explanation: string }> }
 }
 
 const requestSchema = z.object({
@@ -34,7 +34,7 @@ const planSchema = {
   additionalProperties: false,
   properties: {
     title: { type: 'string' },
-    language: { type: 'string', enum: ['hu', 'en'] },
+    language: { type: 'string' },
     plan: {
       type: 'object',
       additionalProperties: false,
@@ -47,8 +47,8 @@ const planSchema = {
             additionalProperties: false,
             properties: {
               title: { type: 'string' },
-              description: { type: 'string', maxLength: 200 },
-              duration_minutes: { type: 'integer', minimum: 5, maximum: 120 },
+              description: { type: 'string' },
+              duration_minutes: { type: 'number' },
             },
             required: ['title', 'description', 'duration_minutes'],
           },
@@ -70,13 +70,11 @@ const planSchema = {
       properties: {
         schedule: {
           type: 'array',
-          minItems: 3,
-          maxItems: 6,
           items: {
             type: 'object',
             additionalProperties: false,
             properties: {
-              day: { type: 'integer', minimum: 1, maximum: 30 },
+              day: { type: 'number' },
               focus: { type: 'string' },
               tasks: { type: 'array', items: { type: 'string' } },
             },
@@ -92,16 +90,15 @@ const planSchema = {
       properties: {
         questions: {
           type: 'array',
-          minItems: 5,
-          maxItems: 8,
           items: {
             type: 'object',
             additionalProperties: false,
             properties: {
-              q: { type: 'string' },
-              a: { type: 'string' },
+              question: { type: 'string' },
+              answer: { type: 'string' },
+              explanation: { type: 'string' },
             },
-            required: ['q', 'a'],
+            required: ['question', 'answer', 'explanation'],
           },
         },
       },
@@ -110,6 +107,41 @@ const planSchema = {
   },
   required: ['title', 'language', 'plan', 'notes', 'daily', 'practice'],
 } as const
+
+const generatedResultSchema = z.object({
+  title: z.string(),
+  language: z.string(),
+  plan: z.object({
+    blocks: z.array(
+      z.object({
+        title: z.string(),
+        description: z.string(),
+        duration_minutes: z.number(),
+      }).strict()
+    ).max(6),
+  }).strict(),
+  notes: z.object({
+    content: z.string(),
+  }).strict(),
+  daily: z.object({
+    schedule: z.array(
+      z.object({
+        day: z.number(),
+        focus: z.string(),
+        tasks: z.array(z.string()),
+      }).strict()
+    ),
+  }).strict(),
+  practice: z.object({
+    questions: z.array(
+      z.object({
+        question: z.string(),
+        answer: z.string(),
+        explanation: z.string(),
+      }).strict()
+    ),
+  }).strict(),
+}).strict()
 
 function detectHungarian(text: string) {
   return /\bhu\b|magyar|szia|tetel|vizsga|erettsegi/i.test(text)
@@ -120,85 +152,34 @@ function truncateNotes(text: string) {
   return raw.length > MAX_NOTES_CHARS ? raw.slice(0, MAX_NOTES_CHARS) : raw
 }
 
-function fallbackResult(prompt: string, isHu: boolean): GeneratedResult {
-  const title = prompt.trim().slice(0, 80) || (isHu ? 'Tanulasi terv' : 'Study plan')
-  return {
-    title,
-    language: isHu ? 'hu' : 'en',
-    plan: { blocks: [] },
-    notes: { content: isHu ? 'Nincs jegyzet generalva (hiba). Probald ujra.' : 'No notes were generated (error). Please try again.' },
-    daily: { schedule: [] },
-    practice: { questions: [] },
-  }
-}
-
-function safeJsonParse(text: string): any {
-  const raw = String(text ?? '').trim()
-  if (!raw) throw new Error('EMPTY_OUTPUT')
-  try {
-    return JSON.parse(raw)
-  } catch {
-    try {
-      const first = JSON.parse(raw)
-      if (typeof first === 'string') return JSON.parse(first)
-      throw new Error('NOT_STRING')
-    } catch {
-      const start = raw.indexOf('{')
-      const end = raw.lastIndexOf('}')
-      if (start >= 0 && end > start) {
-        const sliced = raw.slice(start, end + 1)
-        try {
-          return JSON.parse(sliced)
-        } catch {
-          const first = JSON.parse(JSON.stringify(sliced))
-          return JSON.parse(first)
-        }
-      }
-      throw new Error('JSON_PARSE_FAILED')
-    }
-  }
-}
-
-function normalizeResult(input: any, fallback: GeneratedResult): GeneratedResult {
-  const language: 'hu' | 'en' = input?.language === 'en' ? 'en' : 'hu'
-  const title = String(input?.title ?? fallback.title).trim() || fallback.title
-
-  const rawBlocks = Array.isArray(input?.plan?.blocks) ? input.plan.blocks : []
-  const blocks = rawBlocks.map((b: any, i: number) => ({
-    title: String(b?.title ?? '').trim() || `Block ${i + 1}`,
-    description: String(b?.description ?? '').trim().slice(0, 200) || 'Study block',
-    duration_minutes: Math.max(5, Math.min(120, Number(b?.duration_minutes ?? 25) || 25)),
-  }))
-
-  const rawSchedule = Array.isArray(input?.daily?.schedule) ? input.daily.schedule : []
-  const schedule = rawSchedule.map((d: any, i: number) => ({
-    day: Math.max(1, Math.min(30, Number(d?.day ?? i + 1) || i + 1)),
-    focus: String(d?.focus ?? '').trim() || `Day ${i + 1}`,
-    tasks: Array.isArray(d?.tasks)
-      ? d.tasks.map((x: any) => String(x ?? '').trim()).filter(Boolean)
-      : [],
-  }))
-
-  const notesRaw =
-    typeof input?.notes?.content === 'string'
-      ? input.notes.content
-      : typeof input?.notes === 'string'
-        ? input.notes
-        : fallback.notes.content
-
-  const rawQuestions = Array.isArray(input?.practice?.questions) ? input.practice.questions : []
-  const questions = rawQuestions.map((q: any) => ({
-    q: String(q?.q ?? '').trim() || 'Question',
-    a: String(q?.a ?? '').trim() || 'Answer',
-  }))
+function normalizeResult(input: unknown): GeneratedResult {
+  const parsed = generatedResultSchema.parse(input)
 
   return {
-    title,
-    language,
-    plan: { blocks },
-    notes: { content: truncateNotes(String(notesRaw ?? fallback.notes.content)) },
-    daily: { schedule },
-    practice: { questions },
+    title: parsed.title.trim() || 'Study plan',
+    language: parsed.language.trim() || 'en',
+    plan: {
+      blocks: parsed.plan.blocks.slice(0, 6).map((b, i) => ({
+        title: b.title.trim() || `Block ${i + 1}`,
+        description: b.description.trim(),
+        duration_minutes: Math.max(5, Math.min(120, Math.round(Number(b.duration_minutes) || 25))),
+      })),
+    },
+    notes: { content: truncateNotes(parsed.notes.content) },
+    daily: {
+      schedule: parsed.daily.schedule.map((d, i) => ({
+        day: Math.max(1, Math.min(30, Math.round(Number(d.day) || i + 1))),
+        focus: d.focus.trim() || `Day ${i + 1}`,
+        tasks: d.tasks.map((t) => String(t ?? '').trim()).filter(Boolean),
+      })),
+    },
+    practice: {
+      questions: parsed.practice.questions.map((q) => ({
+        question: q.question.trim(),
+        answer: q.answer.trim(),
+        explanation: q.explanation.trim(),
+      })),
+    },
   }
 }
 
@@ -238,23 +219,9 @@ async function callOpenAI(prompt: string, images: File[], isHu: boolean, imageNa
         {
           type: 'input_text',
           text:
-            'You are an academic study planner AI.\n'
-            + 'Return STRICT VALID JSON only.\n'
-            + 'No markdown.\n'
-            + 'No explanations outside JSON.\n'
-            + 'No code fences.\n'
-            + `Language: ${isHu ? 'Hungarian' : 'English'}.\n\n`
-            + 'GOAL:\n'
-            + '- PLAN: concise, structured, compact descriptions\n'
-            + '- NOTES: detailed, structured, learnable notes\n'
-            + '- DAILY: short structured schedule\n'
-            + '- PRACTICE: 5-8 quality practice questions with short solutions\n\n'
-            + 'RULES:\n'
-            + '1) PLAN: max 6 blocks, each description max 1-2 short sentences and max 200 chars, duration_minutes required.\n'
-            + '2) NOTES: 1500-3500 chars preferred, hard max 4000 chars. Include definitions, step-by-step examples, formulas, study tips, and common mistakes.\n'
-            + '3) DAILY: 3-6 days, short titles.\n'
-            + '4) PRACTICE: 5-8 problems with short solution outline.\n'
-            + 'Follow the JSON schema exactly.',
+            'Return strict valid JSON only. No markdown, no code fences, no extra text. '
+            + 'Follow the JSON schema exactly. '
+            + `Language: ${isHu ? 'Hungarian' : 'English'}.`,
         },
       ],
     },
@@ -264,10 +231,11 @@ async function callOpenAI(prompt: string, images: File[], isHu: boolean, imageNa
         {
           type: 'input_text',
           text:
-            `Prompt: ${prompt || '(empty)'}\n` +
-            `Image files: ${imageNames.length ? imageNames.join(', ') : '(none)'}\n` +
-            'A kepek tartalma a tananyag.\n' +
-            'Generate: title, language, plan.blocks, notes.content, daily.schedule with tasks, practice.questions.',
+            `Prompt: ${prompt || '(empty)'}\n`
+            + `Image files: ${imageNames.length ? imageNames.join(', ') : '(none)'}\n`
+            + 'The image contents are part of the study material.\n'
+            + 'Generate: title, language, plan.blocks, notes.content, daily.schedule.tasks, practice.questions(question,answer,explanation).\n'
+            + 'Plan must be concise with max 6 blocks. Notes should be detailed and learnable.',
         },
       ],
     },
@@ -298,13 +266,16 @@ async function callOpenAI(prompt: string, images: File[], isHu: boolean, imageNa
       },
       { signal: controller.signal }
     )
-    return String(response.output_text ?? '').trim()
+
+    const parsed = (response as any)?.output_parsed
+    if (!parsed) throw new Error('OPENAI_INVALID_STRUCTURED_OUTPUT')
+    return normalizeResult(parsed)
   } finally {
     clearTimeout(timeout)
   }
 }
 
-async function savePlanBestEffort(userId: string, planId: string, prompt: string, result: GeneratedResult, error: string | null) {
+async function savePlanBestEffort(userId: string, planId: string, prompt: string, result: GeneratedResult, imageCount: number) {
   try {
     const sb = createServerAdminClient()
     await sb.from(TABLE_PLANS).upsert(
@@ -315,11 +286,11 @@ async function savePlanBestEffort(userId: string, planId: string, prompt: string
         title: result.title,
         language: result.language,
         model: MODEL,
-        status: error ? 'fallback' : 'complete',
-        error,
+        status: 'complete',
+        error: null,
         credits_charged: GENERATION_COST,
         input_chars: prompt.length,
-        images_count: null,
+        images_count: imageCount,
         output_chars: JSON.stringify(result).length,
         plan_json: result.plan,
         notes_json: result.notes,
@@ -372,34 +343,35 @@ export async function GET(req: Request) {
       return NextResponse.json({ plan: null, result: local.result }, { status: 200 })
     }
 
-    const result: GeneratedResult = {
+    const result = normalizeResult({
       title: String(data.title ?? 'Study plan'),
-      language: data.language === 'en' ? 'en' : 'hu',
+      language: String(data.language ?? 'en'),
       plan: data.plan_json ?? data.plan ?? { blocks: [] },
       notes: {
-        content:
-          typeof data.notes === 'string'
-            ? truncateNotes(data.notes)
-            : truncateNotes(
-                String(
-                  data.notes_json?.content
-                  ?? ((data.language === 'en' ? 'en' : 'hu') === 'hu'
-                    ? 'Nincs jegyzet generalva (hiba). Probald ujra.'
-                    : 'No notes were generated (error). Please try again.')
-                )
-              ),
+        content: truncateNotes(String(typeof data.notes === 'string' ? data.notes : data.notes_json?.content ?? '')),
       },
       daily: data.daily_json ?? data.daily ?? { schedule: [] },
-      practice: data.practice_json ?? data.practice ?? { questions: [] },
-    }
+      practice: {
+        questions: Array.isArray(data.practice_json?.questions)
+          ? data.practice_json.questions.map((q: any) => ({
+              question: String(q?.question ?? q?.q ?? ''),
+              answer: String(q?.answer ?? q?.a ?? ''),
+              explanation: String(q?.explanation ?? ''),
+            }))
+          : Array.isArray(data.practice?.questions)
+            ? data.practice.questions.map((q: any) => ({
+                question: String(q?.question ?? q?.q ?? ''),
+                answer: String(q?.answer ?? q?.a ?? ''),
+                explanation: String(q?.explanation ?? ''),
+              }))
+            : [],
+      },
+    })
 
-    const safe = normalizeResult(result, fallbackResult('', result.language === 'hu'))
     return NextResponse.json({
       plan: data,
       result: {
-        ...safe,
-        fallback: data.status === 'fallback',
-        errorCode: typeof data.error === 'string' ? data.error : null,
+        ...result,
         requestId: typeof data.id === 'string' ? data.id : null,
       },
     })
@@ -434,11 +406,21 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: { code: 'INVALID_REQUEST', message: 'Invalid request' } }, { status: 400 })
     }
 
-    const prompt = parsed.value.prompt.slice(0, MAX_PROMPT_CHARS)
+    const prompt = parsed.value.prompt
     const images = parsed.value.images.slice(0, MAX_IMAGES)
     const imageNames = parsed.value.imageNames.slice(0, MAX_IMAGES)
     const isHu = detectHungarian(prompt)
-    const fallback = fallbackResult(prompt, isHu)
+
+    let result: GeneratedResult
+    try {
+      result = await callOpenAI(prompt, images, isHu, imageNames)
+    } catch (openAiErr: any) {
+      console.error('plan.openai failed', { requestId, message: openAiErr?.message ?? 'unknown' })
+      return NextResponse.json(
+        { error: { code: 'OPENAI_FAILED', message: 'Plan generation failed' }, requestId },
+        { status: 500 }
+      )
+    }
 
     const sb = createServerAdminClient()
     const { error: rpcErr } = await sb.rpc('consume_credits', { user_id: user.id, cost: GENERATION_COST })
@@ -450,29 +432,7 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: { code: 'CREDITS_CHARGE_FAILED', message: 'Credits charge failed' } }, { status: 500 })
     }
 
-    let result = fallback
-    let fallbackReason: string | null = null
-
-    try {
-      const outputText = await callOpenAI(prompt, images, isHu, imageNames)
-      if (!outputText) {
-        fallbackReason = 'OPENAI_EMPTY_OUTPUT'
-      } else {
-        try {
-          const parsedJson = safeJsonParse(outputText)
-          result = normalizeResult(parsedJson, fallback)
-        } catch (parseErr: any) {
-          console.error('plan.parse failed', { planId, message: parseErr?.message ?? 'unknown', raw: outputText.slice(0, 400) })
-          fallbackReason = 'OPENAI_INVALID_JSON'
-        }
-      }
-    } catch (openAiErr: any) {
-      console.error('plan.openai failed', { planId, message: openAiErr?.message ?? 'unknown' })
-      fallbackReason = 'OPENAI_CALL_FAILED'
-    }
-
-    result.notes.content = truncateNotes(result.notes.content)
-    await savePlanBestEffort(user.id, planId, prompt, result, fallbackReason)
+    await savePlanBestEffort(user.id, planId, prompt, result, images.length)
 
     return NextResponse.json({
       requestId,
@@ -483,32 +443,15 @@ export async function POST(req: Request) {
       notes: result.notes,
       daily: result.daily,
       practice: result.practice,
-      fallback: !!fallbackReason,
-      errorCode: fallbackReason,
-      errorMessage: fallbackReason
-        ? isHu
-          ? 'Generalasi hiba tortent. Probald ujra.'
-          : 'Generation failed. Please try again.'
-        : null,
     })
   } catch (e: any) {
-    console.error('plan.post failed', { planId, message: e?.message ?? 'unknown' })
-    const safe = fallbackResult('', true)
+    console.error('plan.post failed', { requestId, message: e?.message ?? 'unknown' })
     return NextResponse.json(
       {
+        error: { code: 'PLAN_GENERATION_FAILED', message: 'Plan generation failed' },
         requestId,
-        planId,
-        title: safe.title,
-        language: safe.language,
-        plan: safe.plan,
-        notes: safe.notes,
-        daily: safe.daily,
-        practice: safe.practice,
-        fallback: true,
-        errorCode: 'SERVER_FALLBACK',
-        errorMessage: 'Generation failed. Please try again.',
       },
-      { status: 200 }
+      { status: 500 }
     )
   }
 }

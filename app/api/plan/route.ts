@@ -61,9 +61,56 @@ const planResultJsonSchema = {
       },
       required: ['blocks'],
     },
-    notes: { type: 'object' },
-    daily: { type: 'object' },
-    practice: { type: 'object' },
+    notes: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        bullets: {
+          type: 'array',
+          items: { type: 'string' },
+        },
+      },
+    },
+    daily: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        schedule: {
+          type: 'array',
+          items: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              day: { type: 'number' },
+              focus: { type: 'string' },
+              tasks: {
+                type: 'array',
+                items: { type: 'string' },
+              },
+            },
+            required: ['day', 'focus', 'tasks'],
+          },
+        },
+      },
+    },
+    practice: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        questions: {
+          type: 'array',
+          items: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              q: { type: 'string' },
+              a: { type: 'string' },
+            },
+            required: ['q', 'a'],
+          },
+        },
+      },
+    },
   },
   required: ['title', 'language', 'plan'],
 }

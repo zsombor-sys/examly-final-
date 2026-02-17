@@ -9,6 +9,7 @@ const links = [
   { href: '/notes', label: 'Notes' },
   { href: '/daily', label: 'Daily' },
   { href: '/practice', label: 'Practice' },
+  { href: '/homework', label: 'Homework' },
   { href: '/vocab', label: 'Vocab' },
   { href: '/guide', label: 'Guide' },
   { href: '/billing', label: 'Billing' },

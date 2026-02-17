@@ -22,8 +22,12 @@ function shortSummary(row: HistoryRow) {
   const firstBlockTitle = row?.plan_json?.blocks?.[0]?.title ?? row?.plan?.blocks?.[0]?.title
   if (typeof firstBlockTitle === 'string' && firstBlockTitle.trim()) return firstBlockTitle.trim().slice(0, 120)
 
-  const firstBullet = row?.notes_json?.bullets?.[0]
-  if (typeof firstBullet === 'string' && firstBullet.trim()) return firstBullet.trim().slice(0, 120)
+  const notes = typeof (row as any)?.notes === 'string'
+    ? String((row as any).notes)
+    : typeof (row as any)?.notes_json?.content === 'string'
+      ? String((row as any).notes_json.content)
+      : ''
+  if (notes.trim()) return notes.trim().slice(0, 120)
 
   if (typeof row?.title === 'string' && row.title.trim()) return row.title.trim().slice(0, 120)
   return ''

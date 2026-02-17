@@ -11,9 +11,14 @@ import StructuredText from '@/components/StructuredText'
 
 type Block = { type: 'study' | 'break'; minutes: number; label: string }
 type DayPlan = { day: string; focus: string; tasks: string[]; minutes: number; blocks?: Block[] }
+type PlanBlock = { id: string; title: string; duration_minutes: number; description: string }
 type PlanResult = {
-  plan?: { title?: string } | string | null
-  daily?: { blocks?: Array<{ title: string; duration_minutes: number; description: string }> } | string | null
+  title?: string | null
+  plan?: { blocks?: PlanBlock[] } | null
+  notes?: string | null
+  daily?: { schedule?: Array<{ day: number; focus: string; block_ids: string[] }> } | null
+  plan_json?: { blocks?: PlanBlock[] } | null
+  daily_json?: { schedule?: Array<{ day: number; focus: string; block_ids: string[] }> } | null
 }
 
 function historyKeyForUser(userId: string | null) {
@@ -93,15 +98,18 @@ function Inner() {
         }
         let id: string | null = null
 
-        // remote current
+        // local current first
+        id = getLocalCurrentId(userId)
+
+        // remote current fallback
         try {
-          const r1 = await authedFetch('/api/plan/current')
-          const j1 = await r1.json().catch(() => ({} as any))
-          if (r1.ok && typeof j1?.id === 'string') id = j1.id
+          if (!id) {
+            const r1 = await authedFetch('/api/plan/current')
+            const j1 = await r1.json().catch(() => ({} as any))
+            if (r1.ok && typeof j1?.id === 'string') id = j1.id
+          }
         } catch {}
 
-        // local current fallback
-        if (!id) id = getLocalCurrentId(userId)
         if (!id) throw new Error('Nincs kiválasztott plan. Menj a Plan oldalra és generálj vagy válassz egyet.')
 
         // try server plan
@@ -128,24 +136,26 @@ function Inner() {
 
   const pomodoroPlan = useMemo<DayPlan[]>(() => {
     if (!plan) return []
-    const dailyObj = plan.daily && typeof plan.daily === 'object' ? plan.daily : null
-    const blocksRaw = Array.isArray(dailyObj?.blocks) ? dailyObj.blocks : []
-    const title =
-      plan.plan && typeof plan.plan === 'object' && typeof plan.plan.title === 'string'
-        ? plan.plan.title
-        : 'Focus'
-    const blocks: Block[] = blocksRaw.map((b) => ({
-      type: /break|pihen/i.test(b.title) ? 'break' : 'study',
-      minutes: Math.max(5, Math.min(180, Number(b.duration_minutes) || 25)),
-      label: String(b.title || 'Fokusz'),
-    }))
+    const blocksRaw = Array.isArray(plan.plan_json?.blocks)
+      ? plan.plan_json.blocks
+      : Array.isArray(plan.plan?.blocks)
+        ? plan.plan.blocks
+        : []
+    const byId = new Map(blocksRaw.map((b) => [b.id, b]))
+    const day1 = Array.isArray(plan.daily_json?.schedule)
+      ? plan.daily_json.schedule[0]
+      : Array.isArray(plan.daily?.schedule)
+        ? plan.daily.schedule[0]
+        : null
+    const mapped = (day1?.block_ids ?? []).map((id) => byId.get(id)).filter(Boolean) as PlanBlock[]
+    const blocks: Block[] = mapped.map((b) => ({ type: 'study', minutes: b.duration_minutes, label: b.title }))
     const minutes = blocks.reduce((sum, b) => sum + b.minutes, 0)
     return [
       {
         day: 'Today',
-        focus: title,
+        focus: day1?.focus || plan.title || 'Focus',
         minutes,
-        tasks: blocksRaw.map((b) => String(b.title || '')).filter(Boolean),
+        tasks: mapped.map((b) => b.title),
         blocks,
       },
     ]
@@ -171,7 +181,7 @@ function Inner() {
           <>
             <div className="text-xs uppercase tracking-[0.18em] text-white/55">Daily</div>
             <h1 className="mt-2 text-2xl font-semibold tracking-tight text-white break-words">
-              {(plan.plan && typeof plan.plan === 'object' && typeof plan.plan.title === 'string' ? plan.plan.title : '') || 'Daily'}
+              {plan.title || 'Daily'}
             </h1>
 
             <div className="mt-6 grid gap-6 min-w-0 2xl:grid-cols-[minmax(0,1fr)_360px]">
@@ -185,16 +195,26 @@ function Inner() {
                 <section className="w-full rounded-3xl border border-white/10 bg-white/[0.02] p-5 min-w-0 overflow-hidden">
                   <div className="text-xs uppercase tracking-[0.18em] text-white/55">Schedule</div>
                   <div className="mt-4 space-y-3 text-sm text-white/80">
-                    {(plan?.daily && typeof plan.daily === 'object' && Array.isArray(plan.daily.blocks) && plan.daily.blocks.length > 0) ? (
-                      plan.daily.blocks.map((b, i) => (
-                        <div key={i} className="rounded-2xl border border-white/10 bg-black/30 px-4 py-3">
-                          <div className="flex items-center justify-between gap-3">
-                            <div className="text-white/90">{b.title}</div>
-                            <div className="text-white/60">{Math.round(Number(b.duration_minutes) || 0)} min</div>
+                    {(Array.isArray(plan.daily_json?.schedule) ? plan.daily_json.schedule : plan.daily?.schedule ?? []).length > 0 ? (
+                      (Array.isArray(plan.daily_json?.schedule) ? plan.daily_json.schedule : plan.daily?.schedule ?? []).map((d, i) => {
+                        const blocks = Array.isArray(plan.plan_json?.blocks)
+                          ? plan.plan_json.blocks
+                          : Array.isArray(plan.plan?.blocks)
+                            ? plan.plan.blocks
+                            : []
+                        return (
+                          <div key={i} className="rounded-2xl border border-white/10 bg-black/30 px-4 py-3">
+                            <div className="text-white/90">Day {d.day}: {d.focus}</div>
+                            <div className="mt-2 space-y-1 text-white/70">
+                              {(d.block_ids ?? []).map((bid, bi) => {
+                                const b = blocks.find((x) => x.id === bid)
+                                if (!b) return null
+                                return <div key={bi}>{b.title} ({b.duration_minutes} min)</div>
+                              })}
+                            </div>
                           </div>
-                          {b.description ? <div className="mt-2 text-white/70">{b.description}</div> : null}
-                        </div>
-                      ))
+                        )
+                      })
                     ) : (
                       <StructuredText value={plan?.daily} />
                     )}

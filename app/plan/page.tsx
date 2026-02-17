@@ -15,16 +15,16 @@ import { MAX_IMAGES, MAX_PROMPT_CHARS, CREDITS_PER_GENERATION } from '@/lib/limi
 
 type Block = { type: 'study' | 'break'; minutes: number; label: string }
 type DayPlan = { day: string; focus: string; tasks: string[]; minutes: number; blocks?: Block[] }
-type PlanBlock = { title: string; duration_minutes: number; description: string }
+type PlanBlock = { id: string; title: string; duration_minutes: number; description: string }
 type PlanResult = {
   title?: string | null
   language?: 'hu' | 'en' | null
   plan?: { blocks?: PlanBlock[] } | null
-  notes?: { bullets?: string[] } | string | null
-  daily?: { schedule?: Array<{ day: number; focus: string; tasks: string[] }> } | null
+  notes?: string | null
+  daily?: { schedule?: Array<{ day: number; focus: string; block_ids: string[] }> } | null
   practice?: { questions?: Array<{ q: string; a: string }> } | null
   plan_json?: { blocks?: PlanBlock[] } | null
-  daily_json?: { schedule?: Array<{ day: number; focus: string; tasks: string[] }> } | null
+  daily_json?: { schedule?: Array<{ day: number; focus: string; block_ids: string[] }> } | null
   practice_json?: { questions?: Array<{ q: string; a: string }> } | null
 }
 
@@ -35,8 +35,8 @@ type PlanRow = {
   title: string | null
   language: 'hu' | 'en' | null
   plan: { blocks?: PlanBlock[] } | null
-  notes: { bullets?: string[] } | string | null
-  daily_json: { schedule?: Array<{ day: number; focus: string; tasks: string[] }> } | null
+  notes: string | null
+  daily_json: { schedule?: Array<{ day: number; focus: string; block_ids: string[] }> } | null
   practice_json: { questions?: Array<{ q: string; a: string }> } | null
   created_at: string | null
 }
@@ -102,21 +102,8 @@ function setCurrentPlanLocal(userId: string | null, id: string | null) {
   } catch {}
 }
 
-async function setCurrentPlanRemote(id: string | null) {
-  try {
-    await authedFetch('/api/plan/current', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ id }),
-    })
-  } catch {
-    // ignore
-  }
-}
-
 async function setCurrentPlan(userId: string | null, id: string | null) {
   setCurrentPlanLocal(userId, id)
-  await setCurrentPlanRemote(id)
 }
 
 function fmtDate(d: string) {
@@ -141,23 +128,12 @@ function shortPrompt(p: string) {
 function notesToBullets(notes: PlanResult['notes']): string[] {
   if (!notes) return []
   if (typeof notes === 'string') {
-    const raw = notes.trim()
-    if ((raw.startsWith('{') && raw.endsWith('}')) || (raw.startsWith('[') && raw.endsWith(']'))) {
-      try {
-        const parsed = JSON.parse(raw)
-        if (Array.isArray(parsed?.bullets)) {
-          return parsed.bullets.map((t: unknown) => String(t ?? '').trim()).filter(Boolean)
-        }
-      } catch {
-        // ignore and continue with plain-text fallback
-      }
-    }
     return notes
       .split(/\n+/)
       .map((t) => t.trim())
       .filter(Boolean)
   }
-  return Array.isArray(notes.bullets) ? notes.bullets.filter(Boolean) : []
+  return []
 }
 
 export default function PlanPage() {
@@ -510,23 +486,33 @@ function Inner() {
     prompt.trim().length <= MAX_PROMPT_CHARS &&
     files.length <= MAX_IMAGES &&
     (prompt.trim().length >= 6 || files.length > 0)
-  const summaryText = notesToBullets(result?.notes).join(' • ')
+  const summaryText = String(result?.notes ?? '').trim()
   const costEstimate = CREDITS_PER_GENERATION
   const pomodoroPlan = useMemo<DayPlan[]>(() => {
     if (!result) return []
+    const blockList = Array.isArray(result.plan_json?.blocks)
+      ? result.plan_json.blocks
+      : Array.isArray(result.plan?.blocks)
+        ? result.plan.blocks
+        : []
+    const byId = new Map(blockList.map((b) => [b.id, b]))
     const daysRaw = Array.isArray(result.daily_json?.schedule)
       ? result.daily_json.schedule
       : Array.isArray(result.daily?.schedule)
         ? result.daily.schedule
         : []
     return daysRaw.map((d) => {
-      const tasks = Array.isArray(d.tasks) ? d.tasks.filter(Boolean) : []
-      const minutes = Math.max(20, Math.min(180, tasks.length * 30 || 60))
+      const ids = Array.isArray(d.block_ids) ? d.block_ids : []
+      const mappedBlocks = ids.map((id) => byId.get(String(id))).filter(Boolean) as PlanBlock[]
+      const blocks: Block[] = mappedBlocks.map((b) => ({ type: 'study', minutes: b.duration_minutes, label: b.title }))
+      const tasks = mappedBlocks.map((b) => b.title)
+      const minutes = Math.max(20, blocks.reduce((sum, b) => sum + b.minutes, 0) || 60)
       return {
         day: `Day ${d.day}`,
         focus: d.focus || result.title || 'Focus',
         minutes,
         tasks,
+        blocks,
       }
     })
   }, [result])
@@ -687,8 +673,16 @@ function Inner() {
               {tab === 'plan' && result && (
                 <div className="rounded-3xl border border-white/10 bg-white/[0.02] p-5 min-w-0 overflow-hidden">
                   <div className="text-xs uppercase tracking-[0.18em] text-white/55">Plan</div>
-                  <div className="mt-3">
-                    <StructuredText value={result.plan ?? result.notes} />
+                  <div className="mt-3 space-y-3">
+                    {(Array.isArray(result.plan_json?.blocks) ? result.plan_json.blocks : result.plan?.blocks ?? []).map((b) => (
+                      <div key={b.id} className="rounded-2xl border border-white/10 bg-black/30 px-4 py-3">
+                        <div className="flex items-center justify-between gap-3">
+                          <div className="text-white/90">{b.title}</div>
+                          <div className="text-white/60">{b.duration_minutes} min</div>
+                        </div>
+                        <div className="mt-2 text-white/70">{b.description}</div>
+                      </div>
+                    ))}
                   </div>
                   {(result?.daily_json?.schedule?.[0]?.focus || result?.daily?.schedule?.[0]?.focus) ? (
                     <div className="mt-3 text-xs text-white/60">
@@ -702,15 +696,7 @@ function Inner() {
               {tab === 'notes' && result && (
                 <div className="rounded-3xl border border-white/10 bg-white/[0.02] p-5 min-w-0 overflow-hidden">
                   <div className="text-xs uppercase tracking-[0.18em] text-white/55">Notes</div>
-                  {notesToBullets(result?.notes).length > 0 ? (
-                    <div className="mt-4 space-y-2 text-sm text-white/70">
-                      {notesToBullets(result?.notes).map((kp, i) => (
-                        <div key={`${kp}-${i}`} className="rounded-xl border border-white/10 bg-black/30 px-3 py-2">
-                          {kp}
-                        </div>
-                      ))}
-                    </div>
-                  ) : null}
+                  <div className="mt-4 text-sm text-white/80 whitespace-pre-wrap">{String(result.notes ?? '')}</div>
                 </div>
               )}
 
@@ -730,9 +716,16 @@ function Inner() {
                             <div key={`day-${d.day}`} className="rounded-2xl border border-white/10 bg-black/30 px-4 py-3">
                               <div className="text-white/90">Day {d.day}: {d.focus}</div>
                               <div className="mt-2 space-y-1 text-white/70">
-                                {(d.tasks ?? []).map((t, i) => (
-                                  <div key={`${d.day}-task-${i}`}>{t}</div>
-                                ))}
+                                {(d.block_ids ?? []).map((bid, i) => {
+                                  const blocks = Array.isArray(result.plan_json?.blocks)
+                                    ? result.plan_json.blocks
+                                    : Array.isArray(result.plan?.blocks)
+                                      ? result.plan.blocks
+                                      : []
+                                  const b = blocks.find((x) => x.id === bid)
+                                  if (!b) return null
+                                  return <div key={`${d.day}-task-${i}`}>{b.title} ({b.duration_minutes} min)</div>
+                                })}
                               </div>
                             </div>
                           ))

@@ -24,34 +24,31 @@ const PlanResultSchema = z.object({
   plan: z.object({
     blocks: z.array(
       z.object({
+        id: z.string(),
         title: z.string(),
         duration_minutes: z.number(),
         description: z.string(),
       })
     ),
   }),
-  notes: z.object({
-    content: z.string(),
-  }),
+  notes: z.string(),
   daily: z.object({
     schedule: z.array(
       z.object({
         day: z.number(),
         focus: z.string(),
-        tasks: z.array(z.string()),
-      })
-    ),
-    sessions: z.array(
-      z.object({
-        session: z.number(),
-        topic: z.string(),
-        study_minutes: z.number(),
-        break_minutes: z.number(),
-        goal: z.string(),
+        block_ids: z.array(z.string()),
       })
     ),
   }),
-  practice: z.record(z.any()).optional(),
+  practice: z.object({
+    questions: z.array(
+      z.object({
+        q: z.string(),
+        a: z.string(),
+      })
+    ),
+  }),
 })
 
 const planResultJsonSchema = {
@@ -70,24 +67,18 @@ const planResultJsonSchema = {
             type: 'object',
             additionalProperties: false,
             properties: {
+              id: { type: 'string' },
               title: { type: 'string' },
-              duration_minutes: { type: 'number' },
+              duration_minutes: { type: 'integer', minimum: 5, maximum: 120 },
               description: { type: 'string' },
             },
-            required: ['title', 'duration_minutes', 'description'],
+            required: ['id', 'title', 'description', 'duration_minutes'],
           },
         },
       },
       required: ['blocks'],
     },
-    notes: {
-      type: 'object',
-      additionalProperties: false,
-      properties: {
-        content: { type: 'string' },
-      },
-      required: ['content'],
-    },
+    notes: { type: 'string' },
     daily: {
       type: 'object',
       additionalProperties: false,
@@ -98,33 +89,18 @@ const planResultJsonSchema = {
             type: 'object',
             additionalProperties: false,
             properties: {
-              day: { type: 'number' },
+              day: { type: 'integer', minimum: 1, maximum: 30 },
               focus: { type: 'string' },
-              tasks: {
+              block_ids: {
                 type: 'array',
                 items: { type: 'string' },
               },
             },
-            required: ['day', 'focus', 'tasks'],
-          },
-        },
-        sessions: {
-          type: 'array',
-          items: {
-            type: 'object',
-            additionalProperties: false,
-            properties: {
-              session: { type: 'number' },
-              topic: { type: 'string' },
-              study_minutes: { type: 'number' },
-              break_minutes: { type: 'number' },
-              goal: { type: 'string' },
-            },
-            required: ['session', 'topic', 'study_minutes', 'break_minutes', 'goal'],
+            required: ['day', 'focus', 'block_ids'],
           },
         },
       },
-      required: ['schedule', 'sessions'],
+      required: ['schedule'],
     },
     practice: {
       type: 'object',
@@ -261,12 +237,9 @@ function sanitizeText(text: string) {
 type PlanPayload = {
   title: string
   language: 'hu' | 'en'
-  plan: { blocks: Array<{ title: string; duration_minutes: number; description: string }> }
-  notes: { content: string }
-  daily: {
-    schedule: Array<{ day: number; focus: string; tasks: string[] }>
-    sessions: Array<{ session: number; topic: string; study_minutes: number; break_minutes: number; goal: string }>
-  }
+  plan: { blocks: Array<{ id: string; title: string; duration_minutes: number; description: string }> }
+  notes: string
+  daily: { schedule: Array<{ day: number; focus: string; block_ids: string[] }> }
   practice: { questions: Array<{ q: string; a: string }> }
 }
 
@@ -280,77 +253,7 @@ function jsonLen(value: unknown) {
 }
 
 function enforceFieldChars(payload: PlanPayload): PlanPayload {
-  while (jsonLen(payload.plan) > MAX_OUTPUT_CHARS && payload.plan.blocks.length > 1) {
-    payload.plan.blocks.pop()
-  }
-  while (jsonLen(payload.daily) > MAX_OUTPUT_CHARS && payload.daily.sessions.length > 1) {
-    payload.daily.sessions.pop()
-  }
-  while (jsonLen(payload.daily) > MAX_OUTPUT_CHARS && payload.daily.schedule.length > 1) {
-    payload.daily.schedule.pop()
-  }
-  while (jsonLen(payload.practice) > MAX_OUTPUT_CHARS && payload.practice.questions.length > 1) {
-    payload.practice.questions.pop()
-  }
-
-  while (jsonLen(payload.plan) > MAX_OUTPUT_CHARS) {
-    const block = payload.plan.blocks[payload.plan.blocks.length - 1]
-    if (!block) break
-    if (block.description.length > 20) {
-      block.description = block.description.slice(0, Math.max(20, block.description.length - 200))
-      continue
-    }
-    if (block.title.length > 8) {
-      block.title = block.title.slice(0, Math.max(8, block.title.length - 80))
-      continue
-    }
-    break
-  }
-
-  while (jsonLen(payload.notes) > MAX_OUTPUT_CHARS) {
-    const curr = payload.notes.content ?? ''
-    if (curr.length <= 20) break
-    payload.notes.content = curr.slice(0, Math.max(20, curr.length - 400))
-  }
-
-  while (jsonLen(payload.daily) > MAX_OUTPUT_CHARS) {
-    const session = payload.daily.sessions[payload.daily.sessions.length - 1]
-    if (session) {
-      if (session.goal.length > 20) {
-        session.goal = session.goal.slice(0, Math.max(20, session.goal.length - 200))
-        continue
-      }
-      if (session.topic.length > 20) {
-        session.topic = session.topic.slice(0, Math.max(20, session.topic.length - 120))
-        continue
-      }
-    }
-    const day = payload.daily.schedule[payload.daily.schedule.length - 1]
-    if (day?.tasks.length > 1) {
-      day.tasks.pop()
-      continue
-    }
-    if (day?.focus && day.focus.length > 20) {
-      day.focus = day.focus.slice(0, Math.max(20, day.focus.length - 200))
-      continue
-    }
-    break
-  }
-
-  while (jsonLen(payload.practice) > MAX_OUTPUT_CHARS) {
-    const q = payload.practice.questions[payload.practice.questions.length - 1]
-    if (!q) break
-    if (q.a.length > 20) {
-      q.a = q.a.slice(0, Math.max(20, q.a.length - 200))
-      continue
-    }
-    if (q.q.length > 20) {
-      q.q = q.q.slice(0, Math.max(20, q.q.length - 200))
-      continue
-    }
-    break
-  }
-
+  if (payload.notes.length > MAX_OUTPUT_CHARS) payload.notes = payload.notes.slice(0, MAX_OUTPUT_CHARS)
   return payload
 }
 
@@ -360,26 +263,18 @@ function clampPlanPayload(input: PlanPayload): PlanPayload {
     language: input.language,
     plan: {
       blocks: input.plan.blocks.map((b) => ({
+        id: clampText(b.id),
         title: clampText(b.title),
         duration_minutes: b.duration_minutes,
         description: clampText(b.description),
       })),
     },
-    notes: {
-      content: clampText(input.notes.content),
-    },
+    notes: clampText(input.notes),
     daily: {
       schedule: input.daily.schedule.map((d) => ({
         day: d.day,
-        focus: clampText(d.focus),
-        tasks: d.tasks.map((t) => clampText(t)),
-      })),
-      sessions: input.daily.sessions.map((s) => ({
-        session: s.session,
-        topic: clampText(s.topic),
-        study_minutes: s.study_minutes,
-        break_minutes: s.break_minutes,
-        goal: clampText(s.goal),
+        focus: String(d.focus ?? ''),
+        block_ids: d.block_ids.map((x) => String(x ?? '')),
       })),
     },
     practice: {
@@ -394,43 +289,30 @@ function clampPlanPayload(input: PlanPayload): PlanPayload {
 }
 
 type PlanBlockInput = { title?: string | null; duration_minutes?: number | null; description?: string | null }
-type DailyDayInput = { day?: number | null; focus?: string | null; tasks?: Array<string | null> | null }
-type DailySessionInput = {
-  session?: number | null
-  topic?: string | null
-  study_minutes?: number | null
-  break_minutes?: number | null
-  goal?: string | null
-}
+type DailyDayInput = { day?: number | null; focus?: string | null; block_ids?: Array<string | null> | null }
 type PracticeQuestionInput = { q?: string | null; a?: string | null }
 
 function normalizePlanPayload(input: any): PlanPayload {
   const title = sanitizeText(String(input?.title ?? '').trim() || 'Study plan')
   const language = input?.language === 'en' ? 'en' : 'hu'
   const planBlocksRaw = Array.isArray(input?.plan?.blocks) ? input.plan.blocks : []
-  const planBlocks = planBlocksRaw.map((b: PlanBlockInput) => ({
+  const planBlocks = planBlocksRaw.map((b: PlanBlockInput, idx: number) => ({
+    id: sanitizeText(String((b as any)?.id ?? '').trim()) || `block-${idx + 1}`,
     title: sanitizeText(String(b?.title ?? '').trim() || 'Block'),
-    duration_minutes: Math.max(20, Math.min(40, Number(b?.duration_minutes ?? 30) || 30)),
+    duration_minutes: Math.max(5, Math.min(120, Number(b?.duration_minutes ?? 30) || 30)),
     description: sanitizeText(String(b?.description ?? '').trim() || 'Short study block.'),
   }))
 
-  const notesContent = sanitizeText(String(input?.notes?.content ?? input?.notes ?? '').trim())
+  const notesContent = sanitizeText(String(input?.notes ?? input?.notes?.content ?? '').trim())
 
   const dailyRaw = Array.isArray(input?.daily?.schedule) ? input.daily.schedule : []
+  const knownBlockIds = new Set(planBlocks.map((b: { id: string }) => b.id))
   const dailyDays = dailyRaw.map((d: DailyDayInput, idx: number) => ({
     day: Number(d?.day ?? idx + 1) || idx + 1,
     focus: sanitizeText(String(d?.focus ?? '').trim() || 'Focus'),
-    tasks: Array.isArray(d?.tasks)
-      ? d?.tasks.map((t) => sanitizeText(String(t ?? '').trim())).filter(Boolean)
+    block_ids: Array.isArray(d?.block_ids)
+      ? d.block_ids.map((x) => String(x ?? '').trim()).filter((x) => knownBlockIds.has(x))
       : [],
-  }))
-  const sessionsRaw = Array.isArray(input?.daily?.sessions) ? input.daily.sessions : []
-  const sessions = sessionsRaw.map((s: DailySessionInput, idx: number) => ({
-    session: Number(s?.session ?? idx + 1) || idx + 1,
-    topic: sanitizeText(String(s?.topic ?? '').trim() || `Session ${idx + 1}`),
-    study_minutes: Math.max(15, Math.min(60, Number(s?.study_minutes ?? 25) || 25)),
-    break_minutes: Math.max(3, Math.min(20, Number(s?.break_minutes ?? 5) || 5)),
-    goal: sanitizeText(String(s?.goal ?? '').trim() || 'Understand and practice the key idea.'),
   }))
 
   const practiceRaw = Array.isArray(input?.practice?.questions) ? input.practice.questions : []
@@ -445,20 +327,9 @@ function normalizePlanPayload(input: any): PlanPayload {
     plan: {
       blocks: planBlocks.length ? planBlocks.slice(0, 8) : [],
     },
-    notes: {
-      content: notesContent || 'Detailed study notes are unavailable.',
-    },
+    notes: notesContent || 'Detailed study notes are unavailable.',
     daily: {
-      schedule: dailyDays.length ? dailyDays.slice(0, 7) : [],
-      sessions:
-        sessions.length > 0
-          ? sessions.slice(0, 18)
-          : [
-              { session: 1, topic: 'Warm-up review', study_minutes: 25, break_minutes: 5, goal: 'Recall prior knowledge.' },
-              { session: 2, topic: 'Core explanation', study_minutes: 25, break_minutes: 5, goal: 'Build conceptual understanding.' },
-              { session: 3, topic: 'Guided practice', study_minutes: 25, break_minutes: 5, goal: 'Apply method step-by-step.' },
-              { session: 4, topic: 'Error check', study_minutes: 25, break_minutes: 5, goal: 'Identify and fix common mistakes.' },
-            ],
+      schedule: (dailyDays.length ? dailyDays : [{ day: 1, focus: 'Day 1', block_ids: planBlocks.map((b: { id: string }) => b.id).slice(0, 4) }]).slice(0, 7),
     },
     practice: {
       questions: practiceQuestions.length ? practiceQuestions.slice(0, 10) : [],
@@ -475,55 +346,51 @@ function fallbackPlanPayload(prompt: string, fileNames: string[], isHu: boolean)
     plan: {
       blocks: [
         {
+          id: 'block-1',
           title: isHu ? 'Attekintes' : 'Review',
           duration_minutes: 30,
           description: isHu ? 'Fo temak atnezese.' : 'Review the main topics.',
         },
         {
+          id: 'block-2',
           title: isHu ? 'Jegyzeteles' : 'Notes',
           duration_minutes: 40,
           description: isHu ? 'Definiciok es peldak rendszerezese.' : 'Organize definitions and examples.',
         },
         {
+          id: 'block-3',
           title: isHu ? 'Gyakorlas' : 'Practice',
           duration_minutes: 30,
           description: isHu ? 'Rovid feladatok megoldasa.' : 'Solve short practice tasks.',
         },
         {
+          id: 'block-4',
           title: isHu ? 'Ismetles' : 'Recap',
           duration_minutes: 20,
           description: isHu ? 'Fontos pontok atnezese.' : 'Recap key points.',
         },
       ],
     },
-    notes: {
-      content: isHu
-        ? 'Ez a jegyzet egy tanari magyarazat stilusat koveti. Eloszor egyertelmuen megnevezzuk a kulcsfogalmakat, majd lepesrol lepesre levezetjuk a modszert. A levezetes kozben minden atalakitasnal megindokoljuk, hogy miert ervenyes a kovetkezo lepes. Ezutan egy reszletes, teljesen kidolgozott mintapelda kovetkezik, ahol nem csak a szamolasi lepeseket, hanem a gondolkodasi donteseket is kiemeljuk. Kulon hangsulyt kap az eredmeny ertelmezese: mit jelent a kapott ertek, milyen mertekegysegben gondolkodunk, es hogyan ellenorizheto vissza az eredmeny. Vegul osszegyujtjuk a tipikus hibakat: jelhiba, elhamarkodott egyszerusites, rovidites miatti fogalmi tevedes. A vegso osszegzes rogzitse a lenyeget rovid mondatokban, hogy vizsga elott gyorsan ismetelheto legyen.'
-        : 'These notes follow a high-school textbook explanation style. First, key concepts are introduced in full sentences with clear definitions. Then the method is derived step by step, and each transformation is justified so the logic is transparent. After the derivation, include at least one fully worked example with reasoning, not only calculations. Interpret the final result in context: what it means, why it is reasonable, and how to verify it. Add a section on common mistakes and misconceptions, explaining how to avoid them in exam conditions. End with a concise summary of the core ideas and decision rules that students should remember.',
-    },
+    notes: isHu
+      ? 'Ez a jegyzet egy tanari magyarazat stilusat koveti. Eloszor egyertelmuen megnevezzuk a kulcsfogalmakat, majd lepesrol lepesre levezetjuk a modszert. A levezetes kozben minden atalakitasnal megindokoljuk, hogy miert ervenyes a kovetkezo lepes. Ezutan egy reszletes, teljesen kidolgozott mintapelda kovetkezik, ahol nem csak a szamolasi lepeseket, hanem a gondolkodasi donteseket is kiemeljuk. Kulon hangsulyt kap az eredmeny ertelmezese: mit jelent a kapott ertek, milyen mertekegysegben gondolkodunk, es hogyan ellenorizheto vissza az eredmeny. Vegul osszegyujtjuk a tipikus hibakat: jelhiba, elhamarkodott egyszerusites, rovidites miatti fogalmi tevedes. A vegso osszegzes rogzitse a lenyeget rovid mondatokban, hogy vizsga elott gyorsan ismetelheto legyen.'
+      : 'These notes follow a high-school textbook explanation style. First, key concepts are introduced in full sentences with clear definitions. Then the method is derived step by step, and each transformation is justified so the logic is transparent. After the derivation, include at least one fully worked example with reasoning, not only calculations. Interpret the final result in context: what it means, why it is reasonable, and how to verify it. Add a section on common mistakes and misconceptions, explaining how to avoid them in exam conditions. End with a concise summary of the core ideas and decision rules that students should remember.',
     daily: {
       schedule: [
         {
           day: 1,
           focus: isHu ? 'Felkeszules' : 'Preparation',
-          tasks: isHu ? ['Attekintes', 'Jegyzeteles'] : ['Review', 'Notes'],
+          block_ids: ['block-1', 'block-2'],
         },
         {
           day: 2,
           focus: isHu ? 'Gyakorlas' : 'Practice',
-          tasks: isHu ? ['Gyakorlas', 'Ismetles'] : ['Practice', 'Recap'],
+          block_ids: ['block-3', 'block-4'],
         },
         {
           day: 3,
           focus: isHu ? 'Ismetles' : 'Recap',
-          tasks: isHu ? ['Osszefoglalas', 'Onellenorzes'] : ['Summary', 'Self-check'],
+          block_ids: ['block-2', 'block-4'],
         },
-      ],
-      sessions: [
-        { session: 1, topic: isHu ? 'Attekinto olvasas' : 'Concept review', study_minutes: 25, break_minutes: 5, goal: isHu ? 'Kulcsfogalmak rendszerezese.' : 'Map key concepts clearly.' },
-        { session: 2, topic: isHu ? 'Levezetes' : 'Derivation', study_minutes: 25, break_minutes: 5, goal: isHu ? 'Lepesenkenti megertes.' : 'Understand each transformation step.' },
-        { session: 3, topic: isHu ? 'Kidolgozott pelda' : 'Worked example', study_minutes: 25, break_minutes: 5, goal: isHu ? 'Modszer alkalmazasa peldan.' : 'Apply method on a full example.' },
-        { session: 4, topic: isHu ? 'Hibak javitasa' : 'Error correction', study_minutes: 25, break_minutes: 5, goal: isHu ? 'Tipikus hibak felismerese.' : 'Find and fix common mistakes.' },
       ],
     },
     practice: {
@@ -580,37 +447,33 @@ function minimalPlanPayload(isHu: boolean) {
     plan: {
       blocks: [
         {
+          id: 'block-1',
           title: isHu ? 'Attekintes' : 'Review',
           duration_minutes: 30,
           description: isHu ? 'Fo temak atnezese.' : 'Review the main topics.',
         },
         {
+          id: 'block-2',
           title: isHu ? 'Jegyzetek' : 'Notes',
           duration_minutes: 30,
           description: isHu ? 'Rovid jegyzetek keszitese.' : 'Write short notes.',
         },
         {
+          id: 'block-3',
           title: isHu ? 'Gyakorlas' : 'Practice',
           duration_minutes: 30,
           description: isHu ? 'Rovid gyakorlo feladatok.' : 'Short practice tasks.',
         },
       ],
     },
-    notes: {
-      content: isHu
-        ? 'Rovid tanulasi jegyzet: definiald a kulcsfogalmakat, vezesd le a modszert lepesrol lepesre, oldj meg egy mintafeladatot, majd ellenorizd az eredmenyt es gyujtsd ossze a tipikus hibakat.'
-        : 'Short study notes: define key concepts, derive the method step by step, solve one worked example, verify the result, and list common mistakes.',
-    },
+    notes: isHu
+      ? 'Rovid tanulasi jegyzet: definiald a kulcsfogalmakat, vezesd le a modszert lepesrol lepesre, oldj meg egy mintafeladatot, majd ellenorizd az eredmenyt es gyujtsd ossze a tipikus hibakat.'
+      : 'Short study notes: define key concepts, derive the method step by step, solve one worked example, verify the result, and list common mistakes.',
     daily: {
       schedule: [
-        { day: 1, focus: isHu ? 'Attekintes' : 'Review', tasks: isHu ? ['Attekintes'] : ['Review'] },
-        { day: 2, focus: isHu ? 'Jegyzetek' : 'Notes', tasks: isHu ? ['Jegyzetek'] : ['Notes'] },
-        { day: 3, focus: isHu ? 'Gyakorlas' : 'Practice', tasks: isHu ? ['Gyakorlas'] : ['Practice'] },
-      ],
-      sessions: [
-        { session: 1, topic: isHu ? 'Attekintes' : 'Review', study_minutes: 25, break_minutes: 5, goal: isHu ? 'Fo otletek felidezese.' : 'Recall key ideas.' },
-        { session: 2, topic: isHu ? 'Levezetes' : 'Derivation', study_minutes: 25, break_minutes: 5, goal: isHu ? 'Lepesek megertese.' : 'Understand steps.' },
-        { session: 3, topic: isHu ? 'Gyakorlas' : 'Practice', study_minutes: 25, break_minutes: 5, goal: isHu ? 'Onallo megoldas.' : 'Solve independently.' },
+        { day: 1, focus: isHu ? 'Attekintes' : 'Review', block_ids: ['block-1'] },
+        { day: 2, focus: isHu ? 'Jegyzetek' : 'Notes', block_ids: ['block-2'] },
+        { day: 3, focus: isHu ? 'Gyakorlas' : 'Practice', block_ids: ['block-3'] },
       ],
     },
     practice: {
@@ -639,9 +502,7 @@ function fromPlainTextToPlanPayload(rawText: string, prompt: string, fileNames: 
     title: fallback.title,
     language: isHu ? 'hu' : 'en',
     plan: fallback.plan,
-    notes: {
-      content: content || fallback.notes.content,
-    },
+    notes: content || fallback.notes,
     daily: fallback.daily,
     practice: fallback.practice,
   })
@@ -678,7 +539,7 @@ async function savePlanToDbBestEffort(row: SavePlanRow) {
   try {
     const sb = createServerAdminClient()
     const safePlan = row.result?.plan ?? {}
-    const safeNotes = row.result?.notes ?? {}
+    const safeNotes = String(row.result?.notes ?? '')
     const safeDaily = row.result?.daily ?? {}
     const safePractice = row.result?.practice ?? {}
     const safeMaterials = Array.isArray(row.materials) ? row.materials : []
@@ -699,7 +560,7 @@ async function savePlanToDbBestEffort(row: SavePlanRow) {
       materials: safeMaterials,
       error: row.error ?? null,
       plan_json: safePlan,
-      notes_json: safeNotes,
+      notes_json: { content: safeNotes },
       daily_json: safeDaily,
       practice_json: safePractice,
       plan: safePlan,
@@ -745,7 +606,7 @@ export async function GET(req: Request) {
     const sb = createServerAdminClient()
     const { data, error } = await sb
       .from(TABLE_PLANS)
-      .select('id, user_id, prompt, title, language, plan, plan_json, notes, notes_json, daily, daily_json, practice, practice_json, materials, status, credits_charged, generation_id, created_at, updated_at')
+      .select('*')
       .eq('user_id', user.id)
       .eq('id', id)
       .maybeSingle()
@@ -770,11 +631,17 @@ export async function GET(req: Request) {
       )
     }
 
+    const notesValue =
+      typeof data.notes === 'string'
+        ? data.notes
+        : typeof data.notes_json?.content === 'string'
+          ? data.notes_json.content
+          : ''
     const result = {
       title: data.title ?? 'Study plan',
       language: data.language ?? 'hu',
       plan: data.plan_json ?? data.plan ?? {},
-      notes: data.notes_json ?? data.notes ?? {},
+      notes: notesValue,
       daily: data.daily_json ?? data.daily ?? {},
       practice: data.practice_json ?? data.practice ?? {},
     }
@@ -869,90 +736,57 @@ export async function POST(req: Request) {
       )
     }
 
-    if (cost > 0) {
-      const sb = createServerAdminClient()
-      const { error: rpcErr } = await sb.rpc('consume_credits', { user_id: user.id, cost })
-      if (rpcErr) {
-        const message = String(rpcErr?.message || '')
-        if (message.includes('INSUFFICIENT_CREDITS')) {
-          return NextResponse.json(
-            { error: { code: 'INSUFFICIENT_CREDITS', message: 'Not enough credits' } },
-            { status: 402, headers: { 'cache-control': 'no-store' } }
-          )
-        }
-        return NextResponse.json(
-          { error: { code: 'CREDITS_CHARGE_FAILED', message: 'Credits charge failed' } },
-          { status: 500, headers: { 'cache-control': 'no-store' } }
-        )
-      }
-      console.log('plan.generate credits_charged', {
-        requestId,
-        planId: idToUse,
-        credits_charged: cost,
-      })
-    }
-
     const client = new OpenAI({ apiKey: openAiKey })
     const model = MODEL
     const systemText = [
       'Return ONLY valid JSON matching the schema. No markdown. No prose. No extra keys.',
       `Language: ${isHu ? 'Hungarian' : 'English'} (use "hu" or "en" in the language field).`,
       'If information is missing, make reasonable assumptions and still fill all fields.',
-      'Write notes.content as long-form textbook-style explanation with full sentences.',
-      'Minimum target length for notes.content is 800 words.',
+      'Write notes as long-form textbook-style explanation with full sentences.',
+      'Minimum target length for notes is 800 words.',
       'Include: step-by-step derivations, worked examples, interpretation, common mistakes, and an end summary.',
       'Use high-school mathematical teaching style suitable for exam preparation.',
       'Plan must include 4-8 blocks. Daily.schedule must include 3-7 days.',
-      'Daily.sessions must be real Pomodoro sessions with study_minutes and break_minutes.',
+      'Each day should reference plan block IDs through daily.schedule[].block_ids.',
       'Practice must include exactly 10 Q&A pairs.',
     ].join('\n')
     const userText = [
       `Prompt:\n${prompt || '(empty)'}`,
       `File names:\n${imageFiles.map((f) => f.name).join(', ') || '(none)'}`,
-      'Schema: title, language, plan.blocks[{title,duration_minutes,description}], notes.content, daily.schedule[{day,focus,tasks}], daily.sessions[{session,topic,study_minutes,break_minutes,goal}], practice.questions[{q,a}]',
+      'Schema: title, language, plan.blocks[{id,title,duration_minutes,description}], notes, daily.schedule[{day,focus,block_ids}], practice.questions[{q,a}]',
     ].join('\n\n')
 
     const callModel = async (system: string) => {
-      const userContent: any[] = [{ type: 'input_text', text: userText }]
+      const userContent: any[] = [{ type: 'text', text: userText }]
       for (const file of imageFiles) {
         const buf = Buffer.from(await file.arrayBuffer())
         const b64 = buf.toString('base64')
-        userContent.push({ type: 'input_image', image_url: `data:${file.type};base64,${b64}` })
+        userContent.push({ type: 'image_url', image_url: { url: `data:${file.type};base64,${b64}` } })
       }
       const resp = await withTimeout(45_000, (signal) =>
-        client.responses.create(
+        client.chat.completions.create(
           {
             model,
-            input: [
-              { role: 'system', content: [{ type: 'input_text', text: system }] },
+            messages: [
+              { role: 'system', content: system },
               { role: 'user', content: userContent as any },
             ],
             temperature: 0.2,
-            max_output_tokens: MAX_OUTPUT_TOKENS,
-            text: {
-              format: {
-                type: 'json_schema',
+            max_tokens: MAX_OUTPUT_TOKENS,
+            response_format: {
+              type: 'json_schema',
+              json_schema: {
                 name: 'study_plan',
                 schema: planResultJsonSchema,
                 strict: true,
               },
             },
           },
-          { signal } as any
+          { signal }
         )
       )
       console.log('OPENAI RAW RESPONSE:', resp)
-      const outputText = String((resp as any)?.output_text ?? '').trim()
-      if (outputText) return outputText
-      const chunks = Array.isArray((resp as any)?.output) ? (resp as any).output : []
-      const parts: string[] = []
-      for (const item of chunks) {
-        const content = Array.isArray(item?.content) ? item.content : []
-        for (const c of content) {
-          if (typeof c?.text === 'string') parts.push(c.text)
-        }
-      }
-      return parts.join('\n').trim()
+      return String(resp.choices?.[0]?.message?.content ?? '').trim()
     }
 
     let planPayload: PlanPayload
@@ -971,17 +805,14 @@ export async function POST(req: Request) {
             ? normalizePlanPayload(validated.data)
             : normalizePlanPayload(parsed)
         } catch {
-          console.warn('plan.generate json_parse_failed_plain_text_fallback', {
+          console.error('plan.generate json_parse_failed', {
             requestId,
             planId: idToUse,
             raw: rawOutput.slice(0, 500),
           })
-          parseFallbackMessage = 'AI_JSON_PARSE_FAILED_PLAIN_TEXT_WRAPPED'
-          planPayload = fromPlainTextToPlanPayload(
-            rawOutput,
-            prompt,
-            imageFiles.map((f) => f.name),
-            isHu
+          return NextResponse.json(
+            { error: { code: 'OPENAI_INVALID_JSON', message: 'Model returned invalid JSON' } },
+            { status: 502, headers: { 'cache-control': 'no-store' } }
           )
         }
       }
@@ -998,14 +829,11 @@ export async function POST(req: Request) {
     if (planPayload.plan.blocks.length < 4) {
       planPayload.plan.blocks = fallback.plan.blocks
     }
-    if (String(planPayload.notes.content || '').trim().length < 200) {
-      planPayload.notes.content = fallback.notes.content
+    if (String(planPayload.notes || '').trim().length < 200) {
+      planPayload.notes = fallback.notes
     }
     if (planPayload.daily.schedule.length < 3) {
       planPayload.daily.schedule = fallback.daily.schedule
-    }
-    if (planPayload.daily.sessions.length < 3) {
-      planPayload.daily.sessions = fallback.daily.sessions
     }
     if (planPayload.practice.questions.length < 10) {
       const merged = [...planPayload.practice.questions, ...fallback.practice.questions]
@@ -1035,6 +863,29 @@ export async function POST(req: Request) {
       materials: imageFiles.map((f) => f.name),
       error: parseFallbackMessage,
     })
+
+    if (cost > 0) {
+      const sb = createServerAdminClient()
+      const { error: rpcErr } = await sb.rpc('consume_credits', { user_id: user.id, cost })
+      if (rpcErr) {
+        const message = String(rpcErr?.message || '')
+        if (message.includes('INSUFFICIENT_CREDITS')) {
+          return NextResponse.json(
+            { error: { code: 'INSUFFICIENT_CREDITS', message: 'Not enough credits' } },
+            { status: 402, headers: { 'cache-control': 'no-store' } }
+          )
+        }
+        return NextResponse.json(
+          { error: { code: 'CREDITS_CHARGE_FAILED', message: 'Credits charge failed' } },
+          { status: 500, headers: { 'cache-control': 'no-store' } }
+        )
+      }
+      console.log('plan.generate credits_charged', {
+        requestId,
+        planId: idToUse,
+        credits_charged: cost,
+      })
+    }
     await setCurrentPlanBestEffort(user.id, idToUse)
 
     console.log('plan.generate done', {
@@ -1045,7 +896,9 @@ export async function POST(req: Request) {
     return NextResponse.json(
       {
         planId: idToUse,
-        plan,
+        title: plan.title,
+        language: plan.language,
+        plan: plan.plan,
         notes: plan.notes,
         daily: plan.daily,
         practice: plan.practice,

@@ -70,6 +70,7 @@ const planResultJsonSchema = {
           items: { type: 'string' },
         },
       },
+      required: ['bullets'],
     },
     daily: {
       type: 'object',
@@ -92,6 +93,7 @@ const planResultJsonSchema = {
           },
         },
       },
+      required: ['schedule'],
     },
     practice: {
       type: 'object',
@@ -110,9 +112,10 @@ const planResultJsonSchema = {
           },
         },
       },
+      required: ['questions'],
     },
   },
-  required: ['title', 'language', 'plan'],
+  required: ['title', 'language', 'plan', 'notes', 'daily', 'practice'],
 }
 
 

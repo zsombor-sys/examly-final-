@@ -183,58 +183,72 @@ function clampText(text: string) {
   return raw.length > MAX_OUTPUT_CHARS ? raw.slice(0, MAX_OUTPUT_CHARS) : raw
 }
 
-function enforceTotalChars(payload: PlanPayload): PlanPayload {
-  const refs: Array<{ get: () => string; set: (v: string) => void }> = [
-    ...payload.notes.bullets.map((_, i) => ({
-      get: () => payload.notes.bullets[i],
-      set: (v: string) => {
-        payload.notes.bullets[i] = v
-      },
-    })),
-    ...payload.practice.questions.flatMap((_, i) => [
-      { get: () => payload.practice.questions[i].a, set: (v: string) => (payload.practice.questions[i].a = v) },
-      { get: () => payload.practice.questions[i].q, set: (v: string) => (payload.practice.questions[i].q = v) },
-    ]),
-    ...payload.plan.blocks.flatMap((_, i) => [
-      { get: () => payload.plan.blocks[i].description, set: (v: string) => (payload.plan.blocks[i].description = v) },
-      { get: () => payload.plan.blocks[i].title, set: (v: string) => (payload.plan.blocks[i].title = v) },
-    ]),
-    ...payload.daily.schedule.flatMap((_, i) => [
-      { get: () => payload.daily.schedule[i].focus, set: (v: string) => (payload.daily.schedule[i].focus = v) },
-      ...payload.daily.schedule[i].tasks.map((_, ti) => ({
-        get: () => payload.daily.schedule[i].tasks[ti],
-        set: (v: string) => {
-          payload.daily.schedule[i].tasks[ti] = v
-        },
-      })),
-    ]),
-    { get: () => payload.title, set: (v) => (payload.title = v) },
-  ]
+function jsonLen(value: unknown) {
+  return JSON.stringify(value ?? {}).length
+}
 
-  let total = refs.reduce((sum, r) => sum + r.get().length, 0)
-  if (total <= MAX_OUTPUT_CHARS) return payload
-
-  for (const ref of refs) {
-    if (total <= MAX_OUTPUT_CHARS) break
-    const curr = ref.get()
-    const excess = total - MAX_OUTPUT_CHARS
-    if (excess <= 0) break
-    const nextLen = Math.max(0, curr.length - excess)
-    ref.set(curr.slice(0, nextLen))
-    total -= Math.min(curr.length, excess)
+function enforceFieldChars(payload: PlanPayload): PlanPayload {
+  while (jsonLen(payload.plan) > MAX_OUTPUT_CHARS && payload.plan.blocks.length > 1) {
+    payload.plan.blocks.pop()
+  }
+  while (jsonLen(payload.notes) > MAX_OUTPUT_CHARS && payload.notes.bullets.length > 1) {
+    payload.notes.bullets.pop()
+  }
+  while (jsonLen(payload.daily) > MAX_OUTPUT_CHARS && payload.daily.schedule.length > 1) {
+    payload.daily.schedule.pop()
+  }
+  while (jsonLen(payload.practice) > MAX_OUTPUT_CHARS && payload.practice.questions.length > 1) {
+    payload.practice.questions.pop()
   }
 
-  let jsonLen = JSON.stringify(payload).length
-  if (jsonLen <= MAX_OUTPUT_CHARS) return payload
+  while (jsonLen(payload.plan) > MAX_OUTPUT_CHARS) {
+    const block = payload.plan.blocks[payload.plan.blocks.length - 1]
+    if (!block) break
+    if (block.description.length > 20) {
+      block.description = block.description.slice(0, Math.max(20, block.description.length - 200))
+      continue
+    }
+    if (block.title.length > 8) {
+      block.title = block.title.slice(0, Math.max(8, block.title.length - 80))
+      continue
+    }
+    break
+  }
 
-  for (const ref of refs) {
-    if (jsonLen <= MAX_OUTPUT_CHARS) break
-    const curr = ref.get()
-    const excess = jsonLen - MAX_OUTPUT_CHARS
-    if (excess <= 0) break
-    const nextLen = Math.max(0, curr.length - excess)
-    ref.set(curr.slice(0, nextLen))
-    jsonLen = JSON.stringify(payload).length
+  while (jsonLen(payload.notes) > MAX_OUTPUT_CHARS) {
+    const i = payload.notes.bullets.length - 1
+    if (i < 0) break
+    const curr = payload.notes.bullets[i] ?? ''
+    if (curr.length <= 20) break
+    payload.notes.bullets[i] = curr.slice(0, Math.max(20, curr.length - 200))
+  }
+
+  while (jsonLen(payload.daily) > MAX_OUTPUT_CHARS) {
+    const day = payload.daily.schedule[payload.daily.schedule.length - 1]
+    if (!day) break
+    if (day.tasks.length > 1) {
+      day.tasks.pop()
+      continue
+    }
+    if (day.focus.length > 20) {
+      day.focus = day.focus.slice(0, Math.max(20, day.focus.length - 200))
+      continue
+    }
+    break
+  }
+
+  while (jsonLen(payload.practice) > MAX_OUTPUT_CHARS) {
+    const q = payload.practice.questions[payload.practice.questions.length - 1]
+    if (!q) break
+    if (q.a.length > 20) {
+      q.a = q.a.slice(0, Math.max(20, q.a.length - 200))
+      continue
+    }
+    if (q.q.length > 20) {
+      q.q = q.q.slice(0, Math.max(20, q.q.length - 200))
+      continue
+    }
+    break
   }
 
   return payload
@@ -269,7 +283,7 @@ function clampPlanPayload(input: PlanPayload): PlanPayload {
     },
   }
 
-  return enforceTotalChars(payload)
+  return enforceFieldChars(payload)
 }
 
 type PlanBlockInput = { title?: string | null; duration_minutes?: number | null; description?: string | null }
@@ -515,13 +529,7 @@ async function savePlanToDbBestEffort(row: SavePlanRow) {
   try {
     const sb = createServerAdminClient()
     const safePlan = row.result?.plan ?? {}
-    const notesSource = row.result?.notes as any
-    const safeNotes =
-      typeof notesSource === 'string'
-        ? notesSource
-        : Array.isArray(notesSource?.bullets)
-          ? notesSource.bullets.map((b: string) => String(b || '').trim()).filter(Boolean).join('\n')
-          : ''
+    const safeNotes = row.result?.notes ?? {}
     const safeDaily = row.result?.daily ?? {}
     const safePractice = row.result?.practice ?? {}
     const safeMaterials = Array.isArray(row.materials) ? row.materials : []
@@ -541,12 +549,14 @@ async function savePlanToDbBestEffort(row: SavePlanRow) {
       generation_id: row.generationId ?? null,
       materials: safeMaterials,
       error: row.error ?? null,
+      plan_json: safePlan,
+      notes_json: safeNotes,
+      daily_json: safeDaily,
+      practice_json: safePractice,
       plan: safePlan,
       notes: safeNotes,
       daily: safeDaily,
-      daily_json: safeDaily,
       practice: safePractice,
-      practice_json: safePractice,
     }
     const { error } = await sb.from(TABLE_PLANS).upsert(basePayload, { onConflict: 'id' })
     if (!error) return
@@ -586,7 +596,7 @@ export async function GET(req: Request) {
     const sb = createServerAdminClient()
     const { data, error } = await sb
       .from(TABLE_PLANS)
-      .select('id, user_id, prompt, title, language, plan, notes, daily_json, practice_json, materials, status, credits_charged, generation_id, created_at, updated_at')
+      .select('id, user_id, prompt, title, language, plan, plan_json, notes, notes_json, daily, daily_json, practice, practice_json, materials, status, credits_charged, generation_id, created_at, updated_at')
       .eq('user_id', user.id)
       .eq('id', id)
       .maybeSingle()
@@ -614,10 +624,10 @@ export async function GET(req: Request) {
     const result = {
       title: data.title ?? 'Study plan',
       language: data.language ?? 'hu',
-      plan: data.plan ?? {},
-      notes: data.notes ?? {},
-      daily: data.daily_json ?? {},
-      practice: data.practice_json ?? {},
+      plan: data.plan_json ?? data.plan ?? {},
+      notes: data.notes_json ?? data.notes ?? {},
+      daily: data.daily_json ?? data.daily ?? {},
+      practice: data.practice_json ?? data.practice ?? {},
     }
     return NextResponse.json({ plan: data, result }, { headers: { 'cache-control': 'no-store' } })
   } catch (e: any) {
@@ -812,6 +822,7 @@ export async function POST(req: Request) {
     }
 
     let planPayload: PlanPayload
+    let parseFallbackMessage: string | null = null
     let rawOutput = ''
     try {
       rawOutput = await callModel(systemText)
@@ -825,28 +836,8 @@ export async function POST(req: Request) {
       } catch {
         const snippet = rawOutput.slice(0, 500)
         console.error('plan.generate json_parse_failed', { requestId, planId: idToUse, raw: snippet })
-        const fallback = minimalPlanPayload(isHu)
-        await savePlanToDbBestEffort({
-          id: idToUse,
-          userId: user.id,
-          prompt,
-          title: fallback.title,
-          language: fallback.language,
-          created_at: new Date().toISOString(),
-          result: fallback,
-          creditsCharged: 0,
-          inputChars: prompt.length,
-          imagesCount: imageFiles.length,
-          outputChars: snippet.length,
-          status: 'failed',
-          generationId: requestId,
-          materials: imageFiles.map((f) => f.name),
-          error: `AI_JSON_PARSE_FAILED: ${snippet}`,
-        })
-        return NextResponse.json(
-          { error: { code: 'AI_JSON_PARSE_FAILED', message: 'Failed to parse AI JSON' }, plan: fallback },
-          { status: 200, headers: { 'cache-control': 'no-store' } }
-        )
+        parseFallbackMessage = `AI_JSON_PARSE_FAILED: ${snippet}`
+        planPayload = minimalPlanPayload(isHu)
       }
     }
 
@@ -888,10 +879,10 @@ export async function POST(req: Request) {
       inputChars: prompt.length,
       imagesCount: imageFiles.length,
       outputChars,
-      status: 'complete',
+      status: parseFallbackMessage ? 'fallback' : 'complete',
       generationId: requestId,
       materials: imageFiles.map((f) => f.name),
-      error: null,
+      error: parseFallbackMessage,
     })
     if (cost > 0) {
       try {
@@ -930,7 +921,14 @@ export async function POST(req: Request) {
       elapsed_ms: Date.now() - startedAt,
     })
     return NextResponse.json(
-      { planId: idToUse, plan },
+      {
+        planId: idToUse,
+        plan,
+        notes: plan.notes,
+        daily: plan.daily,
+        practice: plan.practice,
+        parseFallback: parseFallbackMessage ? true : false,
+      },
       { headers: { 'cache-control': 'no-store', 'x-examly-plan': 'ok' } }
     )
   } catch (e: any) {

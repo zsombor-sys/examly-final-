@@ -5,9 +5,7 @@ import Link from 'next/link'
 import AuthGate from '@/components/AuthGate'
 import { Button, Textarea } from '@/components/ui'
 import { authedFetch } from '@/lib/authClient'
-
-const MAX_PROMPT = 150
-const MAX_IMAGES = 3
+import { MAX_IMAGES, MAX_PROMPT_CHARS } from '@/lib/limits'
 
 type HomeworkResult = {
   language: 'hu' | 'en'
@@ -37,8 +35,8 @@ function Inner() {
   async function run() {
     setError(null)
     setResult(null)
-    if (prompt.trim().length > MAX_PROMPT) {
-      setError(`Prompt too long (max ${MAX_PROMPT}).`)
+    if (prompt.trim().length > MAX_PROMPT_CHARS) {
+      setError(`Prompt too long (max ${MAX_PROMPT_CHARS}).`)
       return
     }
     if (files.length > MAX_IMAGES) {
@@ -70,10 +68,10 @@ function Inner() {
         <Textarea
           value={prompt}
           onChange={(e) => setPrompt(e.target.value)}
-          maxLength={MAX_PROMPT}
+          maxLength={MAX_PROMPT_CHARS}
           placeholder="Írd be a feladatot (max 150 karakter), vagy tölts fel képet."
         />
-        <div className="text-xs text-white/60">{prompt.length}/{MAX_PROMPT} • max {MAX_IMAGES} kép • 1 kredit</div>
+        <div className="text-xs text-white/60">{prompt.length}/{MAX_PROMPT_CHARS} • max {MAX_IMAGES} kép • 1 kredit</div>
         <input
           type="file"
           accept="image/*"

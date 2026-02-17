@@ -3,13 +3,11 @@ import OpenAI from 'openai'
 import { z } from 'zod'
 import { requireUser } from '@/lib/authServer'
 import { createServerAdminClient } from '@/lib/supabase/server'
-import { OPENAI_MODEL } from '@/lib/limits'
+import { CREDITS_PER_GENERATION, MAX_IMAGES, MAX_PROMPT_CHARS, OPENAI_MODEL } from '@/lib/limits'
 
 export const runtime = 'nodejs'
 
-const MAX_PROMPT_CHARS = 150
-const MAX_IMAGES = 3
-const COST = 1
+const COST = CREDITS_PER_GENERATION
 
 const reqSchema = z.object({
   prompt: z.string().max(MAX_PROMPT_CHARS).optional().default(''),

@@ -15,17 +15,22 @@ import { MAX_IMAGES, MAX_PROMPT_CHARS, CREDITS_PER_GENERATION } from '@/lib/limi
 
 type Block = { type: 'study' | 'break'; minutes: number; label: string }
 type DayPlan = { day: string; focus: string; tasks: string[]; minutes: number; blocks?: Block[] }
-type PlanBlock = { id: string; title: string; duration_minutes: number; description: string }
+type PlanBlock = { id?: string; title: string; duration_minutes: number; description: string }
+type NotesValue = string | { content?: string | null } | null | undefined
 type PlanResult = {
   title?: string | null
   language?: 'hu' | 'en' | null
   plan?: { blocks?: PlanBlock[] } | null
-  notes?: string | null
-  daily?: { schedule?: Array<{ day: number; focus: string; block_ids: string[] }> } | null
+  notes?: NotesValue
+  daily?: { schedule?: Array<{ day: number; focus: string; tasks?: string[]; block_ids?: string[] }> } | null
   practice?: { questions?: Array<{ q: string; a: string }> } | null
   plan_json?: { blocks?: PlanBlock[] } | null
-  daily_json?: { schedule?: Array<{ day: number; focus: string; block_ids: string[] }> } | null
+  daily_json?: { schedule?: Array<{ day: number; focus: string; tasks?: string[]; block_ids?: string[] }> } | null
   practice_json?: { questions?: Array<{ q: string; a: string }> } | null
+  fallback?: boolean
+  errorCode?: string | null
+  requestId?: string | null
+  errorMessage?: string | null
 }
 
 type SavedPlan = { id: string; title: string; created_at: string }
@@ -36,9 +41,11 @@ type PlanRow = {
   language: 'hu' | 'en' | null
   plan: { blocks?: PlanBlock[] } | null
   notes: string | null
-  daily_json: { schedule?: Array<{ day: number; focus: string; block_ids: string[] }> } | null
+  daily_json: { schedule?: Array<{ day: number; focus: string; tasks?: string[]; block_ids?: string[] }> } | null
   practice_json: { questions?: Array<{ q: string; a: string }> } | null
   created_at: string | null
+  error?: string | null
+  status?: string | null
 }
 
 function historyKeyForUser(userId: string | null) {
@@ -125,15 +132,17 @@ function shortPrompt(p: string) {
   return t.length > 120 ? t.slice(0, 120) + '…' : t
 }
 
-function notesToBullets(notes: PlanResult['notes']): string[] {
-  if (!notes) return []
-  if (typeof notes === 'string') {
-    return notes
-      .split(/\n+/)
-      .map((t) => t.trim())
-      .filter(Boolean)
-  }
-  return []
+function extractNotesText(notes: NotesValue): string {
+  if (!notes) return ''
+  if (typeof notes === 'string') return notes
+  if (typeof notes?.content === 'string') return notes.content
+  return ''
+}
+
+function getRequestId(source: any): string | null {
+  if (!source) return null
+  const maybeId = source.requestId ?? source.planId ?? source.id ?? null
+  return typeof maybeId === 'string' && maybeId ? maybeId : null
 }
 
 export default function PlanPage() {
@@ -259,8 +268,12 @@ function Inner() {
         return
       }
 
+      const normalized = json?.result as PlanResult | undefined
       const plan = json?.plan as PlanRow | undefined
-      if (plan) {
+      if (normalized) {
+        setSelectedId(id)
+        setResult(normalized)
+      } else if (plan) {
         setSelectedId(id)
         setResult({
           title: plan.title ?? null,
@@ -269,10 +282,14 @@ function Inner() {
           notes: plan.notes ?? null,
           daily_json: plan.daily_json ?? null,
           practice_json: plan.practice_json ?? null,
+          fallback: plan.status === 'fallback',
+          errorCode: plan.error ?? null,
         })
-      } else {
-        setSelectedId(id)
-        setResult(json?.result ?? null)
+      }
+
+      if (json?.result?.fallback || json?.plan?.status === 'fallback') {
+        const rid = getRequestId(json?.result) ?? getRequestId(json?.plan) ?? id
+        setError(`Generation failed. Request ID: ${rid}`)
       }
 
       setAskAnswer(null)
@@ -411,6 +428,14 @@ function Inner() {
       const serverId = typeof json?.planId === 'string' ? (json.planId as string) : null
       if (!serverId) throw new Error('Server returned no plan id')
 
+      if (json?.fallback) {
+        const rid = getRequestId(json) ?? serverId
+        const msg = typeof json?.errorMessage === 'string' && json.errorMessage.trim()
+          ? json.errorMessage.trim()
+          : 'Generation failed.'
+        setError(`${msg} Request ID: ${rid}`)
+      }
+
       await loadPlan(serverId)
       await loadHistory(userId)
       if (userId) {
@@ -486,7 +511,7 @@ function Inner() {
     prompt.trim().length <= MAX_PROMPT_CHARS &&
     files.length <= MAX_IMAGES &&
     (prompt.trim().length >= 6 || files.length > 0)
-  const summaryText = String(result?.notes ?? '').trim()
+  const summaryText = extractNotesText(result?.notes).trim()
   const costEstimate = CREDITS_PER_GENERATION
   const pomodoroPlan = useMemo<DayPlan[]>(() => {
     if (!result) return []
@@ -495,17 +520,17 @@ function Inner() {
       : Array.isArray(result.plan?.blocks)
         ? result.plan.blocks
         : []
-    const byId = new Map(blockList.map((b) => [b.id, b]))
     const daysRaw = Array.isArray(result.daily_json?.schedule)
       ? result.daily_json.schedule
       : Array.isArray(result.daily?.schedule)
         ? result.daily.schedule
         : []
     return daysRaw.map((d) => {
-      const ids = Array.isArray(d.block_ids) ? d.block_ids : []
-      const mappedBlocks = ids.map((id) => byId.get(String(id))).filter(Boolean) as PlanBlock[]
+      const tasks = Array.isArray(d.tasks)
+        ? d.tasks.map((t) => String(t ?? '').trim()).filter(Boolean)
+        : []
+      const mappedBlocks = blockList.filter((b) => tasks.includes(b.title))
       const blocks: Block[] = mappedBlocks.map((b) => ({ type: 'study', minutes: b.duration_minutes, label: b.title }))
-      const tasks = mappedBlocks.map((b) => b.title)
       const minutes = Math.max(20, blocks.reduce((sum, b) => sum + b.minutes, 0) || 60)
       return {
         day: `Day ${d.day}`,
@@ -675,7 +700,7 @@ function Inner() {
                   <div className="text-xs uppercase tracking-[0.18em] text-white/55">Plan</div>
                   <div className="mt-3 space-y-3">
                     {(Array.isArray(result.plan_json?.blocks) ? result.plan_json.blocks : result.plan?.blocks ?? []).map((b) => (
-                      <div key={b.id} className="rounded-2xl border border-white/10 bg-black/30 px-4 py-3">
+                      <div key={`${b.title}-${b.duration_minutes}`} className="rounded-2xl border border-white/10 bg-black/30 px-4 py-3">
                         <div className="flex items-center justify-between gap-3">
                           <div className="text-white/90">{b.title}</div>
                           <div className="text-white/60">{b.duration_minutes} min</div>
@@ -696,7 +721,11 @@ function Inner() {
               {tab === 'notes' && result && (
                 <div className="rounded-3xl border border-white/10 bg-white/[0.02] p-5 min-w-0 overflow-hidden">
                   <div className="text-xs uppercase tracking-[0.18em] text-white/55">Notes</div>
-                  <div className="mt-4 text-sm text-white/80 whitespace-pre-wrap">{String(result.notes ?? '')}</div>
+                  {extractNotesText(result.notes).trim() ? (
+                    <StructuredText value={extractNotesText(result.notes)} className="mt-4 text-sm text-white/80 whitespace-pre-wrap leading-7" />
+                  ) : (
+                    <div className="mt-4 text-sm text-white/70">Nincs jegyzet generálva (hiba). Próbáld újra.</div>
+                  )}
                 </div>
               )}
 
@@ -716,16 +745,7 @@ function Inner() {
                             <div key={`day-${d.day}`} className="rounded-2xl border border-white/10 bg-black/30 px-4 py-3">
                               <div className="text-white/90">Day {d.day}: {d.focus}</div>
                               <div className="mt-2 space-y-1 text-white/70">
-                                {(d.block_ids ?? []).map((bid, i) => {
-                                  const blocks = Array.isArray(result.plan_json?.blocks)
-                                    ? result.plan_json.blocks
-                                    : Array.isArray(result.plan?.blocks)
-                                      ? result.plan.blocks
-                                      : []
-                                  const b = blocks.find((x) => x.id === bid)
-                                  if (!b) return null
-                                  return <div key={`${d.day}-task-${i}`}>{b.title} ({b.duration_minutes} min)</div>
-                                })}
+                                {(d.tasks ?? []).map((task, i) => <div key={`${d.day}-task-${i}`}>{task}</div>)}
                               </div>
                             </div>
                           ))

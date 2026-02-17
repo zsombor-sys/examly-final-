@@ -5,16 +5,15 @@ import { requireUser } from '@/lib/authServer'
 import { createServerAdminClient } from '@/lib/supabase/server'
 import { getPlan, upsertPlanInMemory } from '@/app/api/plan/store'
 import { TABLE_PLANS } from '@/lib/dbTables'
+import { CREDITS_PER_GENERATION, MAX_IMAGES, MAX_OUTPUT_CHARS, MAX_PROMPT_CHARS, OPENAI_MODEL } from '@/lib/limits'
 
 export const runtime = 'nodejs'
 export const maxDuration = 60
 
-const MODEL = 'gpt-4.1-mini'
-const MAX_PROMPT_CHARS = 150
-const MAX_IMAGES = 3
-const MAX_NOTES_CHARS = 4000
+const MODEL = OPENAI_MODEL
+const MAX_NOTES_CHARS = MAX_OUTPUT_CHARS
 const MAX_OUTPUT_TOKENS = 1200
-const GENERATION_COST = 1
+const GENERATION_COST = CREDITS_PER_GENERATION
 const OPENAI_TIMEOUT_MS = 45_000
 
 type GeneratedResult = {
@@ -42,8 +41,7 @@ const planSchema = {
       properties: {
         blocks: {
           type: 'array',
-          minItems: 5,
-          maxItems: 7,
+          maxItems: 6,
           items: {
             type: 'object',
             additionalProperties: false,
@@ -62,7 +60,7 @@ const planSchema = {
       type: 'object',
       additionalProperties: false,
       properties: {
-        content: { type: 'string', minLength: 3000, maxLength: 4000 },
+        content: { type: 'string', maxLength: 4000 },
       },
       required: ['content'],
     },
@@ -128,7 +126,7 @@ function fallbackResult(prompt: string, isHu: boolean): GeneratedResult {
     title,
     language: isHu ? 'hu' : 'en',
     plan: { blocks: [] },
-    notes: { content: 'Temporary fallback notes.' },
+    notes: { content: isHu ? 'Nincs jegyzet generalva (hiba). Probald ujra.' : 'No notes were generated (error). Please try again.' },
     daily: { schedule: [] },
     practice: { questions: [] },
   }
@@ -220,14 +218,15 @@ async function parseInput(req: Request) {
     files = form.getAll('files').filter((f): f is File => f instanceof File)
   }
 
-  prompt = prompt.slice(0, MAX_PROMPT_CHARS).trim()
+  if (prompt.length > MAX_PROMPT_CHARS) return { ok: false as const, error: 'PROMPT_TOO_LONG' }
+  prompt = prompt.trim()
   const images = files.filter((f) => f.type.startsWith('image/'))
   if (images.length > MAX_IMAGES) return { ok: false as const, error: 'TOO_MANY_FILES' }
 
-  return { ok: true as const, value: { prompt, images } }
+  return { ok: true as const, value: { prompt, images, imageNames: images.map((x) => x.name).filter(Boolean) } }
 }
 
-async function callOpenAI(prompt: string, images: File[], isHu: boolean) {
+async function callOpenAI(prompt: string, images: File[], isHu: boolean, imageNames: string[]) {
   const openAiKey = process.env.OPENAI_API_KEY
   if (!openAiKey) throw new Error('OPENAI_KEY_MISSING')
 
@@ -246,13 +245,13 @@ async function callOpenAI(prompt: string, images: File[], isHu: boolean) {
             + 'No code fences.\n'
             + `Language: ${isHu ? 'Hungarian' : 'English'}.\n\n`
             + 'GOAL:\n'
-            + '- PLAN: concise, structured, short descriptions\n'
-            + '- NOTES: detailed, structured, 3000-4000 characters\n'
+            + '- PLAN: concise, structured, compact descriptions\n'
+            + '- NOTES: detailed, structured, learnable notes\n'
             + '- DAILY: short structured schedule\n'
             + '- PRACTICE: 5-8 quality practice questions with short solutions\n\n'
             + 'RULES:\n'
-            + '1) PLAN: 5-7 blocks max, each description max 200 chars, duration_minutes required.\n'
-            + '2) NOTES: 3000-4000 chars, deep explanation, definitions, step-by-step examples, important formulas, key mistakes, use paragraph + bullet style inside text.\n'
+            + '1) PLAN: max 6 blocks, each description max 1-2 short sentences and max 200 chars, duration_minutes required.\n'
+            + '2) NOTES: 1500-3500 chars preferred, hard max 4000 chars. Include definitions, step-by-step examples, formulas, study tips, and common mistakes.\n'
             + '3) DAILY: 3-6 days, short titles.\n'
             + '4) PRACTICE: 5-8 problems with short solution outline.\n'
             + 'Follow the JSON schema exactly.',
@@ -266,6 +265,8 @@ async function callOpenAI(prompt: string, images: File[], isHu: boolean) {
           type: 'input_text',
           text:
             `Prompt: ${prompt || '(empty)'}\n` +
+            `Image files: ${imageNames.length ? imageNames.join(', ') : '(none)'}\n` +
+            'A kepek tartalma a tananyag.\n' +
             'Generate: title, language, plan.blocks, notes.content, daily.schedule with tasks, practice.questions.',
         },
       ],
@@ -290,7 +291,7 @@ async function callOpenAI(prompt: string, images: File[], isHu: boolean) {
           format: {
             type: 'json_schema',
             name: 'study_plan',
-            schema: planSchema,
+            schema: planSchema as any,
             strict: true,
           },
         },
@@ -379,14 +380,29 @@ export async function GET(req: Request) {
         content:
           typeof data.notes === 'string'
             ? truncateNotes(data.notes)
-            : truncateNotes(String(data.notes_json?.content ?? 'Temporary fallback notes.')),
+            : truncateNotes(
+                String(
+                  data.notes_json?.content
+                  ?? ((data.language === 'en' ? 'en' : 'hu') === 'hu'
+                    ? 'Nincs jegyzet generalva (hiba). Probald ujra.'
+                    : 'No notes were generated (error). Please try again.')
+                )
+              ),
       },
       daily: data.daily_json ?? data.daily ?? { schedule: [] },
       practice: data.practice_json ?? data.practice ?? { questions: [] },
     }
 
     const safe = normalizeResult(result, fallbackResult('', result.language === 'hu'))
-    return NextResponse.json({ plan: data, result: safe })
+    return NextResponse.json({
+      plan: data,
+      result: {
+        ...safe,
+        fallback: data.status === 'fallback',
+        errorCode: typeof data.error === 'string' ? data.error : null,
+        requestId: typeof data.id === 'string' ? data.id : null,
+      },
+    })
   } catch (e: any) {
     return NextResponse.json(
       { error: { code: 'PLAN_GET_FAILED', message: String(e?.message ?? 'Server error') } },
@@ -397,11 +413,18 @@ export async function GET(req: Request) {
 
 export async function POST(req: Request) {
   const planId = crypto.randomUUID()
+  const requestId = planId
   try {
     const user = await requireUser(req)
 
     const parsed = await parseInput(req)
     if (!parsed.ok) {
+      if (parsed.error === 'PROMPT_TOO_LONG') {
+        return NextResponse.json(
+          { error: { code: 'PROMPT_TOO_LONG', message: `Prompt max ${MAX_PROMPT_CHARS} characters` } },
+          { status: 400 }
+        )
+      }
       if (parsed.error === 'TOO_MANY_FILES') {
         return NextResponse.json(
           { error: { code: 'TOO_MANY_FILES', message: `Max ${MAX_IMAGES} images allowed` } },
@@ -413,6 +436,7 @@ export async function POST(req: Request) {
 
     const prompt = parsed.value.prompt.slice(0, MAX_PROMPT_CHARS)
     const images = parsed.value.images.slice(0, MAX_IMAGES)
+    const imageNames = parsed.value.imageNames.slice(0, MAX_IMAGES)
     const isHu = detectHungarian(prompt)
     const fallback = fallbackResult(prompt, isHu)
 
@@ -430,7 +454,7 @@ export async function POST(req: Request) {
     let fallbackReason: string | null = null
 
     try {
-      const outputText = await callOpenAI(prompt, images, isHu)
+      const outputText = await callOpenAI(prompt, images, isHu, imageNames)
       if (!outputText) {
         fallbackReason = 'OPENAI_EMPTY_OUTPUT'
       } else {
@@ -451,6 +475,7 @@ export async function POST(req: Request) {
     await savePlanBestEffort(user.id, planId, prompt, result, fallbackReason)
 
     return NextResponse.json({
+      requestId,
       planId,
       title: result.title,
       language: result.language,
@@ -460,12 +485,18 @@ export async function POST(req: Request) {
       practice: result.practice,
       fallback: !!fallbackReason,
       errorCode: fallbackReason,
+      errorMessage: fallbackReason
+        ? isHu
+          ? 'Generalasi hiba tortent. Probald ujra.'
+          : 'Generation failed. Please try again.'
+        : null,
     })
   } catch (e: any) {
     console.error('plan.post failed', { planId, message: e?.message ?? 'unknown' })
     const safe = fallbackResult('', true)
     return NextResponse.json(
       {
+        requestId,
         planId,
         title: safe.title,
         language: safe.language,
@@ -475,6 +506,7 @@ export async function POST(req: Request) {
         practice: safe.practice,
         fallback: true,
         errorCode: 'SERVER_FALLBACK',
+        errorMessage: 'Generation failed. Please try again.',
       },
       { status: 200 }
     )

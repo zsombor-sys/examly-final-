@@ -11,14 +11,14 @@ import StructuredText from '@/components/StructuredText'
 
 type Block = { type: 'study' | 'break'; minutes: number; label: string }
 type DayPlan = { day: string; focus: string; tasks: string[]; minutes: number; blocks?: Block[] }
-type PlanBlock = { id: string; title: string; duration_minutes: number; description: string }
+type PlanBlock = { id?: string; title: string; duration_minutes: number; description: string }
 type PlanResult = {
   title?: string | null
   plan?: { blocks?: PlanBlock[] } | null
   notes?: string | null
-  daily?: { schedule?: Array<{ day: number; focus: string; block_ids: string[] }> } | null
+  daily?: { schedule?: Array<{ day: number; focus: string; tasks?: string[]; block_ids?: string[] }> } | null
   plan_json?: { blocks?: PlanBlock[] } | null
-  daily_json?: { schedule?: Array<{ day: number; focus: string; block_ids: string[] }> } | null
+  daily_json?: { schedule?: Array<{ day: number; focus: string; tasks?: string[]; block_ids?: string[] }> } | null
 }
 
 function historyKeyForUser(userId: string | null) {
@@ -141,13 +141,15 @@ function Inner() {
       : Array.isArray(plan.plan?.blocks)
         ? plan.plan.blocks
         : []
-    const byId = new Map(blocksRaw.map((b) => [b.id, b]))
     const day1 = Array.isArray(plan.daily_json?.schedule)
       ? plan.daily_json.schedule[0]
       : Array.isArray(plan.daily?.schedule)
         ? plan.daily.schedule[0]
         : null
-    const mapped = (day1?.block_ids ?? []).map((id) => byId.get(id)).filter(Boolean) as PlanBlock[]
+    const dayTasks = Array.isArray(day1?.tasks) ? day1.tasks.map((x) => String(x ?? '').trim()).filter(Boolean) : []
+    const mapped = dayTasks.length
+      ? blocksRaw.filter((b) => dayTasks.includes(b.title))
+      : []
     const blocks: Block[] = mapped.map((b) => ({ type: 'study', minutes: b.duration_minutes, label: b.title }))
     const minutes = blocks.reduce((sum, b) => sum + b.minutes, 0)
     return [
@@ -155,7 +157,7 @@ function Inner() {
         day: 'Today',
         focus: day1?.focus || plan.title || 'Focus',
         minutes,
-        tasks: mapped.map((b) => b.title),
+        tasks: dayTasks.length ? dayTasks : mapped.map((b) => b.title),
         blocks,
       },
     ]
@@ -206,11 +208,13 @@ function Inner() {
                           <div key={i} className="rounded-2xl border border-white/10 bg-black/30 px-4 py-3">
                             <div className="text-white/90">Day {d.day}: {d.focus}</div>
                             <div className="mt-2 space-y-1 text-white/70">
-                              {(d.block_ids ?? []).map((bid, bi) => {
-                                const b = blocks.find((x) => x.id === bid)
-                                if (!b) return null
-                                return <div key={bi}>{b.title} ({b.duration_minutes} min)</div>
-                              })}
+                              {Array.isArray(d.tasks) && d.tasks.length > 0
+                                ? d.tasks.map((task, bi) => <div key={bi}>{task}</div>)
+                                : (d.block_ids ?? []).map((bid, bi) => {
+                                    const b = blocks.find((x) => x.id === bid)
+                                    if (!b) return null
+                                    return <div key={bi}>{b.title} ({b.duration_minutes} min)</div>
+                                  })}
                             </div>
                           </div>
                         )

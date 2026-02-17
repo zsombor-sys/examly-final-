@@ -7,12 +7,13 @@ import { authedFetch } from '@/lib/authClient'
 import { supabase } from '@/lib/supabaseClient'
 import { ArrowLeft, Loader2 } from 'lucide-react'
 import Pomodoro from '@/components/Pomodoro'
+import StructuredText from '@/components/StructuredText'
 
 type Block = { type: 'study' | 'break'; minutes: number; label: string }
 type DayPlan = { day: string; focus: string; tasks: string[]; minutes: number; blocks?: Block[] }
 type PlanResult = {
-  plan: { title: string }
-  daily: { blocks: Array<{ title: string; duration_minutes: number; description: string }> }
+  plan?: { title?: string } | string | null
+  daily?: { blocks?: Array<{ title: string; duration_minutes: number; description: string }> } | string | null
 }
 
 function historyKeyForUser(userId: string | null) {
@@ -127,7 +128,12 @@ function Inner() {
 
   const pomodoroPlan = useMemo<DayPlan[]>(() => {
     if (!plan) return []
-    const blocksRaw = Array.isArray(plan.daily?.blocks) ? plan.daily.blocks : []
+    const dailyObj = plan.daily && typeof plan.daily === 'object' ? plan.daily : null
+    const blocksRaw = Array.isArray(dailyObj?.blocks) ? dailyObj.blocks : []
+    const title =
+      plan.plan && typeof plan.plan === 'object' && typeof plan.plan.title === 'string'
+        ? plan.plan.title
+        : 'Focus'
     const blocks: Block[] = blocksRaw.map((b) => ({
       type: /break|pihen/i.test(b.title) ? 'break' : 'study',
       minutes: Math.max(5, Math.min(180, Number(b.duration_minutes) || 25)),
@@ -137,7 +143,7 @@ function Inner() {
     return [
       {
         day: 'Today',
-        focus: plan.plan?.title || 'Focus',
+        focus: title,
         minutes,
         tasks: blocksRaw.map((b) => String(b.title || '')).filter(Boolean),
         blocks,
@@ -165,7 +171,7 @@ function Inner() {
           <>
             <div className="text-xs uppercase tracking-[0.18em] text-white/55">Daily</div>
             <h1 className="mt-2 text-2xl font-semibold tracking-tight text-white break-words">
-              {plan.plan?.title || 'Daily'}
+              {(plan.plan && typeof plan.plan === 'object' && typeof plan.plan.title === 'string' ? plan.plan.title : '') || 'Daily'}
             </h1>
 
             <div className="mt-6 grid gap-6 min-w-0 2xl:grid-cols-[minmax(0,1fr)_360px]">
@@ -179,15 +185,19 @@ function Inner() {
                 <section className="w-full rounded-3xl border border-white/10 bg-white/[0.02] p-5 min-w-0 overflow-hidden">
                   <div className="text-xs uppercase tracking-[0.18em] text-white/55">Schedule</div>
                   <div className="mt-4 space-y-3 text-sm text-white/80">
-                    {(plan?.daily?.blocks ?? []).map((b, i) => (
-                      <div key={i} className="rounded-2xl border border-white/10 bg-black/30 px-4 py-3">
-                        <div className="flex items-center justify-between gap-3">
-                          <div className="text-white/90">{b.title}</div>
-                          <div className="text-white/60">{Math.round(Number(b.duration_minutes) || 0)} min</div>
+                    {(plan?.daily && typeof plan.daily === 'object' && Array.isArray(plan.daily.blocks) && plan.daily.blocks.length > 0) ? (
+                      plan.daily.blocks.map((b, i) => (
+                        <div key={i} className="rounded-2xl border border-white/10 bg-black/30 px-4 py-3">
+                          <div className="flex items-center justify-between gap-3">
+                            <div className="text-white/90">{b.title}</div>
+                            <div className="text-white/60">{Math.round(Number(b.duration_minutes) || 0)} min</div>
+                          </div>
+                          {b.description ? <div className="mt-2 text-white/70">{b.description}</div> : null}
                         </div>
-                        {b.description ? <div className="mt-2 text-white/70">{b.description}</div> : null}
-                      </div>
-                    ))}
+                      ))
+                    ) : (
+                      <StructuredText value={plan?.daily} />
+                    )}
                   </div>
                 </section>
               </div>

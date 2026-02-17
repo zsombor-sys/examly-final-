@@ -10,6 +10,7 @@ import { authedFetch } from '@/lib/authClient'
 import { supabase } from '@/lib/supabaseClient'
 import HScroll from '@/components/HScroll'
 import Pomodoro from '@/components/Pomodoro'
+import StructuredText from '@/components/StructuredText'
 import { MAX_IMAGES, MAX_PROMPT_CHARS, CREDITS_PER_GENERATION } from '@/lib/limits'
 
 type Block = { type: 'study' | 'break'; minutes: number; label: string }
@@ -137,9 +138,20 @@ function shortPrompt(p: string) {
   return t.length > 120 ? t.slice(0, 120) + '…' : t
 }
 
-function notesToBullets(notes: PlanResult['notes']) {
+function notesToBullets(notes: PlanResult['notes']): string[] {
   if (!notes) return []
   if (typeof notes === 'string') {
+    const raw = notes.trim()
+    if ((raw.startsWith('{') && raw.endsWith('}')) || (raw.startsWith('[') && raw.endsWith(']'))) {
+      try {
+        const parsed = JSON.parse(raw)
+        if (Array.isArray(parsed?.bullets)) {
+          return parsed.bullets.map((t: unknown) => String(t ?? '').trim()).filter(Boolean)
+        }
+      } catch {
+        // ignore and continue with plain-text fallback
+      }
+    }
     return notes
       .split(/\n+/)
       .map((t) => t.trim())
@@ -675,9 +687,8 @@ function Inner() {
               {tab === 'plan' && result && (
                 <div className="rounded-3xl border border-white/10 bg-white/[0.02] p-5 min-w-0 overflow-hidden">
                   <div className="text-xs uppercase tracking-[0.18em] text-white/55">Plan</div>
-                  <div className="mt-3 text-sm text-white/75 whitespace-pre-wrap">
-                    {summaryText.slice(0, 300)}
-                    {summaryText.length > 300 ? '…' : ''}
+                  <div className="mt-3">
+                    <StructuredText value={result.plan ?? result.notes} />
                   </div>
                   {(result?.daily_json?.schedule?.[0]?.focus || result?.daily?.schedule?.[0]?.focus) ? (
                     <div className="mt-3 text-xs text-white/60">
@@ -714,16 +725,20 @@ function Inner() {
                     <section className="w-full rounded-3xl border border-white/10 bg-white/[0.02] p-5 min-w-0 overflow-hidden">
                       <div className="text-xs uppercase tracking-[0.18em] text-white/55">Daily schedule</div>
                       <div className="mt-3 space-y-4 text-sm text-white/80">
-                        {(result.daily_json?.schedule ?? result.daily?.schedule ?? []).map((d) => (
-                          <div key={`day-${d.day}`} className="rounded-2xl border border-white/10 bg-black/30 px-4 py-3">
-                            <div className="text-white/90">Day {d.day}: {d.focus}</div>
-                            <div className="mt-2 space-y-1 text-white/70">
-                              {(d.tasks ?? []).map((t, i) => (
-                                <div key={`${d.day}-task-${i}`}>{t}</div>
-                              ))}
+                        {(result.daily_json?.schedule ?? result.daily?.schedule ?? []).length > 0 ? (
+                          (result.daily_json?.schedule ?? result.daily?.schedule ?? []).map((d) => (
+                            <div key={`day-${d.day}`} className="rounded-2xl border border-white/10 bg-black/30 px-4 py-3">
+                              <div className="text-white/90">Day {d.day}: {d.focus}</div>
+                              <div className="mt-2 space-y-1 text-white/70">
+                                {(d.tasks ?? []).map((t, i) => (
+                                  <div key={`${d.day}-task-${i}`}>{t}</div>
+                                ))}
+                              </div>
                             </div>
-                          </div>
-                        ))}
+                          ))
+                        ) : (
+                          <StructuredText value={result.daily_json ?? result.daily} />
+                        )}
                       </div>
                     </section>
                   </div>

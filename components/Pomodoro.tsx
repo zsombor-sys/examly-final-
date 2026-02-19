@@ -206,7 +206,17 @@ export default function Pomodoro({ dailyPlan }: { dailyPlan: DayPlan[] }) {
 
   const activeDay = days[activeDayIndex] ?? null
 
-  const activeBlocks = useMemo(() => normalizeBlocks(activeDay?.blocks ?? []), [activeDay])
+  const activeBlocks = useMemo(() => {
+    const direct = normalizeBlocks(activeDay?.blocks ?? [])
+    if (direct.length > 0) return direct
+    const taskFallback = Array.isArray(activeDay?.tasks)
+      ? activeDay.tasks
+          .map((t) => String(t ?? '').trim())
+          .filter(Boolean)
+          .map((t) => ({ type: 'study' as const, minutes: 25, label: t }))
+      : []
+    return normalizeBlocks(taskFallback)
+  }, [activeDay])
   const activeBlock = activeBlocks[activeBlockIndex] ?? null
 
   // ensure timer starts with day1/block1 whenever dailyPlan changes
@@ -281,7 +291,7 @@ export default function Pomodoro({ dailyPlan }: { dailyPlan: DayPlan[] }) {
     return clamp((elapsed / total) * 100, 0, 100)
   }, [activeBlock, remainingMs, usingActiveBlock])
 
-  const title = activeBlock?.label || 'No blocks'
+  const title = activeBlock?.label || 'Focus block'
   const isBreak = activeBlock?.type === 'break'
 
   return (

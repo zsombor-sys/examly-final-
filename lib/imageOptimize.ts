@@ -1,7 +1,7 @@
 import { createRequire } from 'module'
 
 export type OptimizedVisionImage = {
-  mime: 'image/jpeg'
+  mime: string
   b64: string
   bytes: number
 }
@@ -22,11 +22,17 @@ function getSharp() {
 
 export async function optimizeImageForVision(
   input: Buffer,
-  _mime: string,
+  mime: string,
   opts?: { longEdge?: number; quality?: number }
 ): Promise<OptimizedVisionImage | null> {
   const sharp = getSharp()
-  if (!sharp) return null
+  if (!sharp) {
+    return {
+      mime: mime || 'image/jpeg',
+      b64: input.toString('base64'),
+      bytes: input.byteLength,
+    }
+  }
 
   const longEdge = Math.max(256, Math.min(2048, Number(opts?.longEdge) || 1024))
   const quality = Math.max(40, Math.min(90, Number(opts?.quality) || 70))
@@ -44,6 +50,10 @@ export async function optimizeImageForVision(
       bytes: out.byteLength,
     }
   } catch {
-    return null
+    return {
+      mime: mime || 'image/jpeg',
+      b64: input.toString('base64'),
+      bytes: input.byteLength,
+    }
   }
 }

@@ -509,10 +509,10 @@ export async function POST(req: Request) {
       'Return ONLY valid JSON. No markdown. No commentary.',
       `Language target: ${targetLang === 'hu' ? 'Hungarian' : 'English'}; output language must be "${targetLang}" unless impossible.`,
       'Output must match the exact PlanDocument schema keys.',
-      'Plan must be concise and practical.',
-      'Notes must be rich, structured, and exam-ready (outline headings + bullets + short definitions + formulas/examples where relevant).',
+      'Plan summary must be concise: 2-4 lines maximum.',
+      'Notes are the primary value: rich, structured, Hungarian outline with headings + bullets + formulas + typical mistakes + quick examples.',
       'Daily schedule must include realistic HH:MM start_time/end_time blocks by day.',
-      'Practice must be concise and useful.',
+      'Practice must include at least 8 short exercises with compact answers/explanations.',
     ].join('\n')
 
     const userText = [
@@ -523,7 +523,7 @@ export async function POST(req: Request) {
     ].join('\n\n')
 
     const runStructuredAttempt = async (attempt: number): Promise<PlanDocument> => {
-      const extra = attempt > 0 ? 'Return ONLY valid JSON matching the schema strictly. No markdown.' : ''
+      const extra = attempt > 0 ? 'Return ONLY valid JSON matching schema. No prose. No code fences.' : ''
 
       const completion = await withTimeout(STEP2_TIMEOUT_MS, (signal) =>
         client.chat.completions.create(
@@ -715,6 +715,12 @@ export async function POST(req: Request) {
     }
 
     const details = String(e?.message || 'Server error').slice(0, 300)
+    if (/aborted|timed out|timeout|AbortError/i.test(String(e?.message || ''))) {
+      return NextResponse.json(
+        { error: { code: 'OPENAI_TIMEOUT', message: 'OpenAI request timed out' }, requestId },
+        { status: 504, headers: { 'cache-control': 'no-store' } }
+      )
+    }
     return NextResponse.json(
       { error: { code: 'PLAN_GENERATE_FAILED', message: details }, requestId },
       { status: 500, headers: { 'cache-control': 'no-store' } }

@@ -192,7 +192,7 @@ function truncate(text: string, maxLen: number) {
 
 function defaultHeadings(isHu: boolean) {
   return isHu
-    ? ['Fogalmak', 'Kepletek', 'Lepesek', 'Tipikus feladatok', 'Gyakori hibak', 'Mini peldak']
+    ? ['Fogalmak', 'Képletek', 'Lépések', 'Tipikus feladatok', 'Gyakori hibák', 'Mini példák']
     : ['Concepts', 'Formulas', 'Steps', 'Typical tasks', 'Common mistakes', 'Mini examples']
 }
 
@@ -282,6 +282,68 @@ function normalizeOutline(rawOutline: unknown, isHu: boolean) {
     })
   }
   return normalized.slice(0, 8)
+}
+
+function normalizeShortIntro(raw: string, isHu: boolean) {
+  const text = asText(raw)
+  if (!text) return isHu ? 'Rövid, fókuszált tanulási terv.' : 'Short, focused study plan.'
+  const normalizedLines = text
+    .split(/\r?\n+/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+  const sentences = normalizedLines.join(' ').split(/(?<=[.!?])\s+/).filter(Boolean)
+  const picked = (normalizedLines.length ? normalizedLines : sentences).slice(0, 4)
+  const intro = picked.join('\n')
+  return truncate(intro, 260)
+}
+
+function ensureMinPracticeQuestions(
+  questions: Array<{ q: string; choices?: string[]; a: string; explanation: string }>,
+  isHu: boolean,
+  sourceOutline: Array<{ heading: string; bullets: string[] }>
+) {
+  const list = [...questions]
+  const topics = sourceOutline
+    .flatMap((s) => [s.heading, ...s.bullets.slice(0, 2)])
+    .map((x) => asText(x))
+    .filter(Boolean)
+  const defaults = isHu
+    ? [
+        'Mi az alapfogalom rövid definíciója?',
+        'Melyik képletet használod erre a típusra?',
+        'Mi az első megoldási lépés?',
+        'Melyik tipikus hiba fordulhat elő itt?',
+        'Adj egy gyors ellenőrzési módszert.',
+        'Oldj meg egy rövid mintafeladatot fejben.',
+        'Mi változik, ha az egyik adat negatív?',
+        'Hogyan magyaráznád el ezt 2 mondatban?',
+      ]
+    : [
+        'What is the core definition?',
+        'Which formula is most relevant here?',
+        'What is the first solving step?',
+        'What common mistake appears here?',
+        'How can you quickly verify the result?',
+        'Solve a short sample mentally.',
+        'What changes if one value is negative?',
+        'Explain this in two sentences.',
+      ]
+
+  let i = 0
+  while (list.length < 8) {
+    const topic = topics[i % Math.max(1, topics.length)] || (isHu ? 'Téma' : 'Topic')
+    const qText = defaults[i % defaults.length]
+    list.push({
+      q: isHu ? `${qText} (${topic})` : `${qText} (${topic})`,
+      a: isHu ? `Rövid válasz: ${topic} kulcslépéseit alkalmazd.` : `Short answer: apply the key steps of ${topic}.`,
+      explanation: isHu
+        ? 'Ellenőrizd a jeleket, a képletválasztást és az eredmény realitását.'
+        : 'Check signs, formula choice, and whether the result is realistic.',
+    })
+    i += 1
+  }
+
+  return list.slice(0, 16)
 }
 
 function takeFromBudget(value: string, budget: { value: number }, minLen = 0) {
@@ -448,15 +510,15 @@ export function fallbackPlanDocument(isHu: boolean, prompt = ''): PlanDocument {
       schedule: buildScheduleFromBlocks(blocks, isHu, prompt),
     },
     practice: {
-      questions: [
+      questions: ensureMinPracticeQuestions([
         {
-          q: isHu ? 'Mi az elso lepes a feladat megoldasakor?' : 'What is the first step when solving the task?',
-          a: isHu ? 'Az adatok es kerdes pontos azonositasaval kezdj.' : 'Start by identifying given data and the exact target.',
+          q: isHu ? 'Mi az első lépés a feladat megoldásakor?' : 'What is the first step when solving the task?',
+          a: isHu ? 'Az adatok és a kérdés pontos azonosításával kezdj.' : 'Start by identifying given data and the exact target.',
           explanation: isHu
-            ? 'Ha a cel egyertelmu, kisebb az eselye a rossz modszervalasztasnak.'
+            ? 'Ha a cél egyértelmű, kisebb az esélye a rossz módszerválasztásnak.'
             : 'A clear target lowers the chance of choosing the wrong method.',
         },
-      ],
+      ], isHu, outline),
     },
   }
 }
@@ -526,7 +588,7 @@ export function normalizePlanDocument(input: any, isHu: boolean, prompt = ''): P
       ? input.practice_json.questions
       : []
 
-  const questions = rawQuestions
+  const questionsRaw = rawQuestions
     .map((q: any) => ({
       q: truncate(asText(q?.q || q?.question) || (isHu ? 'Gyakorlo kerdes' : 'Practice question'), 180),
       choices: Array.isArray(q?.choices)
@@ -541,18 +603,19 @@ export function normalizePlanDocument(input: any, isHu: boolean, prompt = ''): P
     }))
     .filter((q: any) => q.q)
     .slice(0, 16)
+  const questions = ensureMinPracticeQuestions(questionsRaw, isHu, notes.outline)
 
   const normalized: PlanDocument = {
     title: truncate(asText(input?.title) || fallback.title, 90),
     language: input?.language === 'hu' ? 'hu' : input?.language === 'en' ? 'en' : fallback.language,
-    summary: truncate(asText(input?.summary) || fallback.summary, 260),
+    summary: normalizeShortIntro(asText(input?.summary) || fallback.summary, isHu),
     plan: { blocks },
     notes,
     daily: {
       schedule: schedule.length ? schedule : fallback.daily.schedule,
     },
     practice: {
-      questions: questions.length ? questions : fallback.practice.questions,
+      questions: questions.length ? questions : ensureMinPracticeQuestions(fallback.practice.questions, isHu, notes.outline),
     },
   }
 

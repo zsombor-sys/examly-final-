@@ -5,7 +5,7 @@ import Link from 'next/link'
 import AuthGate from '@/components/AuthGate'
 import { Button, Textarea } from '@/components/ui'
 import { authedFetch } from '@/lib/authClient'
-import { MAX_IMAGES, MAX_PROMPT_CHARS } from '@/lib/limits'
+import { MAX_HOMEWORK_IMAGES, MAX_PROMPT_CHARS } from '@/lib/limits'
 
 type HomeworkResult = {
   language: 'hu' | 'en'
@@ -39,15 +39,15 @@ function Inner() {
       setError(`Prompt too long (max ${MAX_PROMPT_CHARS}).`)
       return
     }
-    if (files.length > MAX_IMAGES) {
-      setError(`Max ${MAX_IMAGES} images.`)
+    if (files.length > MAX_HOMEWORK_IMAGES) {
+      setError(`Max ${MAX_HOMEWORK_IMAGES} images.`)
       return
     }
     setLoading(true)
     try {
       const fd = new FormData()
       fd.append('prompt', prompt.trim())
-      for (const f of files.slice(0, MAX_IMAGES)) fd.append('files', f)
+      for (const f of files.slice(0, MAX_HOMEWORK_IMAGES)) fd.append('files', f)
       const res = await authedFetch('/api/homework', { method: 'POST', body: fd })
       const json = await res.json().catch(() => ({} as any))
       if (!res.ok) throw new Error(json?.error?.message ?? json?.error ?? 'Request failed')
@@ -71,12 +71,12 @@ function Inner() {
           maxLength={MAX_PROMPT_CHARS}
           placeholder="Írd be a feladatot (max 150 karakter), vagy tölts fel képet."
         />
-        <div className="text-xs text-white/60">{prompt.length}/{MAX_PROMPT_CHARS} • max {MAX_IMAGES} kép • 1 kredit</div>
+        <div className="text-xs text-white/60">{prompt.length}/{MAX_PROMPT_CHARS} • max {MAX_HOMEWORK_IMAGES} kép • 1 kredit</div>
         <input
           type="file"
           accept="image/*"
           multiple
-          onChange={(e) => setFiles(Array.from(e.target.files ?? []).slice(0, MAX_IMAGES))}
+          onChange={(e) => setFiles(Array.from(e.target.files ?? []).slice(0, MAX_HOMEWORK_IMAGES))}
         />
         <Button onClick={run} disabled={loading}>{loading ? 'Dolgozom…' : 'Megoldás készítése'}</Button>
         {error ? <div className="text-sm text-red-400">{error}</div> : null}

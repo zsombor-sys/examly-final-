@@ -3,7 +3,7 @@ import OpenAI from 'openai'
 import { z } from 'zod'
 import { requireUser } from '@/lib/authServer'
 import { createServerAdminClient } from '@/lib/supabase/server'
-import { CREDITS_PER_GENERATION, MAX_IMAGES, MAX_PROMPT_CHARS, OPENAI_MODEL } from '@/lib/limits'
+import { CREDITS_PER_GENERATION, MAX_HOMEWORK_IMAGES, MAX_PROMPT_CHARS, OPENAI_MODEL } from '@/lib/limits'
 
 export const runtime = 'nodejs'
 
@@ -61,8 +61,8 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: { code: 'PROMPT_TOO_LONG', message: `Prompt max ${MAX_PROMPT_CHARS}` } }, { status: 400 })
     }
     const imageFiles = files.filter((f) => f.type.startsWith('image/'))
-    if (imageFiles.length > MAX_IMAGES) {
-      return NextResponse.json({ error: { code: 'TOO_MANY_FILES', message: `Max ${MAX_IMAGES} images` } }, { status: 400 })
+    if (imageFiles.length > MAX_HOMEWORK_IMAGES) {
+      return NextResponse.json({ error: { code: 'TOO_MANY_FILES', message: `Max ${MAX_HOMEWORK_IMAGES} images` } }, { status: 400 })
     }
 
     const key = process.env.OPENAI_API_KEY

@@ -10,7 +10,6 @@ import { TABLE_PLANS } from '@/lib/dbTables'
 import { throwIfMissingTable } from '@/lib/supabaseErrors'
 import {
   PlanDocumentJsonSchema,
-  PlanDocumentSchema,
   fallbackPlanDocument,
   normalizePlanDocument,
   type PlanDocument,
@@ -81,6 +80,22 @@ async function parsePlanRequest(req: Request) {
 
 function detectHungarian(text: string) {
   return /\bhu\b|magyar|szia|tétel|vizsga|érettségi/i.test(text)
+}
+
+function extractFirstJsonObject(text: string) {
+  const start = text.indexOf('{')
+  const end = text.lastIndexOf('}')
+  if (start < 0 || end <= start) return null
+  return text.slice(start, end + 1)
+}
+
+function safeParseJsonObject(text: string) {
+  try {
+    const parsed = JSON.parse(text)
+    return parsed && typeof parsed === 'object' ? parsed : null
+  } catch {
+    return null
+  }
 }
 
 function logSupabaseError(context: string, error: any) {
@@ -400,8 +415,11 @@ export async function POST(req: Request) {
       'Use uploaded images as source material when present.',
     ].join('\n\n')
 
-    const runModel = async (repairMode: boolean): Promise<PlanDocument> => {
+    const buildUserContent = async (text: string) => {
       const content: any[] = [{ type: 'text', text: userText }]
+      if (text !== userText) {
+        content[0] = { type: 'text', text }
+      }
       for (const file of imageFiles) {
         const b64 = Buffer.from(await file.arrayBuffer()).toString('base64')
         content.push({
@@ -409,21 +427,21 @@ export async function POST(req: Request) {
           image_url: { url: `data:${file.type};base64,${b64}`, detail: 'low' },
         })
       }
+      return content
+    }
+
+    const runStructuredModel = async (): Promise<PlanDocument> => {
+      const content = await buildUserContent(userText)
 
       const completion = await withTimeout(OPENAI_TIMEOUT_MS, (signal) =>
         client.chat.completions.create(
           {
             model: MODEL,
             messages: [
-              {
-                role: 'system',
-                content: repairMode
-                  ? `${systemText}\nOutput ONLY JSON that exactly matches the schema.`
-                  : systemText,
-              },
+              { role: 'system', content: systemText },
               { role: 'user', content: content as any },
             ],
-            temperature: repairMode ? 0 : 0.2,
+            temperature: 0.2,
             max_tokens: MAX_OUTPUT_TOKENS,
             response_format: {
               type: 'json_schema',
@@ -442,23 +460,74 @@ export async function POST(req: Request) {
       if (!parsed || typeof parsed !== 'object') {
         throw new Error('OPENAI_INVALID_STRUCTURED_OUTPUT')
       }
-
-      const validated = PlanDocumentSchema.safeParse(parsed)
-      if (!validated.success) throw new Error('OPENAI_INVALID_STRUCTURED_OUTPUT')
-      return normalizePlanDocument(validated.data, isHu, prompt)
+      return normalizePlanDocument(parsed, isHu, prompt)
     }
 
-    let document: PlanDocument
+    const runPlainJsonRetry = async (): Promise<PlanDocument> => {
+      const retryText = [
+        userText,
+        'Respond ONLY with valid JSON. No markdown. No text.',
+      ].join('\n\n')
+      const content = await buildUserContent(retryText)
+      const completion = await withTimeout(OPENAI_TIMEOUT_MS, (signal) =>
+        client.chat.completions.create(
+          {
+            model: MODEL,
+            messages: [
+              {
+                role: 'system',
+                content: `${systemText}\nRespond ONLY with valid JSON. No markdown. No text.`,
+              },
+              { role: 'user', content: content as any },
+            ],
+            temperature: 0,
+            max_tokens: MAX_OUTPUT_TOKENS,
+          },
+          { signal }
+        )
+      )
+
+      const text = String(completion.choices?.[0]?.message?.content ?? '').trim()
+      const parsedDirect = safeParseJsonObject(text)
+      if (parsedDirect) return normalizePlanDocument(parsedDirect, isHu, prompt)
+
+      const extracted = extractFirstJsonObject(text)
+      if (!extracted) throw new Error('OPENAI_INVALID_PLAIN_JSON')
+      const parsedExtracted = safeParseJsonObject(extracted)
+      if (!parsedExtracted) throw new Error('OPENAI_INVALID_PLAIN_JSON')
+      return normalizePlanDocument(parsedExtracted, isHu, prompt)
+    }
+
+    let document: PlanDocument = processingDoc
+    let usedFallback = false
     try {
       try {
-        document = await runModel(false)
-      } catch {
-        document = await runModel(true)
+        document = await runStructuredModel()
+      } catch (err: any) {
+        const message = String(err?.message || '')
+        const code = String(err?.code || '')
+        const isStructuredInvalid =
+          message.includes('OPENAI_INVALID_STRUCTURED_OUTPUT') || code === 'OPENAI_INVALID_STRUCTURED_OUTPUT'
+        if (!isStructuredInvalid) throw err
+        console.warn('plan.generate structured_output_invalid', {
+          requestId,
+          message: err?.message ?? 'unknown',
+        })
+        try {
+          document = await runPlainJsonRetry()
+        } catch (retryErr: any) {
+          console.warn('plan.generate plain_json_retry_failed', {
+            requestId,
+            message: retryErr?.message ?? 'unknown',
+          })
+          document = fallbackPlanDocument(isHu, prompt)
+          usedFallback = true
+        }
       }
     } catch (err: any) {
       const code = /aborted|timed out|timeout/i.test(String(err?.message ?? ''))
         ? 'OPENAI_TIMEOUT'
-        : 'OPENAI_INVALID_STRUCTURED_OUTPUT'
+        : 'PLAN_GENERATION_FAILED'
 
       await savePlanToDbBestEffort({
         id: planId,
@@ -479,7 +548,7 @@ export async function POST(req: Request) {
       })
 
       return NextResponse.json(
-        { error: { code, message: code === 'OPENAI_TIMEOUT' ? 'OpenAI call timed out' : 'Structured output invalid' }, requestId },
+        { error: { code, message: code === 'OPENAI_TIMEOUT' ? 'OpenAI call timed out' : 'Plan generation failed' }, requestId },
         { status: 500, headers: { 'cache-control': 'no-store' } }
       )
     }
@@ -501,7 +570,7 @@ export async function POST(req: Request) {
       status: 'done',
       generationId: requestId,
       materials: imageFiles.map((f) => f.name),
-      error: null,
+      error: usedFallback ? 'OPENAI_INVALID_STRUCTURED_OUTPUT_FALLBACK' : null,
     })
 
     upsertPlanInMemory({

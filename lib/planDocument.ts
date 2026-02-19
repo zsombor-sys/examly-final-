@@ -57,7 +57,6 @@ export const PlanDocumentJsonSchema = {
     summary: { type: 'string' },
     blocks: {
       type: 'array',
-      minItems: 4,
       maxItems: 12,
       items: {
         type: 'object',
@@ -67,7 +66,6 @@ export const PlanDocumentJsonSchema = {
           description: { type: 'string' },
           duration_minutes: { type: 'number' },
         },
-        required: ['title', 'description', 'duration_minutes'],
       },
     },
     notes: {
@@ -84,13 +82,11 @@ export const PlanDocumentJsonSchema = {
               heading: { type: 'string' },
               bullets: { type: 'array', items: { type: 'string' } },
             },
-            required: ['heading', 'bullets'],
           },
         },
         common_mistakes: { type: 'array', items: { type: 'string' } },
         key_formulas: { type: 'array', items: { type: 'string' } },
       },
-      required: ['sections', 'common_mistakes', 'key_formulas'],
     },
     daily: {
       type: 'object',
@@ -99,7 +95,6 @@ export const PlanDocumentJsonSchema = {
         start_time: { type: 'string' },
         slots: {
           type: 'array',
-          minItems: 4,
           items: {
             type: 'object',
             additionalProperties: false,
@@ -109,11 +104,9 @@ export const PlanDocumentJsonSchema = {
               end: { type: 'string' },
               title: { type: 'string' },
             },
-            required: ['day', 'start', 'end', 'title'],
           },
         },
       },
-      required: ['start_time', 'slots'],
     },
     practice: {
       type: 'object',
@@ -130,11 +123,9 @@ export const PlanDocumentJsonSchema = {
               steps: { type: 'array', items: { type: 'string' } },
               answer_check: { type: 'string' },
             },
-            required: ['q', 'hints', 'steps'],
           },
         },
       },
-      required: ['questions'],
     },
   },
   required: ['title', 'language', 'summary', 'blocks', 'notes', 'daily', 'practice'],

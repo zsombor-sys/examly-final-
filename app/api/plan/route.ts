@@ -8,6 +8,8 @@ import { CREDITS_PER_GENERATION, MAX_PLAN_IMAGES, MAX_PROMPT_CHARS, OPENAI_MODEL
 import { getCredits, chargeCredits, refundCredits } from '@/lib/credits'
 import { TABLE_PLANS } from '@/lib/dbTables'
 import { throwIfMissingTable } from '@/lib/supabaseErrors'
+import { optimizeImageForVision, type OptimizedVisionImage } from '@/lib/imageOptimize'
+import { extractFromImagesWithVision } from '@/lib/visionExtract'
 import {
   PlanDocumentJsonSchema,
   fallbackPlanDocument,
@@ -20,12 +22,16 @@ export const maxDuration = 60
 export const dynamic = 'force-dynamic'
 
 const MODEL = OPENAI_MODEL
+const VISION_MODEL = process.env.OPENAI_VISION_MODEL || OPENAI_MODEL
 const MAX_OUTPUT_TOKENS = 1400
-const OPENAI_TIMEOUT_MS = 14_000
+const STEP1_TIMEOUT_MS = 11_000
+const STEP2_TIMEOUT_MS = 14_000
 const OPENAI_ATTEMPTS = 3
+const MAX_VISION_BYTES = 8 * 1024 * 1024
 
 const planRequestSchema = z.object({
   prompt: z.string().max(MAX_PROMPT_CHARS).optional().default(''),
+  storage_paths: z.array(z.string().min(1)).optional().default([]),
 })
 
 async function withTimeout<T>(ms: number, fn: (signal: AbortSignal) => Promise<T>) {
@@ -42,6 +48,7 @@ async function parsePlanRequest(req: Request) {
   const contentType = req.headers.get('content-type') || ''
   let raw: any = null
   let files: File[] = []
+  let storagePaths: string[] = []
 
   if (contentType.includes('application/json')) {
     raw = await req.json().catch(() => null)
@@ -49,12 +56,20 @@ async function parsePlanRequest(req: Request) {
     const form = await req.formData()
     raw = {
       prompt: form.get('prompt'),
+      storage_paths: form.getAll('storage_paths'),
     }
     files = form.getAll('files').filter((f): f is File => f instanceof File)
+    storagePaths = form
+      .getAll('storage_paths')
+      .map((x) => String(x ?? '').trim())
+      .filter(Boolean)
   }
 
   const input = {
     prompt: raw?.prompt != null ? String(raw.prompt) : '',
+    storage_paths: Array.isArray(raw?.storage_paths)
+      ? raw.storage_paths.map((x: any) => String(x ?? '').trim()).filter(Boolean)
+      : storagePaths,
   }
 
   if (input.prompt.length > MAX_PROMPT_CHARS) {
@@ -66,7 +81,8 @@ async function parsePlanRequest(req: Request) {
     return { ok: false as const, error: parsed.error }
   }
 
-  if (files.length > MAX_PLAN_IMAGES) {
+  const totalSelected = files.filter((f) => String(f.type || '').startsWith('image/')).length + input.storage_paths.length
+  if (totalSelected > MAX_PLAN_IMAGES) {
     return { ok: false as const, error: 'TOO_MANY_FILES' as const }
   }
 
@@ -75,6 +91,7 @@ async function parsePlanRequest(req: Request) {
     value: {
       prompt: parsed.data.prompt.trim(),
       files,
+      storage_paths: parsed.data.storage_paths,
     },
   }
 }
@@ -91,6 +108,75 @@ function logSupabaseError(context: string, error: any) {
     details: error?.details ?? null,
     hint: error?.hint ?? null,
   })
+}
+
+type RawImageSource = {
+  name: string
+  mime: string
+  buffer: Buffer
+  source: 'upload' | 'storage'
+}
+
+async function collectRawImages(input: {
+  files: File[]
+  storagePaths: string[]
+  maxImages: number
+}): Promise<RawImageSource[]> {
+  const out: RawImageSource[] = []
+  const maxImages = Math.max(0, Math.min(MAX_PLAN_IMAGES, input.maxImages))
+
+  for (const file of input.files) {
+    if (out.length >= maxImages) break
+    if (!String(file.type || '').startsWith('image/')) continue
+    const buffer = Buffer.from(await file.arrayBuffer())
+    out.push({
+      name: String(file.name || `upload-${out.length + 1}`),
+      mime: String(file.type || 'image/jpeg'),
+      buffer,
+      source: 'upload',
+    })
+  }
+
+  if (out.length < maxImages && input.storagePaths.length > 0) {
+    const sb = createServerAdminClient()
+    for (const p of input.storagePaths) {
+      if (out.length >= maxImages) break
+      const path = String(p || '').trim()
+      if (!path) continue
+      try {
+        const { data, error } = await sb.storage.from('uploads').download(path)
+        if (error || !data) continue
+        const mime = String((data as any).type || '')
+        if (!mime.startsWith('image/')) continue
+        const buffer = Buffer.from(await data.arrayBuffer())
+        out.push({
+          name: path.split('/').pop() || `storage-${out.length + 1}`,
+          mime: mime || 'image/jpeg',
+          buffer,
+          source: 'storage',
+        })
+      } catch {
+        // ignore per-file storage failures
+      }
+    }
+  }
+
+  return out
+}
+
+async function optimizeVisionImages(rawImages: RawImageSource[]): Promise<OptimizedVisionImage[]> {
+  const optimized: OptimizedVisionImage[] = []
+  let total = 0
+
+  for (const img of rawImages) {
+    const o = await optimizeImageForVision(img.buffer, img.mime, { longEdge: 1024, quality: 70 })
+    if (!o) continue
+    if (total + o.bytes > MAX_VISION_BYTES) continue
+    optimized.push(o)
+    total += o.bytes
+  }
+
+  return optimized
 }
 
 type SavePlanRow = {
@@ -290,21 +376,39 @@ export async function POST(req: Request) {
 
     const promptRaw = parsedRequest.value.prompt
     const files = parsedRequest.value.files
+    const storagePaths = parsedRequest.value.storage_paths
     const planId = crypto.randomUUID()
     const openAiKey = process.env.OPENAI_API_KEY
 
-    const imageFiles = files.filter((f) => f.type.startsWith('image/')).slice(0, MAX_PLAN_IMAGES)
-    if (imageFiles.length > MAX_PLAN_IMAGES) {
+    const requestedImageCount = files.filter((f) => f.type.startsWith('image/')).length + storagePaths.length
+    if (requestedImageCount > MAX_PLAN_IMAGES) {
       return NextResponse.json(
         { error: { code: 'TOO_MANY_FILES', message: `Max ${MAX_PLAN_IMAGES} images` } },
         { status: 400, headers: { 'cache-control': 'no-store' } }
       )
     }
+    const imagesSelected = Math.min(MAX_PLAN_IMAGES, requestedImageCount)
+
+    const rawImages = await collectRawImages({
+      files,
+      storagePaths,
+      maxImages: MAX_PLAN_IMAGES,
+    })
+    const imagesDownloaded = rawImages.length
+    const optimizedImages = await optimizeVisionImages(rawImages)
+    const imagesSentToVision = optimizedImages.length
 
     const prompt =
       promptRaw.trim() ||
-      (imageFiles.length ? 'Create structured study notes and a study plan based on the uploaded materials.' : '')
+      (imagesDownloaded ? 'Create structured study notes and a study plan based on the uploaded materials.' : '')
     const isHu = detectHungarian(prompt)
+
+    console.log('plan.images', {
+      requestId,
+      imagesSelected,
+      imagesDownloaded,
+      imagesSentToVision,
+    })
 
     cost = CREDITS_PER_GENERATION
 
@@ -345,11 +449,11 @@ export async function POST(req: Request) {
       result: processingDoc,
       creditsCharged: 0,
       inputChars: prompt.length,
-      imagesCount: imageFiles.length,
+      imagesCount: imagesDownloaded,
       outputChars: JSON.stringify(processingDoc).length,
       status: 'processing',
       generationId: requestId,
-      materials: imageFiles.map((f) => f.name),
+      materials: rawImages.map((x) => x.name),
       error: null,
     })
 
@@ -364,11 +468,11 @@ export async function POST(req: Request) {
         result: processingDoc,
         creditsCharged: 0,
         inputChars: prompt.length,
-        imagesCount: imageFiles.length,
+        imagesCount: imagesDownloaded,
         outputChars: JSON.stringify(processingDoc).length,
         status: 'failed',
         generationId: requestId,
-        materials: imageFiles.map((f) => f.name),
+        materials: rawImages.map((x) => x.name),
         error: 'OPENAI_KEY_MISSING',
       })
       return NextResponse.json(
@@ -379,9 +483,31 @@ export async function POST(req: Request) {
 
     const client = new OpenAI({ apiKey: openAiKey })
 
+    const extracted = await extractFromImagesWithVision({
+      client,
+      model: VISION_MODEL,
+      prompt,
+      images: optimizedImages,
+      requestId,
+      retries: 2,
+      timeoutMs: STEP1_TIMEOUT_MS,
+    })
+
+    const extractLength = String(extracted.extracted || '').length
+    console.log('plan.vision', {
+      requestId,
+      imagesSelected,
+      imagesDownloaded,
+      imagesSentToVision,
+      extractLength,
+    })
+
+    const targetLang: 'hu' | 'en' =
+      extracted.language === 'hu' || (extracted.language !== 'en' && isHu) ? 'hu' : 'en'
+
     const systemText = [
       'Return ONLY valid JSON. No markdown. No commentary.',
-      `Language target: ${isHu ? 'Hungarian' : 'English'}; output language must be "${isHu ? 'hu' : 'en'}" unless impossible.`,
+      `Language target: ${targetLang === 'hu' ? 'Hungarian' : 'English'}; output language must be "${targetLang}" unless impossible.`,
       'Output must match the exact PlanDocument schema keys.',
       'Plan must be concise and practical.',
       'Notes must be rich, structured, and exam-ready (outline headings + bullets + short definitions + formulas/examples where relevant).',
@@ -391,33 +517,21 @@ export async function POST(req: Request) {
 
     const userText = [
       `Prompt:\n${prompt || '(empty)'}`,
-      `Image files:\n${imageFiles.map((f) => f.name).join(', ') || '(none)'}`,
-      'Use uploaded images as source material when present.',
+      `Extracted material from images:\n${extracted.extracted || '(none)'}`,
+      `Key topics:\n${extracted.key_topics.join(', ') || '(none)'}`,
+      `Tasks found:\n${extracted.tasks_found.join(' | ') || '(none)'}`,
     ].join('\n\n')
 
-    const buildUserContent = async () => {
-      const content: any[] = [{ type: 'text', text: userText }]
-      for (const file of imageFiles) {
-        const b64 = Buffer.from(await file.arrayBuffer()).toString('base64')
-        content.push({
-          type: 'image_url',
-          image_url: { url: `data:${file.type};base64,${b64}`, detail: 'low' },
-        })
-      }
-      return content
-    }
-
     const runStructuredAttempt = async (attempt: number): Promise<PlanDocument> => {
-      const content = await buildUserContent()
       const extra = attempt > 0 ? 'Return ONLY valid JSON matching the schema strictly. No markdown.' : ''
 
-      const completion = await withTimeout(OPENAI_TIMEOUT_MS, (signal) =>
+      const completion = await withTimeout(STEP2_TIMEOUT_MS, (signal) =>
         client.chat.completions.create(
           {
             model: MODEL,
             messages: [
               { role: 'system', content: [systemText, extra].filter(Boolean).join('\n') },
-              { role: 'user', content: content as any },
+              { role: 'user', content: userText },
             ],
             temperature: 0,
             max_tokens: MAX_OUTPUT_TOKENS,
@@ -489,11 +603,11 @@ export async function POST(req: Request) {
           result: processingDoc,
           creditsCharged: 0,
           inputChars: prompt.length,
-          imagesCount: imageFiles.length,
+          imagesCount: imagesDownloaded,
           outputChars: JSON.stringify(processingDoc).length,
           status: 'failed',
           generationId: requestId,
-          materials: imageFiles.map((f) => f.name),
+          materials: rawImages.map((x) => x.name),
           error: code,
         })
 
@@ -528,11 +642,11 @@ export async function POST(req: Request) {
       result: document,
       creditsCharged: cost,
       inputChars: prompt.length,
-      imagesCount: imageFiles.length,
+      imagesCount: imagesDownloaded,
       outputChars,
       status: 'done',
       generationId: requestId,
-      materials: imageFiles.map((f) => f.name),
+      materials: rawImages.map((x) => x.name),
       error: finalPath === 'fallback_used' ? 'OPENAI_INVALID_STRUCTURED_OUTPUT_FALLBACK' : null,
     })
 
@@ -550,6 +664,11 @@ export async function POST(req: Request) {
       requestId,
       planId,
       finalPath,
+      finalSchemaValid: finalPath !== 'fallback_used',
+      imagesSelected,
+      imagesDownloaded,
+      imagesSentToVision,
+      extractLength,
       elapsed_ms: Date.now() - startedAt,
       retries: finalPath === 'strict_success' ? 0 : finalPath === 'strict_retry_success' ? 1 : OPENAI_ATTEMPTS,
     })

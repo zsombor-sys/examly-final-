@@ -4,20 +4,18 @@ import { requireUser } from '@/lib/authServer'
 import OpenAI from 'openai'
 import { getPlan, upsertPlanInMemory } from '@/app/api/plan/store'
 import { createServerAdminClient } from '@/lib/supabase/server'
-import { CREDITS_PER_GENERATION, MAX_IMAGES, MAX_OUTPUT_CHARS, MAX_PROMPT_CHARS, OPENAI_MODEL } from '@/lib/limits'
+import { CREDITS_PER_GENERATION, MAX_OUTPUT_CHARS, MAX_PLAN_IMAGES, MAX_PROMPT_CHARS, OPENAI_MODEL } from '@/lib/limits'
 import { getCredits, chargeCredits, refundCredits } from '@/lib/credits'
 import { TABLE_PLANS } from '@/lib/dbTables'
 import { throwIfMissingTable } from '@/lib/supabaseErrors'
-import { callOpenAIJsonWithRetries } from '@/lib/aiJson'
 
 export const runtime = 'nodejs'
-export const maxDuration = 60
+export const maxDuration = 300
 export const dynamic = 'force-dynamic'
 
 const MODEL = OPENAI_MODEL
 const MAX_OUTPUT_TOKENS = 1600
-const OPENAI_TIMEOUT_MS = 45_000
-const OPENAI_PARSE_RETRIES = 2
+const OPENAI_TIMEOUT_MS = 75_000
 const MAX_NOTES_CHARS = 4000
 const MAX_PLAN_TITLE_CHARS = 64
 const MAX_PLAN_DESC_CHARS = 220
@@ -30,7 +28,7 @@ const PlanResultSchema = z.object({
   title: z.string(),
   language: z.enum(['hu', 'en']),
   plan: z.object({
-    focus: z.string().optional().default(''),
+    summary: z.string().optional().default(''),
     blocks: z.array(
       z.object({
         title: z.string(),
@@ -40,7 +38,7 @@ const PlanResultSchema = z.object({
     ).max(6),
   }),
   notes: z.object({
-    content_markdown: z.string().optional().default(''),
+    content: z.string().optional().default(''),
   }),
   daily: z.object({
     schedule: z.array(
@@ -56,11 +54,87 @@ const PlanResultSchema = z.object({
       z.object({
         q: z.string(),
         a: z.string(),
-        steps: z.array(z.string()).optional().default([]),
       })
     ),
   }),
 })
+
+const planResultJsonSchema = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    title: { type: 'string' },
+    language: { type: 'string', enum: ['hu', 'en'] },
+    plan: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        summary: { type: 'string' },
+        blocks: {
+          type: 'array',
+          maxItems: 6,
+          items: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              title: { type: 'string' },
+              description: { type: 'string' },
+              duration_minutes: { type: 'number' },
+            },
+            required: ['title', 'description', 'duration_minutes'],
+          },
+        },
+      },
+      required: ['summary', 'blocks'],
+    },
+    notes: {
+      type: 'object',
+      additionalProperties: false,
+      properties: { content: { type: 'string' } },
+      required: ['content'],
+    },
+    daily: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        schedule: {
+          type: 'array',
+          items: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              day: { type: 'number' },
+              title: { type: 'string' },
+              items: { type: 'array', items: { type: 'string' } },
+            },
+            required: ['day', 'title', 'items'],
+          },
+        },
+      },
+      required: ['schedule'],
+    },
+    practice: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        questions: {
+          type: 'array',
+          items: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              q: { type: 'string' },
+              a: { type: 'string' },
+            },
+            required: ['q', 'a'],
+          },
+        },
+      },
+      required: ['questions'],
+    },
+  },
+  required: ['title', 'language', 'plan', 'notes', 'daily', 'practice'],
+} as const
 
 
 async function withTimeout<T>(ms: number, fn: (signal: AbortSignal) => Promise<T>) {
@@ -102,7 +176,7 @@ async function parsePlanRequest(req: Request) {
     return { ok: false as const, error: parsed.error }
   }
 
-  if (files.length > MAX_IMAGES) {
+  if (files.length > MAX_PLAN_IMAGES) {
     return { ok: false as const, error: 'TOO_MANY_FILES' as const }
   }
 
@@ -154,10 +228,10 @@ function sanitizeMarkdown(text: string) {
 type PlanPayload = {
   title: string
   language: 'hu' | 'en'
-  plan: { focus: string; blocks: Array<{ title: string; duration_minutes: number; description: string }> }
-  notes: { content_markdown: string }
+  plan: { summary: string; blocks: Array<{ title: string; duration_minutes: number; description: string }> }
+  notes: { content: string }
   daily: { schedule: Array<{ day: number; title: string; items: string[] }> }
-  practice: { questions: Array<{ q: string; a: string; steps: string[] }> }
+  practice: { questions: Array<{ q: string; a: string }> }
 }
 
 function clampText(text: string) {
@@ -181,7 +255,7 @@ function clampPlanPayload(input: PlanPayload): PlanPayload {
     title: clampText(input.title),
     language: input.language,
     plan: {
-      focus: clampText(input.plan.focus),
+      summary: clampText(input.plan.summary),
       blocks: input.plan.blocks.map((b) => ({
         title: clampText(b.title).slice(0, MAX_PLAN_TITLE_CHARS),
         duration_minutes: b.duration_minutes,
@@ -189,7 +263,7 @@ function clampPlanPayload(input: PlanPayload): PlanPayload {
       })),
     },
     notes: {
-      content_markdown: clampText(input.notes.content_markdown).slice(0, MAX_NOTES_CHARS),
+      content: clampText(input.notes.content).slice(0, MAX_NOTES_CHARS),
     },
     daily: {
       schedule: input.daily.schedule.map((d) => ({
@@ -202,7 +276,6 @@ function clampPlanPayload(input: PlanPayload): PlanPayload {
       questions: input.practice.questions.map((q) => ({
         q: clampText(q.q),
         a: clampText(q.a),
-        steps: q.steps.map((s) => clampText(s)),
       })),
     },
   }
@@ -217,7 +290,7 @@ type PracticeQuestionInput = { q?: string | null; a?: string | null; steps?: Arr
 function normalizePlanPayload(input: any): PlanPayload {
   const title = sanitizeText(String(input?.title ?? '').trim() || 'Study plan')
   const language = input?.language === 'en' ? 'en' : 'hu'
-  const planFocus = sanitizeText(String(input?.plan?.focus ?? '').trim() || (language === 'hu' ? 'Napi fokusz' : 'Daily focus'))
+  const planSummary = sanitizeText(String(input?.plan?.summary ?? input?.plan?.focus ?? '').trim() || (language === 'hu' ? 'Rövid tanulási terv összefoglaló.' : 'Short study plan summary.'))
   const planBlocksRaw = Array.isArray(input?.plan?.blocks) ? input.plan.blocks : []
   const planBlocks = planBlocksRaw.map((b: PlanBlockInput) => ({
     title: sanitizeText(String(b?.title ?? '').trim() || 'Block'),
@@ -225,10 +298,10 @@ function normalizePlanPayload(input: any): PlanPayload {
     description: sanitizeText(String(b?.description ?? '').trim() || 'Short study block.'),
   }))
 
-  const notesText = typeof input?.notes?.content_markdown === 'string'
-    ? input.notes.content_markdown
-    : typeof input?.notes?.content === 'string'
-      ? input.notes.content
+  const notesText = typeof input?.notes?.content === 'string'
+    ? input.notes.content
+    : typeof input?.notes?.content_markdown === 'string'
+      ? input.notes.content_markdown
       : Array.isArray(input?.notes?.bullets)
         ? input.notes.bullets.map((x: any) => String(x ?? '').trim()).filter(Boolean).join('\n')
         : ''
@@ -248,22 +321,17 @@ function normalizePlanPayload(input: any): PlanPayload {
   const practiceQuestions = practiceRaw.map((q: PracticeQuestionInput) => ({
     q: sanitizeText(String(q?.q ?? '').trim() || 'Question'),
     a: sanitizeText(String(q?.a ?? '').trim() || 'Answer'),
-    steps: Array.isArray(q?.steps)
-      ? q.steps.map((s) => sanitizeText(String(s ?? '').trim())).filter(Boolean)
-      : typeof q?.explanation === 'string' && q.explanation.trim()
-        ? [sanitizeText(q.explanation)]
-        : [],
   }))
 
   return {
     title,
     language,
     plan: {
-      focus: planFocus,
+      summary: planSummary,
       blocks: planBlocks.length ? planBlocks.slice(0, 6) : [],
     },
     notes: {
-      content_markdown: sanitizeMarkdown(notesText),
+      content: sanitizeMarkdown(notesText),
     },
     daily: {
       schedule: dailyDays.length ? dailyDays.slice(0, 7) : [],
@@ -281,7 +349,7 @@ function fallbackPlanPayload(prompt: string, fileNames: string[], isHu: boolean)
     title: isHu && !titleBase ? 'Tanulasi terv' : title,
     language: isHu ? 'hu' : 'en',
     plan: {
-      focus: isHu ? 'Vizsgafelkészülés' : 'Exam preparation',
+      summary: isHu ? 'Rövid, fókuszált vizsgafelkészülési terv.' : 'A short, focused exam prep plan.',
       blocks: [
         {
           title: isHu ? 'Attekintes' : 'Review',
@@ -306,7 +374,7 @@ function fallbackPlanPayload(prompt: string, fileNames: string[], isHu: boolean)
       ],
     },
     notes: {
-      content_markdown: isHu
+      content: isHu
         ? [
             '## Fő fogalmak',
             '- Alapdefiníciók röviden',
@@ -348,52 +416,42 @@ function fallbackPlanPayload(prompt: string, fileNames: string[], isHu: boolean)
         {
           q: isHu ? 'Mi a legfontosabb definicio?' : 'What is the most important definition?',
           a: isHu ? 'Rovid valasz a kulcsfogalomrol.' : 'A short answer about the key concept.',
-          steps: isHu ? ['Fogalom azonosítása', 'Definíció megfogalmazása'] : ['Identify the concept', 'State the definition'],
         },
         {
           q: isHu ? 'Sorolj fel kulcsotleteket.' : 'List the key ideas.',
           a: isHu ? 'Rovid, pontokba szedett valasz.' : 'A short, bullet-style answer.',
-          steps: isHu ? ['Fő pontok kigyűjtése'] : ['Extract key points'],
         },
         {
           q: isHu ? 'Adj egy tipikus peldat.' : 'Give a typical example.',
           a: isHu ? 'Rovid, konkret pelda.' : 'A brief, concrete example.',
-          steps: isHu ? ['Példa kiválasztása', 'Lépések röviden'] : ['Select an example', 'Outline steps'],
         },
         {
           q: isHu ? 'Melyek a gyakori hibak?' : 'What are common mistakes?',
           a: isHu ? 'Rovid felsorolas.' : 'A short list of mistakes.',
-          steps: [],
         },
         {
           q: isHu ? 'Hogyan kapcsolodnak a fogalmak?' : 'How are the concepts connected?',
           a: isHu ? 'Rovid osszefugges.' : 'A short connection summary.',
-          steps: [],
         },
         {
           q: isHu ? 'Mi a kulonbseg ket fogalom kozott?' : 'What is the difference between two concepts?',
           a: isHu ? 'Rovid osszehasonlitas.' : 'A short comparison.',
-          steps: [],
         },
         {
           q: isHu ? 'Mikor alkalmaznad ezt a szabaly?' : 'When would you apply this rule?',
           a: isHu ? 'Rovid alkalmazasi pelda.' : 'A brief application example.',
-          steps: [],
         },
         {
           q: isHu ? 'Mi a kovetkezo lepes egy megoldasban?' : 'What is the next step in a solution?',
           a: isHu ? 'Rovid leiras a kovetkezo lepesrol.' : 'A brief next-step description.',
-          steps: [],
         },
         {
           q: isHu ? 'Nevezz meg egy gyakori felreertest.' : 'Name a common misconception.',
           a: isHu ? 'Rovid figyelmeztetes a felreertesrol.' : 'A brief warning about the misconception.',
-          steps: [],
         },
         {
           q: isHu ? 'Mi a legfontosabb osszefoglalas?' : 'What is the most important takeaway?',
           a: isHu ? 'Rovid osszefoglalo.' : 'A short takeaway.',
-          steps: [],
         },
       ],
     },
@@ -405,7 +463,7 @@ function minimalPlanPayload(isHu: boolean) {
     title: isHu ? 'Rovid terv' : 'Quick plan',
     language: isHu ? 'hu' : 'en',
     plan: {
-      focus: isHu ? 'Gyors ismétlés' : 'Quick revision',
+      summary: isHu ? 'Gyors ismétlési terv.' : 'Quick revision plan.',
       blocks: [
         {
           title: isHu ? 'Attekintes' : 'Review',
@@ -425,7 +483,7 @@ function minimalPlanPayload(isHu: boolean) {
       ],
     },
     notes: {
-      content_markdown: isHu ? '## Rövid jegyzet\n- Fő fogalom\n- Definíció\n- Példa' : '## Quick notes\n- Core concept\n- Definition\n- Example',
+      content: isHu ? '## Rövid jegyzet\n- Fő fogalom\n- Definíció\n- Példa' : '## Quick notes\n- Core concept\n- Definition\n- Example',
     },
     daily: {
       schedule: [
@@ -436,16 +494,16 @@ function minimalPlanPayload(isHu: boolean) {
     },
     practice: {
       questions: [
-        { q: isHu ? 'Mi a legfontosabb definicio?' : 'What is the key definition?', a: isHu ? 'Rovid valasz.' : 'A short answer.', steps: [] },
-        { q: isHu ? 'Sorolj fel kulcsotleteket.' : 'List key ideas.', a: isHu ? 'Rovid felsorolas.' : 'A short list.', steps: [] },
-        { q: isHu ? 'Adj egy peldat.' : 'Give an example.', a: isHu ? 'Rovid pelda.' : 'A short example.', steps: [] },
-        { q: isHu ? 'Mi a kovetkezo lepes?' : 'What is the next step?', a: isHu ? 'Rovid lepes.' : 'A short step.', steps: [] },
-        { q: isHu ? 'Mikor alkalmaznad?' : 'When would you apply it?', a: isHu ? 'Rovid alkalmazas.' : 'A short application.', steps: [] },
-        { q: isHu ? 'Melyek a hibak?' : 'What are common mistakes?', a: isHu ? 'Rovid felsorolas.' : 'A short list.', steps: [] },
-        { q: isHu ? 'Mit kell megjegyezni?' : 'What should you remember?', a: isHu ? 'Rovid emlekezteto.' : 'A short reminder.', steps: [] },
-        { q: isHu ? 'Hogyan kapcsolodnak?' : 'How are they connected?', a: isHu ? 'Rovid osszefugges.' : 'A short link.', steps: [] },
-        { q: isHu ? 'Mi a cel?' : 'What is the goal?', a: isHu ? 'Rovid cel.' : 'A short goal.', steps: [] },
-        { q: isHu ? 'Mi a lenyeg?' : 'What is the takeaway?', a: isHu ? 'Rovid lenyeg.' : 'A short takeaway.', steps: [] },
+        { q: isHu ? 'Mi a legfontosabb definicio?' : 'What is the key definition?', a: isHu ? 'Rovid valasz.' : 'A short answer.' },
+        { q: isHu ? 'Sorolj fel kulcsotleteket.' : 'List key ideas.', a: isHu ? 'Rovid felsorolas.' : 'A short list.' },
+        { q: isHu ? 'Adj egy peldat.' : 'Give an example.', a: isHu ? 'Rovid pelda.' : 'A short example.' },
+        { q: isHu ? 'Mi a kovetkezo lepes?' : 'What is the next step?', a: isHu ? 'Rovid lepes.' : 'A short step.' },
+        { q: isHu ? 'Mikor alkalmaznad?' : 'When would you apply it?', a: isHu ? 'Rovid alkalmazas.' : 'A short application.' },
+        { q: isHu ? 'Melyek a hibak?' : 'What are common mistakes?', a: isHu ? 'Rovid felsorolas.' : 'A short list.' },
+        { q: isHu ? 'Mit kell megjegyezni?' : 'What should you remember?', a: isHu ? 'Rovid emlekezteto.' : 'A short reminder.' },
+        { q: isHu ? 'Hogyan kapcsolodnak?' : 'How are they connected?', a: isHu ? 'Rovid osszefugges.' : 'A short link.' },
+        { q: isHu ? 'Mi a cel?' : 'What is the goal?', a: isHu ? 'Rovid cel.' : 'A short goal.' },
+        { q: isHu ? 'Mi a lenyeg?' : 'What is the takeaway?', a: isHu ? 'Rovid lenyeg.' : 'A short takeaway.' },
       ],
     },
   })
@@ -579,12 +637,12 @@ export async function GET(req: Request) {
       language: data.language ?? 'hu',
       plan: data.plan_json ?? data.plan ?? {},
       notes:
-        typeof (data.notes_json as any)?.content_markdown === 'string'
+        typeof (data.notes_json as any)?.content === 'string'
           ? data.notes_json
-          : typeof (data.notes_json as any)?.content === 'string'
-            ? { content_markdown: String((data.notes_json as any).content) }
+          : typeof (data.notes_json as any)?.content_markdown === 'string'
+            ? { content: String((data.notes_json as any).content_markdown) }
             : typeof data.notes === 'string'
-              ? { content_markdown: data.notes }
+              ? { content: data.notes }
               : data.notes ?? {},
       daily: data.daily_json ?? data.daily ?? {},
       practice: data.practice_json ?? data.practice ?? {},
@@ -637,7 +695,7 @@ export async function POST(req: Request) {
     const openAiKey = process.env.OPENAI_API_KEY
 
     const imageFiles = files.filter((f) => f.type.startsWith('image/'))
-    if (imageFiles.length > MAX_IMAGES) {
+    if (imageFiles.length > MAX_PLAN_IMAGES) {
       return NextResponse.json(
         { error: { code: 'TOO_MANY_FILES', message: 'Too many files' } },
         { status: 400, headers: { 'cache-control': 'no-store' } }
@@ -719,30 +777,40 @@ export async function POST(req: Request) {
         error: 'OPENAI_KEY_MISSING',
       })
       return NextResponse.json(
-        { error: { code: 'OPENAI_KEY_MISSING', message: 'Missing OPENAI_API_KEY' } },
+        { error: { code: 'OPENAI_KEY_MISSING', message: 'Missing OPENAI_API_KEY' }, requestId },
         { status: 500, headers: { 'cache-control': 'no-store' } }
       )
     }
+
+    const processingSeed = minimalPlanPayload(isHu)
+    await savePlanToDbBestEffort({
+      id: idToUse,
+      userId: user.id,
+      prompt,
+      title: processingSeed.title,
+      language: processingSeed.language,
+      created_at: new Date().toISOString(),
+      result: processingSeed,
+      creditsCharged: 0,
+      inputChars: prompt.length,
+      imagesCount: imageFiles.length,
+      outputChars: JSON.stringify(processingSeed).length,
+      status: 'processing',
+      generationId: requestId,
+      materials: imageFiles.map((f) => f.name),
+      error: null,
+    })
 
     const client = new OpenAI({ apiKey: openAiKey })
     const model = MODEL
     const systemText = [
       'Return ONLY valid JSON, no markdown, no commentary.',
-      `Language: ${isHu ? 'Hungarian' : 'English'} (language must be "hu" or "en").`,
-      'Use exactly this schema:',
-      '{',
-      '  "title": string,',
-      '  "language": "hu"|"en",',
-      '  "plan": { "focus": string, "blocks": [{ "title": string, "description": string, "duration_minutes": number }] },',
-      '  "notes": { "content_markdown": string },',
-      '  "daily": { "schedule": [{ "day": number, "title": string, "items": [string] }] },',
-      '  "practice": { "questions": [{ "q": string, "a": string, "steps": [string] }] }',
-      '}',
+      `Language: ${isHu ? 'Hungarian' : 'English'} (must be "hu" or "en").`,
       'Constraints:',
-      '- plan.blocks: max 6, concise text',
-      '- notes.content_markdown: rich and useful, max 4000 chars',
-      '- daily schedule: clear 3-7 day sequence',
-      '- practice: 8-10 questions',
+      '- plan.summary and blocks are concise',
+      '- notes.content is detailed and high quality, max 4000 chars',
+      '- daily.schedule concise',
+      '- practice.questions concise',
     ].join('\n')
     const userText = [
       `Prompt:\n${prompt || '(empty)'}`,
@@ -750,62 +818,90 @@ export async function POST(req: Request) {
       'Use the uploaded images as study source material when present.',
     ].join('\n\n')
 
-    const callModel = async (attempt: number, retryInstruction: string) => {
+    const callModel = async (repairMode: boolean) => {
       const content: any[] = [{ type: 'text', text: userText }]
       for (const file of imageFiles) {
         const buf = Buffer.from(await file.arrayBuffer())
         const b64 = buf.toString('base64')
-        content.push({ type: 'image_url', image_url: { url: `data:${file.type};base64,${b64}` } })
+        content.push({ type: 'image_url', image_url: { url: `data:${file.type};base64,${b64}`, detail: 'low' } })
       }
       const resp = await withTimeout(OPENAI_TIMEOUT_MS, (signal) =>
         client.chat.completions.create(
           {
             model,
             messages: [
-              { role: 'system', content: [systemText, retryInstruction].filter(Boolean).join('\n') },
+              {
+                role: 'system',
+                content: repairMode
+                  ? `${systemText}\nOutput ONLY valid JSON matching the exact schema. No prose, no markdown.`
+                  : systemText,
+              },
               { role: 'user', content: content as any },
             ],
-            temperature: attempt > 0 ? 0 : 0.2,
+            temperature: repairMode ? 0 : 0.2,
             max_tokens: MAX_OUTPUT_TOKENS,
+            response_format: {
+              type: 'json_schema',
+              json_schema: {
+                name: 'study_plan',
+                strict: true,
+                schema: planResultJsonSchema as any,
+              },
+            },
           },
           { signal }
         )
       )
-      return String(resp.choices?.[0]?.message?.content ?? '').trim()
+      const raw = String(resp.choices?.[0]?.message?.content ?? '').trim()
+      if (!raw) throw new Error('OPENAI_INVALID_STRUCTURED_OUTPUT')
+      const parsed = JSON.parse(raw)
+      return validateOrThrow(parsed)
     }
 
     let planPayload: PlanPayload
-    let parseFallbackMessage: string | null = null
+    let generationErrorCode: string | null = null
     try {
-      const parsed = await callOpenAIJsonWithRetries(callModel, { retries: OPENAI_PARSE_RETRIES })
-      planPayload = normalizePlanPayload(validateOrThrow(parsed))
+      try {
+        const first = await callModel(false)
+        planPayload = normalizePlanPayload(first)
+      } catch {
+        const repaired = await callModel(true)
+        planPayload = normalizePlanPayload(repaired)
+      }
     } catch (err: any) {
-      console.error('plan.generate json_parse_failed', {
-        requestId,
-        planId: idToUse,
-        message: String(err?.message ?? 'unknown'),
+      const rawMessage = String(err?.message ?? '')
+      generationErrorCode = /aborted|timed out|timeout/i.test(rawMessage)
+        ? 'OPENAI_TIMEOUT'
+        : 'OPENAI_INVALID_STRUCTURED_OUTPUT'
+      await savePlanToDbBestEffort({
+        id: idToUse,
+        userId: user.id,
+        prompt,
+        title: processingSeed.title,
+        language: processingSeed.language,
+        created_at: new Date().toISOString(),
+        result: processingSeed,
+        creditsCharged: 0,
+        inputChars: prompt.length,
+        imagesCount: imageFiles.length,
+        outputChars: JSON.stringify(processingSeed).length,
+        status: 'failed',
+        generationId: requestId,
+        materials: imageFiles.map((f) => f.name),
+        error: generationErrorCode,
       })
-      parseFallbackMessage = 'Parse failed'
-      planPayload = minimalPlanPayload(isHu)
-    }
-
-    const fallback = fallbackPlanPayload(prompt, imageFiles.map((f) => f.name), isHu)
-    if (planPayload.plan.blocks.length < 4) {
-      planPayload.plan.blocks = fallback.plan.blocks
-    }
-    if (!planPayload.plan.focus.trim()) {
-      planPayload.plan.focus = fallback.plan.focus
-    }
-    if (!planPayload.notes.content_markdown.trim()) planPayload.notes.content_markdown = fallback.notes.content_markdown
-    if (planPayload.daily.schedule.length < 3) {
-      planPayload.daily.schedule = fallback.daily.schedule
-    }
-    if (planPayload.practice.questions.length < 10) {
-      const merged = [...planPayload.practice.questions, ...fallback.practice.questions]
-      planPayload.practice.questions = merged.slice(0, 10)
-    }
-    if (planPayload.practice.questions.length > 10) {
-      planPayload.practice.questions = planPayload.practice.questions.slice(0, 10)
+      return NextResponse.json(
+        {
+          error: {
+            code: generationErrorCode,
+            message: generationErrorCode === 'OPENAI_TIMEOUT'
+              ? 'OpenAI call timed out'
+              : 'OpenAI structured output parse failed',
+          },
+          requestId,
+        },
+        { status: 500, headers: { 'cache-control': 'no-store' } }
+      )
     }
 
     const plan = clampPlanPayload(planPayload)
@@ -823,10 +919,10 @@ export async function POST(req: Request) {
       inputChars: prompt.length,
       imagesCount: imageFiles.length,
       outputChars,
-      status: parseFallbackMessage ? 'fallback' : 'complete',
+      status: 'done',
       generationId: requestId,
       materials: imageFiles.map((f) => f.name),
-      error: parseFallbackMessage,
+      error: null,
     })
     if (cost > 0) {
       try {
@@ -865,14 +961,7 @@ export async function POST(req: Request) {
       elapsed_ms: Date.now() - startedAt,
     })
     return NextResponse.json(
-      {
-        planId: idToUse,
-        plan,
-        notes: plan.notes,
-        daily: plan.daily,
-        practice: plan.practice,
-        parseFallback: parseFallbackMessage ? true : false,
-      },
+      { planId: idToUse, status: 'done' },
       { headers: { 'cache-control': 'no-store', 'x-examly-plan': 'ok' } }
     )
   } catch (e: any) {
@@ -891,7 +980,7 @@ export async function POST(req: Request) {
     }
     if (String(e?.message || '').includes('SERVER_MISCONFIGURED')) {
       return NextResponse.json(
-        { error: { code: 'SERVER_MISCONFIGURED', message: e?.message ?? 'Server misconfigured' } },
+        { error: { code: 'SERVER_MISCONFIGURED', message: e?.message ?? 'Server misconfigured' }, requestId },
         { status: 500, headers: { 'cache-control': 'no-store' } }
       )
     }
@@ -903,13 +992,13 @@ export async function POST(req: Request) {
     }
     if (String(e?.message || '').includes('PLANS_SCHEMA_MISMATCH')) {
       return NextResponse.json(
-        { error: { code: 'PLANS_SCHEMA_MISMATCH', message: String(e?.message || 'Schema mismatch') } },
+        { error: { code: 'PLANS_SCHEMA_MISMATCH', message: String(e?.message || 'Schema mismatch') }, requestId },
         { status: 500, headers: { 'cache-control': 'no-store' } }
       )
     }
     const details = String(e?.message || 'Server error').slice(0, 300)
     return NextResponse.json(
-      { error: { code: 'PLAN_GENERATE_FAILED', message: details } },
+      { error: { code: 'PLAN_GENERATE_FAILED', message: details }, requestId },
       { status: 500, headers: { 'cache-control': 'no-store' } }
     )
   }

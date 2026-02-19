@@ -11,7 +11,7 @@ import { supabase } from '@/lib/supabaseClient'
 import HScroll from '@/components/HScroll'
 import Pomodoro from '@/components/Pomodoro'
 import StructuredText from '@/components/StructuredText'
-import { MAX_IMAGES, MAX_PROMPT_CHARS, CREDITS_PER_GENERATION } from '@/lib/limits'
+import { MAX_PLAN_IMAGES, MAX_PROMPT_CHARS, CREDITS_PER_GENERATION } from '@/lib/limits'
 
 type Block = { type: 'study' | 'break'; minutes: number; label: string }
 type DayPlan = { day: string; focus: string; tasks: string[]; minutes: number; blocks?: Block[] }
@@ -368,7 +368,7 @@ function Inner() {
     const userId = sess.data.session?.user?.id
     if (!userId) throw new Error('Not authenticated')
 
-    const list = (files || []).slice(0, MAX_IMAGES)
+    const list = (files || []).slice(0, MAX_PLAN_IMAGES)
     if (list.length === 0) return
 
     const MAX_BYTES = 10 * 1024 * 1024
@@ -385,8 +385,8 @@ function Inner() {
       setError(`Prompt too long (max ${MAX_PROMPT_CHARS} characters).`)
       return
     }
-    if (files.length > MAX_IMAGES) {
-      setError(`You can upload up to ${MAX_IMAGES} files.`)
+    if (files.length > MAX_PLAN_IMAGES) {
+      setError(`You can upload up to ${MAX_PLAN_IMAGES} files.`)
       return
     }
     const cost = CREDITS_PER_GENERATION
@@ -400,7 +400,7 @@ function Inner() {
         (files.length > 0 ? 'Create structured study notes and a study plan based on the uploaded materials.' : '')
       form.append('prompt', promptToSend)
       form.append('required_credits', String(cost))
-      for (const f of files.slice(0, MAX_IMAGES)) {
+      for (const f of files.slice(0, MAX_PLAN_IMAGES)) {
         const file = f.type.startsWith('image/') ? await compressImage(f) : f
         form.append('files', file)
       }
@@ -510,7 +510,7 @@ function Inner() {
     !isGenerating &&
     creditsOk &&
     prompt.trim().length <= MAX_PROMPT_CHARS &&
-    files.length <= MAX_IMAGES &&
+    files.length <= MAX_PLAN_IMAGES &&
     (prompt.trim().length >= 6 || files.length > 0)
   const summaryText = extractNotesText(result?.notes).trim()
   const costEstimate = CREDITS_PER_GENERATION
@@ -612,8 +612,8 @@ function Inner() {
               multiple
               onChange={(e) => {
                 const next = Array.from(e.target.files ?? [])
-                if (next.length > MAX_IMAGES) {
-                  setError(`You can upload up to ${MAX_IMAGES} files.`)
+                if (next.length > MAX_PLAN_IMAGES) {
+                  setError(`You can upload up to ${MAX_PLAN_IMAGES} files.`)
                   return
                 } else {
                   setFiles(next)

@@ -20,6 +20,8 @@ function mapPlanContent(row: PlanRow | null) {
   const notes =
     typeof row?.notes === 'string'
       ? row.notes
+      : typeof (row?.notes_json as any)?.content_markdown === 'string'
+        ? String((row?.notes_json as any).content_markdown)
       : typeof (row?.notes_json as any)?.content === 'string'
         ? String((row?.notes_json as any).content)
         : ''

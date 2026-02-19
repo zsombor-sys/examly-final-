@@ -16,7 +16,7 @@ import { MAX_IMAGES, MAX_PROMPT_CHARS, CREDITS_PER_GENERATION } from '@/lib/limi
 type Block = { type: 'study' | 'break'; minutes: number; label: string }
 type DayPlan = { day: string; focus: string; tasks: string[]; minutes: number; blocks?: Block[] }
 type PlanBlock = { id?: string; title: string; duration_minutes: number; description: string }
-type NotesValue = string | { content?: string | null } | null | undefined
+type NotesValue = string | { content_markdown?: string | null; content?: string | null } | null | undefined
 type PlanResult = {
   title?: string | null
   language?: 'hu' | 'en' | null
@@ -135,6 +135,7 @@ function shortPrompt(p: string) {
 function extractNotesText(notes: NotesValue): string {
   if (!notes) return ''
   if (typeof notes === 'string') return notes
+  if (typeof notes?.content_markdown === 'string') return notes.content_markdown
   if (typeof notes?.content === 'string') return notes.content
   return ''
 }
@@ -722,7 +723,9 @@ function Inner() {
                 <div className="rounded-3xl border border-white/10 bg-white/[0.02] p-5 min-w-0 overflow-hidden">
                   <div className="text-xs uppercase tracking-[0.18em] text-white/55">Notes</div>
                   {extractNotesText(result.notes).trim() ? (
-                    <StructuredText value={extractNotesText(result.notes)} className="mt-4 text-sm text-white/80 whitespace-pre-wrap leading-7" />
+                    <div className="mt-4 richtext min-w-0 max-w-full overflow-x-auto text-white/80">
+                      <MarkdownMath content={extractNotesText(result.notes)} />
+                    </div>
                   ) : (
                     <div className="mt-4 text-sm text-white/70">Nincs jegyzet generálva (hiba). Próbáld újra.</div>
                   )}

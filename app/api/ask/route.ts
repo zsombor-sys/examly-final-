@@ -4,25 +4,18 @@ import { consumeGeneration } from '@/lib/creditsServer'
 import OpenAI from 'openai'
 import { z } from 'zod'
 import { OPENAI_MODEL } from '@/lib/limits'
+import { callOpenAIJsonWithRetries } from '@/lib/aiJson'
 
 export const runtime = 'nodejs'
+export const maxDuration = 60
+export const dynamic = 'force-dynamic'
+const MAX_OUTPUT_TOKENS = 700
 
 const answerSchema = z.object({
   display: z.string(),
   speech: z.string(),
   language: z.string(),
 })
-
-const answerJsonSchema = {
-  type: 'object',
-  additionalProperties: false,
-  properties: {
-    display: { type: 'string' },
-    speech: { type: 'string' },
-    language: { type: 'string' },
-  },
-  required: ['display', 'speech', 'language'],
-}
 
 export async function POST(req: Request) {
   try {
@@ -66,21 +59,22 @@ Language:
 
     const model = OPENAI_MODEL
 
-    const resp = await openai.chat.completions.create({
-      model,
-      messages: [
-        { role: 'system', content: system },
-        { role: 'user', content: `Language: ${language}\nQuestion: ${question}` },
-      ],
-      temperature: 0.2,
-      response_format: {
-        type: 'json_schema',
-        json_schema: { name: 'ask_answer', schema: answerJsonSchema },
-      },
-    })
-
-    const raw = String(resp.choices?.[0]?.message?.content ?? '').trim()
-    const parsed = answerSchema.parse(JSON.parse(raw))
+    const parsedUnknown = await callOpenAIJsonWithRetries(async (attempt, retryInstruction) => {
+      const resp = await openai.chat.completions.create({
+        model,
+        messages: [
+          {
+            role: 'system',
+            content: `${system}\nReturn exactly {"display":string,"speech":string,"language":string}.\n${retryInstruction}`.trim(),
+          },
+          { role: 'user', content: `Language: ${language}\nQuestion: ${question}` },
+        ],
+        temperature: attempt > 0 ? 0 : 0.2,
+        max_tokens: MAX_OUTPUT_TOKENS,
+      })
+      return String(resp.choices?.[0]?.message?.content ?? '').trim()
+    }, { retries: 2 })
+    const parsed = answerSchema.parse(parsedUnknown)
     const out = {
       display: String(parsed.display ?? ''),
       speech: String(parsed.speech ?? ''),

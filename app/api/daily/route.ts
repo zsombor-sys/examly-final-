@@ -7,8 +7,12 @@ import { getPlan, updatePlan } from '@/app/api/plan/store'
 import { TABLE_PLANS } from '@/lib/dbTables'
 import { throwIfMissingTable } from '@/lib/supabaseErrors'
 import { OPENAI_MODEL } from '@/lib/limits'
+import { callOpenAIJsonWithRetries } from '@/lib/aiJson'
 
 export const runtime = 'nodejs'
+export const maxDuration = 60
+export const dynamic = 'force-dynamic'
+const MAX_OUTPUT_TOKENS = 700
 
 const bodySchema = z.object({
   planId: z.string().min(1),
@@ -27,60 +31,12 @@ const dailySchema = z.object({
   }),
 })
 
-const dailyJsonSchema = {
-  type: 'object',
-  additionalProperties: false,
-  properties: {
-    daily_plan: {
-      type: 'object',
-      additionalProperties: false,
-      properties: {
-        total_minutes: { type: 'number' },
-        blocks: {
-          type: 'array',
-          items: {
-            type: 'object',
-            additionalProperties: false,
-            properties: {
-              title: { type: 'string' },
-              duration_minutes: { type: 'number' },
-              type: { type: 'string', enum: ['study', 'review', 'break'] },
-            },
-            required: ['title', 'duration_minutes', 'type'],
-          },
-        },
-      },
-      required: ['total_minutes', 'blocks'],
-    },
-  },
-  required: ['daily_plan'],
-}
-
 type NotesPayload = {
   title: string
   subject: string
   study_notes: string
   key_topics: string[]
   confidence: number
-}
-
-function extractFirstJsonObject(text: string) {
-  const raw = String(text ?? '').trim()
-  if (!raw) return null
-  const cleaned = raw.startsWith('```') ? raw.replace(/^```[a-zA-Z]*\s*/, '').replace(/```$/s, '').trim() : raw
-  const m = cleaned.match(/\{[\s\S]*\}/)
-  return m?.[0] ?? null
-}
-
-function safeJsonParse(text: string) {
-  const raw = String(text ?? '').trim()
-  if (!raw) throw new Error('AI_JSON_EMPTY')
-  try {
-    return JSON.parse(raw)
-  } catch {}
-  const first = extractFirstJsonObject(raw)
-  if (!first) throw new Error('AI_JSON_INVALID')
-  return JSON.parse(first)
 }
 
 function validateDaily(daily: z.infer<typeof dailySchema>) {
@@ -187,10 +143,17 @@ function extractNotes(result: any): NotesPayload | null {
     }
   }
   if (result?.notes) {
+    const notesText = typeof result.notes === 'string'
+      ? result.notes
+      : typeof result.notes?.content_markdown === 'string'
+        ? result.notes.content_markdown
+        : typeof result.notes?.content === 'string'
+          ? result.notes.content
+          : ''
     return {
       title: String(result.title || 'Study notes'),
       subject: String(result.title || 'General'),
-      study_notes: String(result.notes || ''),
+      study_notes: String(notesText || ''),
       key_topics: Array.isArray(result.key_topics) ? result.key_topics.map((t: any) => String(t)) : [],
       confidence: Number.isFinite(Number(result.confidence)) ? Number(result.confidence) : 0.6,
     }
@@ -221,6 +184,7 @@ export async function POST(req: Request) {
     const model = OPENAI_MODEL
     const system = [
       'Return ONLY valid JSON matching the schema. No markdown or extra text.',
+      '{"daily_plan":{"total_minutes":number,"blocks":[{"title":string,"duration_minutes":number,"type":"study"|"review"|"break"}]}}',
       'blocks length must be >= 4.',
       'Include at least 2 study, 1 review, 1 break.',
       'total_minutes must equal the sum of block durations.',
@@ -234,23 +198,18 @@ export async function POST(req: Request) {
 
     let daily: z.infer<typeof dailySchema>
     try {
-      const resp = await client.chat.completions.create({
-        model,
-        messages: [
-          { role: 'system', content: system },
-          { role: 'user', content: userMsg },
-        ],
-        temperature: 0.2,
-        response_format: {
-          type: 'json_schema',
-          json_schema: {
-            name: 'daily_plan',
-            schema: dailyJsonSchema,
-          },
-        },
-      })
-      const txt = String(resp.choices?.[0]?.message?.content ?? '').trim()
-      const parsedJson = safeJsonParse(txt)
+      const parsedJson = await callOpenAIJsonWithRetries(async (attempt, retryInstruction) => {
+        const resp = await client.chat.completions.create({
+          model,
+          messages: [
+            { role: 'system', content: [system, retryInstruction].filter(Boolean).join('\n') },
+            { role: 'user', content: userMsg },
+          ],
+          temperature: attempt > 0 ? 0 : 0.2,
+          max_tokens: MAX_OUTPUT_TOKENS,
+        })
+        return String(resp.choices?.[0]?.message?.content ?? '').trim()
+      }, { retries: 2 })
       daily = dailySchema.parse(parsedJson)
       if (!validateDaily(daily)) daily = fallbackDaily(notes)
       else daily = normalizeDaily(daily)

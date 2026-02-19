@@ -6,11 +6,11 @@ import AuthGate from '@/components/AuthGate'
 import { authedFetch } from '@/lib/authClient'
 import { supabase } from '@/lib/supabaseClient'
 import { ArrowLeft, Loader2 } from 'lucide-react'
-import StructuredText from '@/components/StructuredText'
+import MarkdownMath from '@/components/MarkdownMath'
 
 type PlanResult = {
   title?: string | null
-  notes?: string | { content?: string | null } | null
+  notes?: string | { content_markdown?: string | null; content?: string | null } | null
   fallback?: boolean
   errorCode?: string | null
   requestId?: string | null
@@ -67,6 +67,7 @@ function Inner() {
   const notesText = (() => {
     if (!plan?.notes) return ''
     if (typeof plan.notes === 'string') return plan.notes
+    if (typeof plan.notes?.content_markdown === 'string') return plan.notes.content_markdown
     return typeof plan.notes?.content === 'string' ? plan.notes.content : ''
   })()
 
@@ -164,7 +165,9 @@ function Inner() {
             <div className="mt-4 rounded-3xl border border-white/10 bg-white/[0.02] p-5 min-w-0 overflow-hidden">
               <div className="text-xs uppercase tracking-[0.18em] text-white/55">Study notes</div>
               {notesText.trim() ? (
-                <StructuredText value={notesText} className="mt-3 text-sm text-white/80 whitespace-pre-wrap leading-7" />
+                <div className="mt-3 richtext min-w-0 max-w-full overflow-x-auto text-white/80">
+                  <MarkdownMath content={notesText} />
+                </div>
               ) : (
                 <div className="mt-3 text-sm text-white/70">Nincs jegyzet generálva (hiba). Próbáld újra.</div>
               )}

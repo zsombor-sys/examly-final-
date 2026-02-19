@@ -24,6 +24,8 @@ function shortSummary(row: HistoryRow) {
 
   const notes = typeof (row as any)?.notes === 'string'
     ? String((row as any).notes)
+    : typeof (row as any)?.notes_json?.content_markdown === 'string'
+      ? String((row as any).notes_json.content_markdown)
     : typeof (row as any)?.notes_json?.content === 'string'
       ? String((row as any).notes_json.content)
       : ''

@@ -14,15 +14,17 @@ import { MAX_PLAN_IMAGES, MAX_PROMPT_CHARS, CREDITS_PER_GENERATION } from '@/lib
 
 type Block = { type: 'study' | 'break'; minutes: number; label: string }
 type DayPlan = { day: string; focus: string; tasks: string[]; minutes: number; blocks?: Block[] }
-type PlanBlock = { id?: string; title: string; duration_minutes: number; description: string }
-type PlanSlot = { day: number; start: string; end: string; title: string }
-type NotesSection = { heading: string; bullets: string[] }
+type PlanBlock = { title: string; duration_minutes: number; description: string }
+type OutlineSection = { heading: string; bullets: string[] }
+type DailyBlock = { start_time: string; end_time: string; title: string; details: string }
+type DailyDay = { day: number; label: string; blocks: DailyBlock[] }
+type PracticeQuestion = { q: string; choices?: string[]; a: string; explanation: string }
 type NotesValue =
   | string
   | {
-      sections?: NotesSection[] | null
-      common_mistakes?: string[] | null
-      key_formulas?: string[] | null
+      outline?: OutlineSection[] | null
+      summary?: string | null
+      sections?: OutlineSection[] | null
       content_markdown?: string | null
       content?: string | null
     }
@@ -32,18 +34,20 @@ type PlanResult = {
   title?: string | null
   language?: 'hu' | 'en' | null
   summary?: string | null
-  plan?: { summary?: string; blocks?: PlanBlock[] } | null
+  plan?: { blocks?: PlanBlock[] } | null
   notes?: NotesValue
-  daily?: { start_time?: string; slots?: PlanSlot[] } | null
-  practice?: { questions?: Array<{ q: string; hints?: string[]; steps?: string[]; answer_check?: string }> } | null
-  plan_json?: { summary?: string; blocks?: PlanBlock[] } | null
-  daily_json?: { start_time?: string; slots?: PlanSlot[] } | null
-  practice_json?: { questions?: Array<{ q: string; hints?: string[]; steps?: string[]; answer_check?: string }> } | null
+  daily?: { schedule?: DailyDay[] } | null
+  practice?: { questions?: PracticeQuestion[] } | null
+  plan_json?: { blocks?: PlanBlock[] } | null
+  notes_json?: NotesValue
+  daily_json?: { schedule?: DailyDay[] } | null
+  practice_json?: { questions?: PracticeQuestion[] } | null
   fallback?: boolean
   errorCode?: string | null
   requestId?: string | null
   errorMessage?: string | null
 }
+type PracticeViewQuestion = { q: string; choices: string[]; a: string; explanation: string }
 
 type SavedPlan = { id: string; title: string; created_at: string }
 type LocalSavedPlan = SavedPlan & { result: PlanResult }
@@ -51,10 +55,14 @@ type PlanRow = {
   id: string
   title: string | null
   language: 'hu' | 'en' | null
-  plan: { summary?: string; blocks?: PlanBlock[] } | null
-  notes: string | null
-  daily_json: { start_time?: string; slots?: PlanSlot[] } | null
-  practice_json: { questions?: Array<{ q: string; hints?: string[]; steps?: string[]; answer_check?: string }> } | null
+  plan: { blocks?: PlanBlock[] } | null
+  notes: NotesValue
+  daily_json: { schedule?: DailyDay[] } | null
+  practice_json: { questions?: PracticeQuestion[] } | null
+  plan_json?: { blocks?: PlanBlock[] } | null
+  notes_json?: NotesValue
+  daily?: { schedule?: DailyDay[] } | null
+  practice?: { questions?: PracticeQuestion[] } | null
   created_at: string | null
   error?: string | null
   status?: string | null
@@ -147,11 +155,15 @@ function shortPrompt(p: string) {
 function extractNotesText(notes: NotesValue): string {
   if (!notes) return ''
   if (typeof notes === 'string') return notes
-  if (Array.isArray(notes.sections) && notes.sections.length > 0) {
-    return notes.sections
+  if (Array.isArray(notes.outline) && notes.outline.length > 0) {
+    return notes.outline
       .map((s) => `## ${s.heading}\n${(s.bullets ?? []).map((b) => `- ${b}`).join('\n')}`)
       .join('\n\n')
   }
+  if (Array.isArray(notes.sections) && notes.sections.length > 0) {
+    return notes.sections.map((s) => `## ${s.heading}\n${(s.bullets ?? []).map((b) => `- ${b}`).join('\n')}`).join('\n\n')
+  }
+  if (typeof notes?.summary === 'string') return notes.summary
   if (typeof notes?.content_markdown === 'string') return notes.content_markdown
   if (typeof notes?.content === 'string') return notes.content
   return ''
@@ -186,60 +198,71 @@ function getPlanBlocks(result: PlanResult | null): PlanBlock[] {
   }))
 }
 
-function getDailySlots(result: PlanResult | null): PlanSlot[] {
+function getDailySchedule(result: PlanResult | null): DailyDay[] {
   if (!result) return []
-  const slots = Array.isArray(result.daily?.slots)
-    ? result.daily.slots
-    : Array.isArray(result.daily_json?.slots)
-      ? result.daily_json.slots
+  const schedule = Array.isArray(result.daily?.schedule)
+    ? result.daily.schedule
+    : Array.isArray(result.daily_json?.schedule)
+      ? result.daily_json.schedule
       : []
-  if (slots.length) {
-    return slots.map((s) => ({
-      day: Math.max(1, Math.min(6, Number(s?.day) || 1)),
-      start: String(s?.start ?? '18:00'),
-      end: String(s?.end ?? '18:30'),
-      title: String(s?.title ?? '').trim() || 'Study',
+  if (schedule.length) {
+    return schedule.map((day) => ({
+      day: Math.max(1, Math.min(6, Number(day?.day) || 1)),
+      label: String(day?.label ?? `Day ${day?.day ?? 1}`).trim() || `Day ${day?.day ?? 1}`,
+      blocks: (Array.isArray(day?.blocks) ? day.blocks : []).map((block) => ({
+        start_time: String(block?.start_time ?? '18:00'),
+        end_time: String(block?.end_time ?? '18:30'),
+        title: String(block?.title ?? '').trim() || 'Study',
+        details: String(block?.details ?? '').trim(),
+      })),
     }))
   }
   const blocks = getPlanBlocks(result)
   let t = 18 * 60
-  return blocks.map((b, idx) => {
-    const start = `${String(Math.floor(t / 60) % 24).padStart(2, '0')}:${String(t % 60).padStart(2, '0')}`
-    t += b.duration_minutes
-    const end = `${String(Math.floor(t / 60) % 24).padStart(2, '0')}:${String(t % 60).padStart(2, '0')}`
-    return { day: 1 + Math.floor(idx / 4), start, end, title: b.title }
-  })
+  return [
+    {
+      day: 1,
+      label: 'Day 1',
+      blocks: blocks.map((b) => {
+        const start = `${String(Math.floor(t / 60) % 24).padStart(2, '0')}:${String(t % 60).padStart(2, '0')}`
+        t += b.duration_minutes
+        const end = `${String(Math.floor(t / 60) % 24).padStart(2, '0')}:${String(t % 60).padStart(2, '0')}`
+        return { start_time: start, end_time: end, title: b.title, details: b.description }
+      }),
+    },
+  ]
 }
 
 function getNotesModel(notes: NotesValue) {
-  if (notes && typeof notes !== 'string' && Array.isArray(notes.sections) && notes.sections.length > 0) {
+  if (notes && typeof notes !== 'string' && Array.isArray(notes.outline) && notes.outline.length > 0) {
     return {
-      sections: notes.sections,
-      commonMistakes: Array.isArray(notes.common_mistakes) ? notes.common_mistakes : [],
-      keyFormulas: Array.isArray(notes.key_formulas) ? notes.key_formulas : [],
+      sections: notes.outline,
+      summary: String(notes.summary ?? '').trim(),
     }
   }
+  if (notes && typeof notes !== 'string' && Array.isArray(notes.sections) && notes.sections.length > 0) {
+    return { sections: notes.sections, summary: String(notes.summary ?? '').trim() }
+  }
   const text = extractNotesText(notes)
-  if (!text.trim()) return { sections: [], commonMistakes: [], keyFormulas: [] as string[] }
+  if (!text.trim()) return { sections: [], summary: '' }
   const lines = text.split('\n').map((x) => x.trim()).filter(Boolean)
   return {
     sections: [{ heading: 'Notes', bullets: lines.slice(0, 10) }],
-    commonMistakes: [],
-    keyFormulas: [],
+    summary: '',
   }
 }
 
-function getPracticeQuestions(result: PlanResult | null) {
+function getPracticeQuestions(result: PlanResult | null): PracticeViewQuestion[] {
   const raw = Array.isArray(result?.practice?.questions)
     ? result!.practice!.questions!
     : Array.isArray(result?.practice_json?.questions)
       ? result!.practice_json!.questions!
       : []
-  return raw.map((q) => ({
-    q: String(q?.q ?? '').trim(),
-    hints: Array.isArray(q?.hints) ? q.hints.map((x) => String(x ?? '').trim()).filter(Boolean) : [],
-    steps: Array.isArray(q?.steps) ? q.steps.map((x) => String(x ?? '').trim()).filter(Boolean) : [],
-    answer_check: typeof q?.answer_check === 'string' ? q.answer_check.trim() : '',
+  return raw.map((q: any): PracticeViewQuestion => ({
+    q: String(q?.q ?? q?.question ?? '').trim(),
+    choices: Array.isArray(q?.choices) ? q.choices.map((x: any) => String(x ?? '').trim()).filter(Boolean) : [],
+    a: String(q?.a ?? q?.answer ?? q?.answer_check ?? '').trim(),
+    explanation: String(q?.explanation ?? '').trim(),
   }))
 }
 
@@ -383,8 +406,12 @@ function Inner() {
           title: plan.title ?? null,
           language: plan.language ?? null,
           plan: plan.plan ?? null,
+          plan_json: plan.plan_json ?? null,
           notes: plan.notes ?? null,
+          notes_json: plan.notes_json ?? null,
+          daily: plan.daily ?? null,
           daily_json: plan.daily_json ?? null,
+          practice: plan.practice ?? null,
           practice_json: plan.practice_json ?? null,
           fallback: plan.status === 'fallback',
           errorCode: plan.error ?? null,
@@ -615,29 +642,21 @@ function Inner() {
     prompt.trim().length <= MAX_PROMPT_CHARS &&
     files.length <= MAX_PLAN_IMAGES &&
     (prompt.trim().length >= 6 || files.length > 0)
-  const summaryText = extractNotesText(result?.notes).trim()
+  const summaryText = getNotesModel(result?.notes ?? result?.notes_json).summary || extractNotesText(result?.notes ?? result?.notes_json).trim()
   const costEstimate = CREDITS_PER_GENERATION
   const pomodoroPlan = useMemo<DayPlan[]>(() => {
     if (!result) return []
-    const slots = getDailySlots(result)
-    const byDay = new Map<number, PlanSlot[]>()
-    for (const slot of slots) {
-      const list = byDay.get(slot.day) ?? []
-      list.push(slot)
-      byDay.set(slot.day, list)
-    }
-    const sortedDays = Array.from(byDay.keys()).sort((a, b) => a - b)
-    return sortedDays.map((day) => {
-      const daySlots = byDay.get(day) ?? []
-      const blocks: Block[] = daySlots.map((slot) => ({
+    const schedule = getDailySchedule(result)
+    return schedule.map((day) => {
+      const blocks: Block[] = day.blocks.map((slot) => ({
         type: 'study',
-        minutes: Math.max(10, Math.min(120, minutesBetween(slot.start, slot.end))),
+        minutes: Math.max(10, Math.min(120, minutesBetween(slot.start_time, slot.end_time))),
         label: slot.title,
       }))
-      const tasks = daySlots.map((slot) => `${slot.start}-${slot.end} ${slot.title}`)
+      const tasks = day.blocks.map((slot) => `${slot.start_time}-${slot.end_time} ${slot.title}`)
       const minutes = Math.max(20, blocks.reduce((sum, b) => sum + b.minutes, 0))
       return {
-        day: `Day ${day}`,
+        day: day.label || `Day ${day.day}`,
         focus: result.title || 'Study',
         minutes,
         tasks,
@@ -813,9 +832,9 @@ function Inner() {
                       </div>
                     ))}
                   </div>
-                  {(result?.summary || result?.plan?.summary || result?.plan_json?.summary) ? (
+                  {result?.summary ? (
                     <div className="mt-3 text-xs text-white/60">
-                      Summary: {(result?.summary ?? result?.plan?.summary ?? result?.plan_json?.summary) || ''}
+                      Summary: {result.summary}
                     </div>
                   ) : null}
                 </div>
@@ -825,9 +844,9 @@ function Inner() {
               {tab === 'notes' && result && (
                 <div className="rounded-3xl border border-white/10 bg-white/[0.02] p-5 min-w-0 overflow-hidden">
                   <div className="text-xs uppercase tracking-[0.18em] text-white/55">Notes</div>
-                  {getNotesModel(result.notes).sections.length > 0 ? (
+                  {getNotesModel(result.notes ?? result.notes_json).sections.length > 0 ? (
                     <div className="mt-4 space-y-5 text-sm text-white/85">
-                      {getNotesModel(result.notes).sections.map((section, idx) => (
+                      {getNotesModel(result.notes ?? result.notes_json).sections.map((section, idx) => (
                         <section key={`${section.heading}-${idx}`} className="rounded-2xl border border-white/10 bg-black/30 p-4">
                           <h3 className="text-white/90 font-semibold">{section.heading}</h3>
                           <ul className="mt-2 list-disc pl-5 space-y-1 text-white/80">
@@ -837,20 +856,10 @@ function Inner() {
                           </ul>
                         </section>
                       ))}
-                      {getNotesModel(result.notes).commonMistakes.length > 0 ? (
+                      {getNotesModel(result.notes ?? result.notes_json).summary ? (
                         <section className="rounded-2xl border border-white/10 bg-black/30 p-4">
-                          <h3 className="text-white/90 font-semibold">Common mistakes</h3>
-                          <ul className="mt-2 list-disc pl-5 space-y-1 text-white/80">
-                            {getNotesModel(result.notes).commonMistakes.map((m, i) => <li key={`m-${i}`}>{m}</li>)}
-                          </ul>
-                        </section>
-                      ) : null}
-                      {getNotesModel(result.notes).keyFormulas.length > 0 ? (
-                        <section className="rounded-2xl border border-white/10 bg-black/30 p-4">
-                          <h3 className="text-white/90 font-semibold">Key formulas</h3>
-                          <div className="mt-2 richtext min-w-0 max-w-full overflow-x-auto text-white/80">
-                            <MarkdownMath content={getNotesModel(result.notes).keyFormulas.map((f) => `- ${f}`).join('\n')} />
-                          </div>
+                          <h3 className="text-white/90 font-semibold">Summary</h3>
+                          <p className="mt-2 text-white/80">{getNotesModel(result.notes ?? result.notes_json).summary}</p>
                         </section>
                       ) : null}
                     </div>
@@ -871,11 +880,18 @@ function Inner() {
                     <section className="w-full rounded-3xl border border-white/10 bg-white/[0.02] p-5 min-w-0 overflow-hidden">
                       <div className="text-xs uppercase tracking-[0.18em] text-white/55">Daily schedule</div>
                       <div className="mt-3 space-y-4 text-sm text-white/80">
-                        {getDailySlots(result).length > 0 ? (
-                          getDailySlots(result).map((slot, i) => (
-                            <div key={`slot-${slot.day}-${slot.start}-${i}`} className="rounded-2xl border border-white/10 bg-black/30 px-4 py-3">
-                              <div className="text-white/90">Day {slot.day} • {slot.start} - {slot.end}</div>
-                              <div className="mt-1 text-white/75">{slot.title}</div>
+                        {getDailySchedule(result).length > 0 ? (
+                          getDailySchedule(result).map((day, i) => (
+                            <div key={`day-${day.day}-${i}`} className="rounded-2xl border border-white/10 bg-black/30 px-4 py-3">
+                              <div className="text-white/90">{day.label}</div>
+                              <div className="mt-2 space-y-2">
+                                {day.blocks.map((block, bi) => (
+                                  <div key={`db-${i}-${bi}`} className="rounded-xl border border-white/10 bg-black/20 px-3 py-2">
+                                    <div className="text-white/85">{block.start_time} - {block.end_time} • {block.title}</div>
+                                    {block.details ? <div className="mt-1 text-white/65">{block.details}</div> : null}
+                                  </div>
+                                ))}
+                              </div>
                             </div>
                           ))
                         ) : null}
@@ -896,18 +912,16 @@ function Inner() {
                       <div className="text-sm font-semibold text-white/90 min-w-0 break-words">
                         {qi + 1}. {q.q}
                       </div>
-                      {q.hints.length > 0 ? (
-                        <div className="mt-3 text-sm text-white/75">Hints: {q.hints.join(' • ')}</div>
+                      {q.choices.length > 0 ? (
+                        <ul className="mt-3 list-disc pl-5 space-y-1 text-sm text-white/75">
+                          {q.choices.map((choice, i) => <li key={`choice-${qi}-${i}`}>{choice}</li>)}
+                        </ul>
                       ) : null}
-                      {q.steps.length > 0 ? (
-                        <ol className="mt-3 list-decimal pl-5 space-y-1 text-sm text-white/80">
-                          {q.steps.map((s, i) => <li key={`step-${qi}-${i}`}>{s}</li>)}
-                        </ol>
-                      ) : null}
-                      {q.answer_check ? (
+                      {q.a ? (
                         <div className="mt-4 rounded-2xl border border-white/10 bg-black/30 p-4">
-                          <div className="text-xs uppercase tracking-[0.18em] text-white/55">Answer check</div>
-                          <div className="mt-2 text-sm text-white/80 break-words">{q.answer_check}</div>
+                          <div className="text-xs uppercase tracking-[0.18em] text-white/55">Answer</div>
+                          <div className="mt-2 text-sm text-white/80 break-words">{q.a}</div>
+                          {q.explanation ? <div className="mt-2 text-sm text-white/70 break-words">{q.explanation}</div> : null}
                         </div>
                       ) : null}
                     </section>

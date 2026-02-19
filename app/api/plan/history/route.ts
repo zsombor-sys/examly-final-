@@ -2,6 +2,7 @@ import { requireUser } from '@/lib/authServer'
 import { createServerAdminClient } from '@/lib/supabase/server'
 import { clearPlans, listPlans } from '@/app/api/plan/store'
 import { TABLE_PLANS } from '@/lib/dbTables'
+import { normalizePlanDocument } from '@/lib/planDocument'
 
 export const runtime = 'nodejs'
 
@@ -12,27 +13,38 @@ type HistoryRow = {
   input_text?: string | null
   model?: string | null
   title?: string | null
+  language?: string | null
   plan_json?: any
   notes_json?: any
+  daily_json?: any
+  practice_json?: any
   plan?: any
   notes?: any
+  daily?: any
+  practice?: any
 }
 
 function shortSummary(row: HistoryRow) {
-  const firstBlockTitle = row?.plan_json?.blocks?.[0]?.title ?? row?.plan?.blocks?.[0]?.title
-  if (typeof firstBlockTitle === 'string' && firstBlockTitle.trim()) return firstBlockTitle.trim().slice(0, 120)
+  const normalized = normalizePlanDocument(
+    {
+      title: row?.title,
+      language: row?.language,
+      plan: row?.plan_json ?? row?.plan,
+      notes: row?.notes_json ?? row?.notes,
+      daily: row?.daily_json ?? row?.daily,
+      practice: row?.practice_json ?? row?.practice,
+    },
+    String(row?.language ?? '').toLowerCase() === 'hu',
+    String(row?.title ?? '')
+  )
 
-  const notes = typeof (row as any)?.notes === 'string'
-    ? String((row as any).notes)
-    : typeof (row as any)?.notes_json?.content_markdown === 'string'
-      ? String((row as any).notes_json.content_markdown)
-    : typeof (row as any)?.notes_json?.content === 'string'
-      ? String((row as any).notes_json.content)
-      : ''
-  if (notes.trim()) return notes.trim().slice(0, 120)
+  const summary = String(normalized.notes?.summary || normalized.summary || '').trim()
+  if (summary) return summary.slice(0, 120)
 
-  if (typeof row?.title === 'string' && row.title.trim()) return row.title.trim().slice(0, 120)
-  return ''
+  const firstBlockTitle = normalized.plan?.blocks?.[0]?.title
+  if (firstBlockTitle) return String(firstBlockTitle).slice(0, 120)
+
+  return String(normalized.title || '').slice(0, 120)
 }
 
 export async function GET(req: Request) {
@@ -42,7 +54,7 @@ export async function GET(req: Request) {
 
     const { data, error } = await sb
       .from(TABLE_PLANS)
-      .select('id, created_at, prompt, input_text, model, title, plan_json, notes_json, plan, notes')
+      .select('id, created_at, prompt, input_text, model, title, language, plan_json, notes_json, daily_json, practice_json, plan, notes, daily, practice')
       .eq('user_id', user.id)
       .order('created_at', { ascending: false })
 

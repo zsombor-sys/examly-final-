@@ -1,43 +1,51 @@
 import { z } from 'zod'
 
+const NOTE_CHAR_LIMIT = 4000
+
 export const PlanBlockSchema = z.object({
   title: z.string(),
   description: z.string(),
   duration_minutes: z.number(),
 })
 
-export const NotesSectionSchema = z.object({
+export const NotesOutlineItemSchema = z.object({
   heading: z.string(),
   bullets: z.array(z.string()),
 })
 
-export const DailySlotSchema = z.object({
-  day: z.number(),
-  start: z.string(),
-  end: z.string(),
+export const DailyScheduleBlockSchema = z.object({
+  start_time: z.string(),
+  end_time: z.string(),
   title: z.string(),
+  details: z.string(),
+})
+
+export const DailyScheduleDaySchema = z.object({
+  day: z.number(),
+  label: z.string(),
+  blocks: z.array(DailyScheduleBlockSchema),
 })
 
 export const PracticeQuestionSchema = z.object({
   q: z.string(),
-  hints: z.array(z.string()).default([]),
-  steps: z.array(z.string()).default([]),
-  answer_check: z.string().optional(),
+  choices: z.array(z.string()).optional(),
+  a: z.string(),
+  explanation: z.string(),
 })
 
 export const PlanDocumentSchema = z.object({
   title: z.string(),
   language: z.enum(['hu', 'en']),
   summary: z.string(),
-  blocks: z.array(PlanBlockSchema).min(4),
+  plan: z.object({
+    blocks: z.array(PlanBlockSchema),
+  }),
   notes: z.object({
-    sections: z.array(NotesSectionSchema).min(5),
-    common_mistakes: z.array(z.string()),
-    key_formulas: z.array(z.string()),
+    outline: z.array(NotesOutlineItemSchema),
+    summary: z.string(),
   }),
   daily: z.object({
-    start_time: z.string(),
-    slots: z.array(DailySlotSchema).min(4),
+    schedule: z.array(DailyScheduleDaySchema),
   }),
   practice: z.object({
     questions: z.array(PracticeQuestionSchema),
@@ -46,7 +54,6 @@ export const PlanDocumentSchema = z.object({
 
 export type PlanDocument = z.infer<typeof PlanDocumentSchema>
 export type PlanBlock = z.infer<typeof PlanBlockSchema>
-export type DailySlot = z.infer<typeof DailySlotSchema>
 
 export const PlanDocumentJsonSchema = {
   type: 'object',
@@ -55,26 +62,32 @@ export const PlanDocumentJsonSchema = {
     title: { type: 'string' },
     language: { type: 'string', enum: ['hu', 'en'] },
     summary: { type: 'string' },
-    blocks: {
-      type: 'array',
-      maxItems: 12,
-      items: {
-        type: 'object',
-        additionalProperties: false,
-        properties: {
-          title: { type: 'string' },
-          description: { type: 'string' },
-          duration_minutes: { type: 'number' },
+    plan: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        blocks: {
+          type: 'array',
+          items: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              title: { type: 'string' },
+              description: { type: 'string' },
+              duration_minutes: { type: 'number' },
+            },
+            required: ['title', 'description', 'duration_minutes'],
+          },
         },
       },
+      required: ['blocks'],
     },
     notes: {
       type: 'object',
       additionalProperties: false,
       properties: {
-        sections: {
+        outline: {
           type: 'array',
-          minItems: 5,
           items: {
             type: 'object',
             additionalProperties: false,
@@ -82,31 +95,45 @@ export const PlanDocumentJsonSchema = {
               heading: { type: 'string' },
               bullets: { type: 'array', items: { type: 'string' } },
             },
+            required: ['heading', 'bullets'],
           },
         },
-        common_mistakes: { type: 'array', items: { type: 'string' } },
-        key_formulas: { type: 'array', items: { type: 'string' } },
+        summary: { type: 'string' },
       },
+      required: ['outline', 'summary'],
     },
     daily: {
       type: 'object',
       additionalProperties: false,
       properties: {
-        start_time: { type: 'string' },
-        slots: {
+        schedule: {
           type: 'array',
           items: {
             type: 'object',
             additionalProperties: false,
             properties: {
               day: { type: 'number' },
-              start: { type: 'string' },
-              end: { type: 'string' },
-              title: { type: 'string' },
+              label: { type: 'string' },
+              blocks: {
+                type: 'array',
+                items: {
+                  type: 'object',
+                  additionalProperties: false,
+                  properties: {
+                    start_time: { type: 'string' },
+                    end_time: { type: 'string' },
+                    title: { type: 'string' },
+                    details: { type: 'string' },
+                  },
+                  required: ['start_time', 'end_time', 'title', 'details'],
+                },
+              },
             },
+            required: ['day', 'label', 'blocks'],
           },
         },
       },
+      required: ['schedule'],
     },
     practice: {
       type: 'object',
@@ -119,16 +146,18 @@ export const PlanDocumentJsonSchema = {
             additionalProperties: false,
             properties: {
               q: { type: 'string' },
-              hints: { type: 'array', items: { type: 'string' } },
-              steps: { type: 'array', items: { type: 'string' } },
-              answer_check: { type: 'string' },
+              choices: { type: 'array', items: { type: 'string' } },
+              a: { type: 'string' },
+              explanation: { type: 'string' },
             },
+            required: ['q', 'a', 'explanation'],
           },
         },
       },
+      required: ['questions'],
     },
   },
-  required: ['title', 'language', 'summary', 'blocks', 'notes', 'daily', 'practice'],
+  required: ['title', 'language', 'summary', 'plan', 'notes', 'daily', 'practice'],
 } as const
 
 function clamp(n: number, min: number, max: number) {
@@ -140,7 +169,7 @@ function asText(value: unknown) {
 }
 
 function parseHm(value: string) {
-  const m = /^(\d{1,2}):(\d{2})$/.exec(value.trim())
+  const m = /^(\d{1,2}):(\d{2})$/.exec(asText(value))
   if (!m) return 18 * 60
   const hh = clamp(Number(m[1]) || 18, 0, 23)
   const mm = clamp(Number(m[2]) || 0, 0, 59)
@@ -154,151 +183,278 @@ function hm(totalMinutes: number) {
   return `${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}`
 }
 
-function normalizeBlocks(rawBlocks: unknown, isHu: boolean) {
-  const fallback = fallbackPlanDocument(isHu).blocks
-  const list = Array.isArray(rawBlocks) ? rawBlocks : []
-  const blocks: PlanBlock[] = list
-    .map((b: any) => ({
-      title: asText(b?.title) || (isHu ? 'Tanulási blokk' : 'Study block'),
-      description: asText(b?.description) || (isHu ? 'Rövid fókusz blokk.' : 'Short focus block.'),
-      duration_minutes: clamp(Math.round(Number(b?.duration_minutes) || 30), 10, 120),
-    }))
-    .filter((b) => b.title && b.description)
-  while (blocks.length < 4) {
-    const fill = fallback[blocks.length % fallback.length] ?? fallback[0]
-    if (!fill) break
-    blocks.push(fill)
-  }
-  return blocks.slice(0, 12)
+function truncate(text: string, maxLen: number) {
+  const raw = asText(text)
+  if (raw.length <= maxLen) return raw
+  if (maxLen <= 1) return raw.slice(0, maxLen)
+  return `${raw.slice(0, maxLen - 1)}…`
 }
 
-function splitToSections(content: string, isHu: boolean) {
-  const lines = content.split('\n').map((x) => x.trim()).filter(Boolean)
+function defaultHeadings(isHu: boolean) {
+  return isHu
+    ? ['Fogalmak', 'Kepletek', 'Lepesek', 'Tipikus feladatok', 'Gyakori hibak', 'Mini peldak']
+    : ['Concepts', 'Formulas', 'Steps', 'Typical tasks', 'Common mistakes', 'Mini examples']
+}
+
+function fallbackBlocks(isHu: boolean): PlanBlock[] {
+  return [
+    {
+      title: isHu ? 'Alapok atnezese' : 'Core concepts',
+      description: isHu ? 'Rovid fogalomismetles.' : 'Brief review of key concepts.',
+      duration_minutes: 30,
+    },
+    {
+      title: isHu ? 'Kepletek es szabalyok' : 'Formulas and rules',
+      description: isHu ? 'Fontos kepletek es alkalmazas.' : 'Essential formulas and how to apply them.',
+      duration_minutes: 35,
+    },
+    {
+      title: isHu ? 'Megoldott peldak' : 'Worked examples',
+      description: isHu ? 'Tipikus peldak lepesei.' : 'Step-by-step typical examples.',
+      duration_minutes: 35,
+    },
+    {
+      title: isHu ? 'Onallo gyakorlas' : 'Independent practice',
+      description: isHu ? 'Onallo feladatmegoldas.' : 'Solve tasks independently.',
+      duration_minutes: 30,
+    },
+  ]
+}
+
+function normalizeBlocks(rawBlocks: unknown, isHu: boolean) {
+  const fallback = fallbackBlocks(isHu)
+  const list = Array.isArray(rawBlocks) ? rawBlocks : []
+  const normalized = list
+    .map((block: any) => ({
+      title: truncate(asText(block?.title) || (isHu ? 'Tanulasi blokk' : 'Study block'), 80),
+      description: truncate(asText(block?.description) || (isHu ? 'Rovid fokusz blokk.' : 'Short focus block.'), 180),
+      duration_minutes: clamp(Math.round(Number(block?.duration_minutes) || 30), 15, 90),
+    }))
+    .filter((block) => block.title && block.description)
+
+  while (normalized.length < 4) {
+    normalized.push(fallback[normalized.length % fallback.length])
+  }
+  return normalized.slice(0, 10)
+}
+
+function parseLegacyOutline(text: string, isHu: boolean) {
+  const lines = String(text || '').split('\n').map((x) => x.trim()).filter(Boolean)
   const sections: Array<{ heading: string; bullets: string[] }> = []
   let current: { heading: string; bullets: string[] } | null = null
   for (const line of lines) {
     if (/^#{1,6}\s+/.test(line)) {
-      if (current) sections.push(current)
+      if (current && current.bullets.length) sections.push(current)
       current = { heading: line.replace(/^#{1,6}\s+/, '').trim(), bullets: [] }
       continue
     }
     const bullet = line.replace(/^[-*]\s+/, '').trim()
+    if (!bullet) continue
     if (!current) current = { heading: isHu ? 'Jegyzetek' : 'Notes', bullets: [] }
     current.bullets.push(bullet)
   }
-  if (current) sections.push(current)
+  if (current && current.bullets.length) sections.push(current)
   return sections
 }
 
-function ensureMinSections(sections: Array<{ heading: string; bullets: string[] }>, isHu: boolean) {
-  const fallback = fallbackPlanDocument(isHu).notes.sections
-  const cleaned: Array<{ heading: string; bullets: string[] }> = sections
-    .map((s) => ({
-      heading: asText(s.heading),
-      bullets: (Array.isArray(s.bullets) ? s.bullets : [])
-        .map((b) => asText(b))
-        .filter(Boolean),
+function normalizeOutline(rawOutline: unknown, isHu: boolean) {
+  const list = Array.isArray(rawOutline) ? rawOutline : []
+  const normalized = list
+    .map((item: any) => ({
+      heading: truncate(asText(item?.heading) || (isHu ? 'Jegyzet' : 'Notes'), 80),
+      bullets: (Array.isArray(item?.bullets) ? item.bullets : [])
+        .map((bullet: any) => truncate(asText(bullet), 240))
+        .filter(Boolean)
+        .slice(0, 8),
     }))
-    .filter((s) => s.heading && s.bullets.length > 0)
-  while (cleaned.length < 5) {
-    const fill = (fallback[cleaned.length % fallback.length] ?? fallback[0]) as { heading: string; bullets: string[] } | undefined
-    if (!fill) break
-    cleaned.push(fill)
+    .filter((item) => item.heading && item.bullets.length)
+
+  const headings = defaultHeadings(isHu)
+  while (normalized.length < 5) {
+    const heading = headings[normalized.length % headings.length]
+    normalized.push({
+      heading,
+      bullets: [
+        isHu
+          ? `${heading}: rovid definicio es alkalmazasi szabaly.`
+          : `${heading}: short definition and application hint.`,
+      ],
+    })
   }
-  return cleaned.slice(0, 10)
+  return normalized.slice(0, 8)
 }
 
-export function buildDailySlotsFromBlocks(
-  blocks: PlanBlock[],
-  startTime = '18:00',
-  opts?: { maxDays?: number; minPerDay?: number; maxPerDay?: number }
-): DailySlot[] {
-  const maxDays = clamp(Number(opts?.maxDays) || 6, 1, 10)
-  const minPerDay = clamp(Number(opts?.minPerDay) || 2, 1, 6)
-  const maxPerDay = clamp(Number(opts?.maxPerDay) || 4, minPerDay, 8)
-  const list = blocks.length ? blocks : fallbackPlanDocument(false).blocks
+function takeFromBudget(value: string, budget: { value: number }, minLen = 0) {
+  if (budget.value <= 0) return ''
+  const trimmed = asText(value)
+  if (!trimmed) return ''
+  const maxAllowed = Math.max(minLen, Math.min(trimmed.length, budget.value))
+  const out = truncate(trimmed, maxAllowed)
+  budget.value -= out.length
+  return out
+}
 
-  let days = Math.ceil(list.length / maxPerDay)
-  days = clamp(days, 1, maxDays)
-  while (days > 1 && list.length < days * minPerDay) days -= 1
+function clampNotesChars(
+  notes: { outline: Array<{ heading: string; bullets: string[] }>; summary: string },
+  isHu: boolean
+) {
+  const budget = { value: NOTE_CHAR_LIMIT }
+  const outline = notes.outline
+    .map((section) => {
+      const heading = takeFromBudget(section.heading, budget, 4)
+      const bullets = section.bullets
+        .map((bullet) => takeFromBudget(bullet, budget, 8))
+        .filter(Boolean)
+      return { heading, bullets }
+    })
+    .filter((section) => section.heading && section.bullets.length)
 
-  const sizes = Array(days).fill(minPerDay)
-  let left = list.length - days * minPerDay
-  for (let i = 0; i < days && left > 0; i += 1) {
-    const add = Math.min(left, maxPerDay - sizes[i])
-    sizes[i] += add
-    left -= add
+  const safeOutline = outline.length
+    ? outline
+    : [{ heading: isHu ? 'Jegyzetek' : 'Notes', bullets: [isHu ? 'Rovid osszefoglalo.' : 'Short summary.'] }]
+
+  const summary = takeFromBudget(notes.summary, budget, 20) || (isHu ? 'Rovid osszefoglalo.' : 'Short summary.')
+  return { outline: safeOutline, summary }
+}
+
+function convertLegacyDailySlotsToSchedule(rawSlots: any[], isHu: boolean) {
+  const grouped = new Map<number, Array<{ start_time: string; end_time: string; title: string; details: string }>>()
+  for (const raw of rawSlots) {
+    const day = clamp(Math.round(Number(raw?.day) || 1), 1, 6)
+    const list = grouped.get(day) ?? []
+    list.push({
+      start_time: asText(raw?.start || raw?.start_time) || '18:00',
+      end_time: asText(raw?.end || raw?.end_time) || '18:30',
+      title: truncate(asText(raw?.title) || (isHu ? 'Tanulas' : 'Study'), 80),
+      details: truncate(asText(raw?.details) || (isHu ? 'Pomodoro blokk.' : 'Pomodoro block.'), 180),
+    })
+    grouped.set(day, list)
   }
 
-  const slots: DailySlot[] = []
-  let cursor = 0
-  for (let day = 1; day <= days; day += 1) {
-    let t = parseHm(startTime)
-    for (let i = 0; i < sizes[day - 1]; i += 1) {
-      const block = list[cursor] ?? list[list.length - 1]
+  return Array.from(grouped.keys())
+    .sort((a, b) => a - b)
+    .map((day) => ({
+      day,
+      label: isHu ? `Nap ${day}` : `Day ${day}`,
+      blocks: grouped.get(day) ?? [],
+    }))
+}
+
+function containsTomorrowHint(prompt: string) {
+  return /\bholnap\b|\btomorrow\b/i.test(prompt)
+}
+
+function buildScheduleFromBlocks(blocks: PlanBlock[], isHu: boolean, prompt = '') {
+  const denseDayOne = containsTomorrowHint(prompt)
+  const maxDays = 6
+  const schedule: Array<{
+    day: number
+    label: string
+    blocks: Array<{ start_time: string; end_time: string; title: string; details: string }>
+  }> = []
+
+  let index = 0
+  let day = 1
+  while (index < blocks.length && day <= maxDays) {
+    const perDay = day === 1 && denseDayOne ? 4 : 2
+    const chunk = blocks.slice(index, index + perDay)
+    index += chunk.length
+
+    let t = parseHm(day === 1 ? '18:00' : '18:30')
+    const dayBlocks = chunk.map((block) => {
       const start = hm(t)
-      t += clamp(Math.round(Number(block.duration_minutes) || 30), 10, 120)
+      t += clamp(block.duration_minutes, 15, 90)
       const end = hm(t)
-      slots.push({
+      return {
+        start_time: start,
+        end_time: end,
+        title: block.title,
+        details: block.description,
+      }
+    })
+
+    if (dayBlocks.length) {
+      schedule.push({
         day,
-        start,
-        end,
-        title: asText(block.title) || (day === 1 ? 'Study' : `Study ${day}`),
+        label: isHu ? `Nap ${day}` : `Day ${day}`,
+        blocks: dayBlocks,
       })
-      cursor += 1
-      if (cursor >= list.length) cursor = list.length - 1
     }
+
+    day += 1
   }
 
-  return slots.length >= 4 ? slots : buildDailySlotsFromBlocks([...list, ...fallbackPlanDocument(false).blocks], startTime, opts)
+  if (denseDayOne && schedule.length < 2) {
+    schedule.push({
+      day: 2,
+      label: isHu ? 'Nap 2 (atnezes)' : 'Day 2 (recap)',
+      blocks: [
+        {
+          start_time: '18:30',
+          end_time: '19:00',
+          title: isHu ? 'Rovid ismetles' : 'Quick recap',
+          details: isHu ? 'A fo kepletek es hibapontok atnezese.' : 'Review top formulas and common mistakes.',
+        },
+      ],
+    })
+  }
+
+  return schedule.length
+    ? schedule
+    : [
+        {
+          day: 1,
+          label: isHu ? 'Nap 1' : 'Day 1',
+          blocks: [
+            {
+              start_time: '18:00',
+              end_time: '18:30',
+              title: isHu ? 'Tanulas' : 'Study',
+              details: isHu ? 'Fokuszalt 30 perces blokk.' : 'Focused 30-minute block.',
+            },
+          ],
+        },
+      ]
 }
 
 export function fallbackPlanDocument(isHu: boolean, prompt = ''): PlanDocument {
-  const title = asText(prompt).slice(0, 80) || (isHu ? 'Tanulási terv' : 'Study plan')
-  const blocks: PlanBlock[] = [
-    { title: isHu ? 'Elmélet áttekintése' : 'Theory review', description: isHu ? 'Fogalmak és alapok.' : 'Core concepts and basics.', duration_minutes: 35 },
-    { title: isHu ? 'Példák megoldása' : 'Worked examples', description: isHu ? 'Mintafeladatok lépésenként.' : 'Solve model examples step by step.', duration_minutes: 35 },
-    { title: isHu ? 'Önálló gyakorlás' : 'Independent practice', description: isHu ? 'Rövid gyakorló feladatok.' : 'Short independent exercises.', duration_minutes: 30 },
-    { title: isHu ? 'Ismétlés és hibák' : 'Review and mistakes', description: isHu ? 'Kulcspontok, tipikus hibák.' : 'Key points and common mistakes.', duration_minutes: 25 },
-  ]
+  const title = truncate(asText(prompt) || (isHu ? 'Tanulasi terv' : 'Study plan'), 90)
+  const blocks = fallbackBlocks(isHu)
+  const outline = defaultHeadings(isHu).slice(0, 6).map((heading) => ({
+    heading,
+    bullets: [
+      isHu ? `${heading}: rovid definicio.` : `${heading}: short definition.`,
+      isHu ? `${heading}: mini pelda.` : `${heading}: mini example.`,
+    ],
+  }))
 
-  const sections = isHu
-    ? [
-        { heading: 'Alapfogalmak', bullets: ['Definíciók röviden', 'Mikor melyik képletet használd'] },
-        { heading: 'Lépések', bullets: ['Feladat értelmezése', 'Megoldási út kiválasztása'] },
-        { heading: 'Tipikus hibák', bullets: ['Előjelhibák', 'Rossz helyettesítés'] },
-        { heading: 'Példák', bullets: ['Egyszerű példa', 'Vizsgaszintű példa'] },
-        { heading: 'Összefoglalás', bullets: ['3 legfontosabb tétel', 'Mit ismételj át holnapra'] },
-      ]
-    : [
-        { heading: 'Core concepts', bullets: ['Short definitions', 'When to use which formula'] },
-        { heading: 'Workflow', bullets: ['Interpret the problem', 'Choose a solving path'] },
-        { heading: 'Common mistakes', bullets: ['Sign errors', 'Incorrect substitution'] },
-        { heading: 'Examples', bullets: ['Simple example', 'Exam-level example'] },
-        { heading: 'Summary', bullets: ['Top 3 takeaways', 'What to review tomorrow'] },
-      ]
-
-  const dailyStart = '18:00'
   return {
     title,
     language: isHu ? 'hu' : 'en',
-    summary: isHu ? 'Fókuszált, rövid felkészülési terv a holnapi gyakorláshoz.' : 'Focused short preparation plan for tomorrow.',
-    blocks,
-    notes: {
-      sections,
-      common_mistakes: isHu ? ['Előjelhiba', 'Rossz képletválasztás'] : ['Sign mistakes', 'Wrong formula choice'],
-      key_formulas: isHu ? ['Általános képlet', 'Diszkrimináns képlete'] : ['Quadratic formula', 'Discriminant formula'],
-    },
+    summary: isHu
+      ? 'Rovid, vizsgafokuszu terv a kovetkezo tanulasi alkalomra.'
+      : 'Compact exam-focused plan for the next study session.',
+    plan: { blocks },
+    notes: clampNotesChars(
+      {
+        outline,
+        summary: isHu
+          ? 'Tanuld at a fogalmakat, gyakorold a kulcsfeladatokat, majd ellenorizd a tipikus hibakat.'
+          : 'Review concepts, practice key tasks, then check common mistakes.',
+      },
+      isHu
+    ),
     daily: {
-      start_time: dailyStart,
-      slots: buildDailySlotsFromBlocks(blocks, dailyStart),
+      schedule: buildScheduleFromBlocks(blocks, isHu, prompt),
     },
     practice: {
       questions: [
         {
-          q: isHu ? 'Mikor pozitív a diszkrimináns?' : 'When is the discriminant positive?',
-          hints: isHu ? ['Gondolj a gyökök számára'] : ['Think about number of roots'],
-          steps: isHu ? ['Írd fel a képletet', 'Hasonlítsd nullához'] : ['Write the formula', 'Compare with zero'],
+          q: isHu ? 'Mi az elso lepes a feladat megoldasakor?' : 'What is the first step when solving the task?',
+          a: isHu ? 'Az adatok es kerdes pontos azonositasaval kezdj.' : 'Start by identifying given data and the exact target.',
+          explanation: isHu
+            ? 'Ha a cel egyertelmu, kisebb az eselye a rossz modszervalasztasnak.'
+            : 'A clear target lowers the chance of choosing the wrong method.',
         },
       ],
     },
@@ -307,66 +463,96 @@ export function fallbackPlanDocument(isHu: boolean, prompt = ''): PlanDocument {
 
 export function normalizePlanDocument(input: any, isHu: boolean, prompt = ''): PlanDocument {
   const fallback = fallbackPlanDocument(isHu, prompt)
-  const blocks = normalizeBlocks(input?.blocks ?? input?.plan?.blocks, isHu)
 
-  const rawSections = Array.isArray(input?.notes?.sections)
-    ? input.notes.sections
-    : typeof input?.notes?.content === 'string'
-      ? splitToSections(input.notes.content, isHu)
-      : typeof input?.notes === 'string'
-        ? splitToSections(input.notes, isHu)
+  const blocks = normalizeBlocks(input?.plan?.blocks ?? input?.blocks ?? input?.plan_json?.blocks, isHu)
+
+  const rawOutline =
+    input?.notes?.outline ??
+    input?.notes_json?.outline ??
+    input?.notes?.sections ??
+    input?.notes_json?.sections ??
+    (typeof input?.notes?.content_markdown === 'string' ? parseLegacyOutline(input.notes.content_markdown, isHu) : null) ??
+    (typeof input?.notes === 'string' ? parseLegacyOutline(input.notes, isHu) : null) ??
+    []
+
+  const outline = normalizeOutline(rawOutline, isHu)
+  const notesSummary =
+    asText(input?.notes?.summary) ||
+    asText(input?.summary) ||
+    asText(input?.notes_json?.summary) ||
+    fallback.notes.summary
+
+  const notes = clampNotesChars({ outline, summary: notesSummary }, isHu)
+
+  const rawSchedule = Array.isArray(input?.daily?.schedule)
+    ? input.daily.schedule
+    : Array.isArray(input?.daily_json?.schedule)
+      ? input.daily_json.schedule
+      : null
+
+  let schedule: PlanDocument['daily']['schedule'] = []
+  if (rawSchedule) {
+    schedule = rawSchedule
+      .map((day: any) => ({
+        day: clamp(Math.round(Number(day?.day) || 1), 1, 6),
+        label: truncate(asText(day?.label) || (isHu ? 'Napi terv' : 'Daily plan'), 80),
+        blocks: (Array.isArray(day?.blocks) ? day.blocks : [])
+          .map((block: any) => ({
+            start_time: asText(block?.start_time) || '18:00',
+            end_time: asText(block?.end_time) || '18:30',
+            title: truncate(asText(block?.title) || (isHu ? 'Tanulas' : 'Study'), 80),
+            details: truncate(asText(block?.details) || (isHu ? 'Pomodoro blokk.' : 'Pomodoro block.'), 180),
+          }))
+          .filter((block: any) => block.title),
+      }))
+      .filter((day: any) => day.blocks.length)
+      .slice(0, 6)
+  }
+
+  if (!schedule.length) {
+    const legacySlots = Array.isArray(input?.daily?.slots)
+      ? input.daily.slots
+      : Array.isArray(input?.daily_json?.slots)
+        ? input.daily_json.slots
         : []
-  const sections = ensureMinSections(rawSections, isHu)
+    schedule = legacySlots.length
+      ? convertLegacyDailySlotsToSchedule(legacySlots, isHu)
+      : buildScheduleFromBlocks(blocks, isHu, prompt)
+  }
 
-  const commonMistakes = Array.isArray(input?.notes?.common_mistakes)
-    ? input.notes.common_mistakes.map((x: any) => asText(x)).filter(Boolean)
-    : fallback.notes.common_mistakes
-
-  const keyFormulas = Array.isArray(input?.notes?.key_formulas)
-    ? input.notes.key_formulas.map((x: any) => asText(x)).filter(Boolean)
-    : fallback.notes.key_formulas
-
-  const questions = Array.isArray(input?.practice?.questions)
+  const rawQuestions = Array.isArray(input?.practice?.questions)
     ? input.practice.questions
-        .map((q: any) => ({
-          q: asText(q?.q),
-          hints: Array.isArray(q?.hints) ? q.hints.map((x: any) => asText(x)).filter(Boolean) : [],
-          steps: Array.isArray(q?.steps) ? q.steps.map((x: any) => asText(x)).filter(Boolean) : [],
-          answer_check: asText(q?.answer_check) || undefined,
-        }))
-        .filter((q: any) => q.q)
-    : fallback.practice.questions
+    : Array.isArray(input?.practice_json?.questions)
+      ? input.practice_json.questions
+      : []
 
-  const startTime = asText(input?.daily?.start_time) || '18:00'
-  const slots = Array.isArray(input?.daily?.slots)
-    ? input.daily.slots
-        .map((s: any) => ({
-          day: clamp(Math.round(Number(s?.day) || 1), 1, 6),
-          start: asText(s?.start) || startTime,
-          end: asText(s?.end) || startTime,
-          title: asText(s?.title) || (isHu ? 'Tanulás' : 'Study'),
-        }))
-        .filter((s: any) => s.title)
-    : []
-
-  const dailySlots = slots.length >= 4 ? slots.slice(0, 24) : buildDailySlotsFromBlocks(blocks, startTime)
+  const questions = rawQuestions
+    .map((q: any) => ({
+      q: truncate(asText(q?.q || q?.question) || (isHu ? 'Gyakorlo kerdes' : 'Practice question'), 180),
+      choices: Array.isArray(q?.choices)
+        ? q.choices.map((choice: any) => truncate(asText(choice), 120)).filter(Boolean).slice(0, 6)
+        : undefined,
+      a: truncate(asText(q?.a || q?.answer || q?.answer_check) || fallback.practice.questions[0].a, 260),
+      explanation: truncate(
+        asText(q?.explanation || (Array.isArray(q?.steps) ? q.steps.join(' ') : '') || (Array.isArray(q?.hints) ? q.hints.join(' ') : '')) ||
+          fallback.practice.questions[0].explanation,
+        320
+      ),
+    }))
+    .filter((q: any) => q.q)
+    .slice(0, 16)
 
   const normalized: PlanDocument = {
-    title: asText(input?.title) || fallback.title,
-    language: input?.language === 'en' ? 'en' : input?.language === 'hu' ? 'hu' : fallback.language,
-    summary: asText(input?.summary ?? input?.plan?.summary) || fallback.summary,
-    blocks,
-    notes: {
-      sections,
-      common_mistakes: commonMistakes.length ? commonMistakes : fallback.notes.common_mistakes,
-      key_formulas: keyFormulas.length ? keyFormulas : fallback.notes.key_formulas,
-    },
+    title: truncate(asText(input?.title) || fallback.title, 90),
+    language: input?.language === 'hu' ? 'hu' : input?.language === 'en' ? 'en' : fallback.language,
+    summary: truncate(asText(input?.summary) || fallback.summary, 260),
+    plan: { blocks },
+    notes,
     daily: {
-      start_time: startTime,
-      slots: dailySlots,
+      schedule: schedule.length ? schedule : fallback.daily.schedule,
     },
     practice: {
-      questions: questions.length ? questions.slice(0, 20) : fallback.practice.questions,
+      questions: questions.length ? questions : fallback.practice.questions,
     },
   }
 

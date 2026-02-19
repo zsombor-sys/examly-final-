@@ -21,7 +21,8 @@ export const dynamic = 'force-dynamic'
 
 const MODEL = OPENAI_MODEL
 const MAX_OUTPUT_TOKENS = 1400
-const OPENAI_TIMEOUT_MS = 45_000
+const OPENAI_TIMEOUT_MS = 14_000
+const OPENAI_ATTEMPTS = 3
 
 const planRequestSchema = z.object({
   prompt: z.string().max(MAX_PROMPT_CHARS).optional().default(''),
@@ -79,23 +80,7 @@ async function parsePlanRequest(req: Request) {
 }
 
 function detectHungarian(text: string) {
-  return /\bhu\b|magyar|szia|tétel|vizsga|érettségi/i.test(text)
-}
-
-function extractFirstJsonObject(text: string) {
-  const start = text.indexOf('{')
-  const end = text.lastIndexOf('}')
-  if (start < 0 || end <= start) return null
-  return text.slice(start, end + 1)
-}
-
-function safeParseJsonObject(text: string) {
-  try {
-    const parsed = JSON.parse(text)
-    return parsed && typeof parsed === 'object' ? parsed : null
-  } catch {
-    return null
-  }
+  return /\bhu\b|magyar|szia|tetel|t[eé]tel|vizsga|erettsegi|[áéíóöőúüű]/i.test(text)
 }
 
 function logSupabaseError(context: string, error: any) {
@@ -129,10 +114,7 @@ type SavePlanRow = {
 async function savePlanToDbBestEffort(row: SavePlanRow) {
   try {
     const sb = createServerAdminClient()
-    const safePlan = {
-      summary: row.result.summary,
-      blocks: row.result.blocks,
-    }
+    const safePlan = row.result.plan
     const safeNotes = row.result.notes
     const safeDaily = row.result.daily
     const safePractice = row.result.practice
@@ -142,7 +124,7 @@ async function savePlanToDbBestEffort(row: SavePlanRow) {
       id: row.id,
       user_id: row.userId,
       prompt: row.prompt || '',
-      title: row.title || (row.language === 'hu' ? 'Tanulási terv' : 'Study plan'),
+      title: row.title || (row.language === 'hu' ? 'Tanulasi terv' : 'Study plan'),
       language: row.language || 'en',
       model: OPENAI_MODEL,
       created_at: row.created_at,
@@ -198,7 +180,7 @@ function normalizeStoredResult(raw: any) {
       title: raw?.title,
       language: raw?.language,
       summary: raw?.summary,
-      blocks: raw?.blocks,
+      plan: raw?.plan,
       notes: raw?.notes,
       daily: raw?.daily,
       practice: raw?.practice,
@@ -258,8 +240,7 @@ export async function GET(req: Request) {
     const result = normalizeStoredResult({
       title: data.title,
       language: data.language,
-      summary: data.plan_json?.summary ?? data.plan?.summary,
-      blocks: data.plan_json?.blocks ?? data.plan?.blocks,
+      plan: data.plan_json ?? data.plan,
       notes: data.notes_json ?? data.notes,
       daily: data.daily_json ?? data.daily,
       practice: data.practice_json ?? data.practice,
@@ -400,13 +381,12 @@ export async function POST(req: Request) {
 
     const systemText = [
       'Return ONLY valid JSON. No markdown. No commentary.',
-      `Language: ${isHu ? 'Hungarian' : 'English'} (language must be "hu" or "en").`,
-      'Keep output compact and exam-focused.',
-      'PlanDocument fields are required and must respect constraints.',
-      '- blocks: concise, min 4',
-      '- notes.sections: min 5, headings + bullets',
-      '- daily.slots: include real HH:mm start/end times',
-      '- practice.questions: concise with hints/steps',
+      `Language target: ${isHu ? 'Hungarian' : 'English'}; output language must be "${isHu ? 'hu' : 'en'}" unless impossible.`,
+      'Output must match the exact PlanDocument schema keys.',
+      'Plan must be concise and practical.',
+      'Notes must be rich, structured, and exam-ready (outline headings + bullets + short definitions + formulas/examples where relevant).',
+      'Daily schedule must include realistic HH:MM start_time/end_time blocks by day.',
+      'Practice must be concise and useful.',
     ].join('\n')
 
     const userText = [
@@ -415,11 +395,8 @@ export async function POST(req: Request) {
       'Use uploaded images as source material when present.',
     ].join('\n\n')
 
-    const buildUserContent = async (text: string) => {
+    const buildUserContent = async () => {
       const content: any[] = [{ type: 'text', text: userText }]
-      if (text !== userText) {
-        content[0] = { type: 'text', text }
-      }
       for (const file of imageFiles) {
         const b64 = Buffer.from(await file.arrayBuffer()).toString('base64')
         content.push({
@@ -430,18 +407,19 @@ export async function POST(req: Request) {
       return content
     }
 
-    const runStructuredModel = async (): Promise<PlanDocument> => {
-      const content = await buildUserContent(userText)
+    const runStructuredAttempt = async (attempt: number): Promise<PlanDocument> => {
+      const content = await buildUserContent()
+      const extra = attempt > 0 ? 'Return ONLY valid JSON matching the schema strictly. No markdown.' : ''
 
       const completion = await withTimeout(OPENAI_TIMEOUT_MS, (signal) =>
         client.chat.completions.create(
           {
             model: MODEL,
             messages: [
-              { role: 'system', content: systemText },
+              { role: 'system', content: [systemText, extra].filter(Boolean).join('\n') },
               { role: 'user', content: content as any },
             ],
-            temperature: 0.2,
+            temperature: 0,
             max_tokens: MAX_OUTPUT_TOKENS,
             response_format: {
               type: 'json_schema',
@@ -458,99 +436,84 @@ export async function POST(req: Request) {
 
       const parsed = (completion.choices?.[0]?.message as any)?.parsed
       if (!parsed || typeof parsed !== 'object') {
-        throw new Error('OPENAI_INVALID_STRUCTURED_OUTPUT')
+        const err: any = new Error('OPENAI_INVALID_STRUCTURED_OUTPUT')
+        err.code = 'OPENAI_INVALID_STRUCTURED_OUTPUT'
+        throw err
       }
+
       return normalizePlanDocument(parsed, isHu, prompt)
     }
 
-    const runPlainJsonRetry = async (): Promise<PlanDocument> => {
-      const retryText = [
-        userText,
-        'Respond ONLY with valid JSON. No markdown. No text.',
-      ].join('\n\n')
-      const content = await buildUserContent(retryText)
-      const completion = await withTimeout(OPENAI_TIMEOUT_MS, (signal) =>
-        client.chat.completions.create(
-          {
-            model: MODEL,
-            messages: [
-              {
-                role: 'system',
-                content: `${systemText}\nRespond ONLY with valid JSON. No markdown. No text.`,
-              },
-              { role: 'user', content: content as any },
-            ],
-            temperature: 0,
-            max_tokens: MAX_OUTPUT_TOKENS,
-          },
-          { signal }
-        )
-      )
+    let document: PlanDocument | null = null
+    let finalPath: 'strict_success' | 'strict_retry_success' | 'fallback_used' = 'fallback_used'
 
-      const text = String(completion.choices?.[0]?.message?.content ?? '').trim()
-      const parsedDirect = safeParseJsonObject(text)
-      if (parsedDirect) return normalizePlanDocument(parsedDirect, isHu, prompt)
-
-      const extracted = extractFirstJsonObject(text)
-      if (!extracted) throw new Error('OPENAI_INVALID_PLAIN_JSON')
-      const parsedExtracted = safeParseJsonObject(extracted)
-      if (!parsedExtracted) throw new Error('OPENAI_INVALID_PLAIN_JSON')
-      return normalizePlanDocument(parsedExtracted, isHu, prompt)
+    for (let attempt = 0; attempt < OPENAI_ATTEMPTS; attempt += 1) {
+      try {
+        document = await runStructuredAttempt(attempt)
+        finalPath = attempt === 0 ? 'strict_success' : 'strict_retry_success'
+        break
+      } catch (err: any) {
+        console.warn('plan.generate.retry', {
+          requestId,
+          attempt: attempt + 1,
+          code: String(err?.code || ''),
+          message: String(err?.message || ''),
+        })
+      }
     }
 
-    let document: PlanDocument = processingDoc
-    let usedFallback = false
-    try {
+    if (!document) {
+      document = fallbackPlanDocument(isHu, prompt)
+      finalPath = 'fallback_used'
+    }
+
+    if (cost > 0) {
       try {
-        document = await runStructuredModel()
-      } catch (err: any) {
-        const message = String(err?.message || '')
-        const code = String(err?.code || '')
-        const isStructuredInvalid =
-          message.includes('OPENAI_INVALID_STRUCTURED_OUTPUT') || code === 'OPENAI_INVALID_STRUCTURED_OUTPUT'
-        if (!isStructuredInvalid) throw err
-        console.warn('plan.generate structured_output_invalid', {
-          requestId,
-          message: err?.message ?? 'unknown',
+        await chargeCredits(user.id, cost)
+        charged = true
+      } catch (debitErr: any) {
+        const message = String(debitErr?.message || '')
+        const code = message.includes('INSUFFICIENT_CREDITS')
+          ? 'INSUFFICIENT_CREDITS'
+          : message.includes('SERVER_MISCONFIGURED')
+            ? 'SERVER_MISCONFIGURED'
+            : 'CREDITS_CHARGE_FAILED'
+
+        await savePlanToDbBestEffort({
+          id: planId,
+          userId: user.id,
+          prompt,
+          title: processingDoc.title,
+          language: processingDoc.language,
+          created_at: new Date().toISOString(),
+          result: processingDoc,
+          creditsCharged: 0,
+          inputChars: prompt.length,
+          imagesCount: imageFiles.length,
+          outputChars: JSON.stringify(processingDoc).length,
+          status: 'failed',
+          generationId: requestId,
+          materials: imageFiles.map((f) => f.name),
+          error: code,
         })
-        try {
-          document = await runPlainJsonRetry()
-        } catch (retryErr: any) {
-          console.warn('plan.generate plain_json_retry_failed', {
-            requestId,
-            message: retryErr?.message ?? 'unknown',
-          })
-          document = fallbackPlanDocument(isHu, prompt)
-          usedFallback = true
+
+        if (code === 'INSUFFICIENT_CREDITS') {
+          return NextResponse.json(
+            { error: { code: 'INSUFFICIENT_CREDITS', message: 'Not enough credits' } },
+            { status: 402, headers: { 'cache-control': 'no-store' } }
+          )
         }
+        if (code === 'SERVER_MISCONFIGURED') {
+          return NextResponse.json(
+            { error: { code: 'SERVER_MISCONFIGURED', message } },
+            { status: 500, headers: { 'cache-control': 'no-store' } }
+          )
+        }
+        return NextResponse.json(
+          { error: { code: 'CREDITS_CHARGE_FAILED', message: 'Credits charge failed' }, requestId },
+          { status: 500, headers: { 'cache-control': 'no-store' } }
+        )
       }
-    } catch (err: any) {
-      const code = /aborted|timed out|timeout/i.test(String(err?.message ?? ''))
-        ? 'OPENAI_TIMEOUT'
-        : 'PLAN_GENERATION_FAILED'
-
-      await savePlanToDbBestEffort({
-        id: planId,
-        userId: user.id,
-        prompt,
-        title: processingDoc.title,
-        language: processingDoc.language,
-        created_at: new Date().toISOString(),
-        result: processingDoc,
-        creditsCharged: 0,
-        inputChars: prompt.length,
-        imagesCount: imageFiles.length,
-        outputChars: JSON.stringify(processingDoc).length,
-        status: 'failed',
-        generationId: requestId,
-        materials: imageFiles.map((f) => f.name),
-        error: code,
-      })
-
-      return NextResponse.json(
-        { error: { code, message: code === 'OPENAI_TIMEOUT' ? 'OpenAI call timed out' : 'Plan generation failed' }, requestId },
-        { status: 500, headers: { 'cache-control': 'no-store' } }
-      )
     }
 
     const outputChars = JSON.stringify(document).length
@@ -570,7 +533,7 @@ export async function POST(req: Request) {
       status: 'done',
       generationId: requestId,
       materials: imageFiles.map((f) => f.name),
-      error: usedFallback ? 'OPENAI_INVALID_STRUCTURED_OUTPUT_FALLBACK' : null,
+      error: finalPath === 'fallback_used' ? 'OPENAI_INVALID_STRUCTURED_OUTPUT_FALLBACK' : null,
     })
 
     upsertPlanInMemory({
@@ -581,37 +544,14 @@ export async function POST(req: Request) {
       result: document,
     })
 
-    if (cost > 0) {
-      try {
-        await chargeCredits(user.id, cost)
-        charged = true
-      } catch (debitErr: any) {
-        const message = String(debitErr?.message || '')
-        if (message.includes('INSUFFICIENT_CREDITS')) {
-          return NextResponse.json(
-            { error: { code: 'INSUFFICIENT_CREDITS', message: 'Not enough credits' } },
-            { status: 402, headers: { 'cache-control': 'no-store' } }
-          )
-        }
-        if (message.includes('SERVER_MISCONFIGURED')) {
-          return NextResponse.json(
-            { error: { code: 'SERVER_MISCONFIGURED', message } },
-            { status: 500, headers: { 'cache-control': 'no-store' } }
-          )
-        }
-        return NextResponse.json(
-          { error: { code: 'CREDITS_CHARGE_FAILED', message: 'Credits charge failed' } },
-          { status: 500, headers: { 'cache-control': 'no-store' } }
-        )
-      }
-    }
-
     await setCurrentPlanBestEffort(user.id, planId)
 
-    console.log('plan.generate done', {
+    console.log('plan.generate.done', {
       requestId,
       planId,
+      finalPath,
       elapsed_ms: Date.now() - startedAt,
+      retries: finalPath === 'strict_success' ? 0 : finalPath === 'strict_retry_success' ? 1 : OPENAI_ATTEMPTS,
     })
 
     return NextResponse.json(

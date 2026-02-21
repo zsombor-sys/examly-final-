@@ -22,6 +22,12 @@ export default function SignupPage() {
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault()
     setError(null)
+    const emailNormalized = email.trim().toLowerCase()
+
+    console.log('AUTH_MODE', 'signup')
+    console.log('AUTH_METHOD', 'signUp')
+    console.log('AUTH_START', { email: emailNormalized })
+
     if (!supabase) {
       setError('Auth is not configured (missing Supabase env vars).')
       return
@@ -39,8 +45,8 @@ export default function SignupPage() {
     try {
       const phoneTrim = phone.trim()
       const phoneNorm = normalizePhoneDigits(phoneTrim)
-      const { data, error } = await supabase.auth.signUp({
-        email: email.trim(),
+      const result = await supabase.auth.signUp({
+        email: emailNormalized,
         password,
         options: {
           data: {
@@ -50,8 +56,10 @@ export default function SignupPage() {
           },
         },
       })
+      console.log('AUTH_RESULT', result)
+      const { data, error } = result
       if (error) {
-        console.log('signup error', error)
+        console.error('AUTH_ERROR', error)
         setError(error.message || 'Signup failed')
         return
       }
@@ -61,6 +69,7 @@ export default function SignupPage() {
       }
       router.replace('/login')
     } catch (e: any) {
+      console.error('AUTH_ERROR', e)
       setError(e?.message ?? 'Error')
     } finally {
       setLoading(false)
@@ -79,7 +88,7 @@ export default function SignupPage() {
           <Input value={phone} onChange={(e) => setPhone(e.target.value)} placeholder="Phone number" />
           <Input value={password} onChange={(e) => setPassword(e.target.value)} placeholder="Password" type="password" />
           {error && <p className="text-sm text-red-400">{error}</p>}
-          <Button disabled={loading} className="w-full">{loading ? 'Creating…' : 'Create account'}</Button>
+          <Button type="submit" disabled={loading} className="w-full">{loading ? 'Creating…' : 'Create account'}</Button>
         </form>
 
         <p className="mt-6 text-sm text-dim">

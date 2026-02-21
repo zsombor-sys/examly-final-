@@ -15,10 +15,14 @@ export default function LoginPage() {
   const [resendMsg, setResendMsg] = useState<string | null>(null)
 
   async function onSubmit(e: React.FormEvent) {
-    console.log('SIGNIN_CLICK')
     e.preventDefault()
     setError(null)
     setResendMsg(null)
+    const emailNormalized = email.trim().toLowerCase()
+
+    console.log('AUTH_MODE', 'signin')
+    console.log('AUTH_METHOD', 'signInWithPassword')
+    console.log('AUTH_START', { email: emailNormalized })
 
     const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
     const supabaseAnon = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
@@ -37,8 +41,7 @@ export default function LoginPage() {
 
     setLoading(true)
     try {
-      console.log('AUTH_START')
-      const result = await supabase.auth.signInWithPassword({ email, password })
+      const result = await supabase.auth.signInWithPassword({ email: emailNormalized, password })
       console.log('AUTH_RESULT', result)
       if (result.error) {
         setError(result.error.message || 'Login failed')

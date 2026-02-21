@@ -21,6 +21,13 @@ function hasAuthCookie(req: NextRequest) {
     .some((c) => c.name.includes('auth-token') || c.name.startsWith('sb-'))
 }
 
+function safeNext(next: string) {
+  if (typeof next !== 'string') return '/plan'
+  if (!next.startsWith('/')) return '/plan'
+  if (next.startsWith('//')) return '/plan'
+  return next
+}
+
 export function middleware(req: NextRequest) {
   const host = (req.headers.get('host') || '').toLowerCase()
 
@@ -56,8 +63,8 @@ export function middleware(req: NextRequest) {
   if (isProtectedPath(pathname) && !hasAuthCookie(req)) {
     const url = req.nextUrl.clone()
     url.pathname = '/login'
-    const next = `${pathname}${search || ''}`
-    url.searchParams.set('next', next.startsWith('/') ? next : '/plan')
+    const next = safeNext(`${pathname}${search || ''}`)
+    url.searchParams.set('next', next)
     return NextResponse.redirect(url, 307)
   }
 

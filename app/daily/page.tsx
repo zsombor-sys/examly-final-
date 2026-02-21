@@ -119,7 +119,7 @@ function getDailySchedule(plan: PlanResult | null): DailyDay[] {
 
 export default function DailyPage() {
   return (
-    <AuthGate requireEntitlement={true}>
+    <AuthGate requireEntitlement={false}>
       <Inner />
     </AuthGate>
   )

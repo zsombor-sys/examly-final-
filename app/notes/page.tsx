@@ -51,7 +51,7 @@ function loadLocalPlan(userId: string | null, id: string): any | null {
 
 export default function NotesPage() {
   return (
-    <AuthGate requireEntitlement={true}>
+    <AuthGate requireEntitlement={false}>
       <Inner />
     </AuthGate>
   )

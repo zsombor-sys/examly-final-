@@ -17,6 +17,13 @@ function isGenerationPath(pathname: string | null) {
   return p === '/plan' || p.startsWith('/plan/') || p === '/practice' || p.startsWith('/practice/') || p === '/homework' || p.startsWith('/homework/') || p === '/vocab' || p.startsWith('/vocab/')
 }
 
+function safeNext(next: string) {
+  if (typeof next !== 'string') return '/plan'
+  if (!next.startsWith('/')) return '/plan'
+  if (next.startsWith('//')) return '/plan'
+  return next
+}
+
 export default function AuthGate({
   children,
   requireEntitlement = true,
@@ -44,10 +51,12 @@ export default function AuthGate({
 
       const { data } = await supabase.auth.getSession()
       const session = data.session
+      const search = typeof window !== 'undefined' ? window.location.search || '' : ''
+      const next = safeNext(`${pathname || '/plan'}${search}`)
 
       if (!session) {
         console.log('AuthGate: no session', { path: pathname })
-        router.replace(`/login?next=${encodeURIComponent(pathname || '/plan')}`)
+        router.replace(`/login?next=${encodeURIComponent(next)}`)
         return
       }
 
@@ -65,7 +74,7 @@ export default function AuthGate({
 
           if (Number(json?.entitlement?.credits ?? 0) <= 0) {
             // No credits -> send to billing.
-            router.replace(`/billing?next=${encodeURIComponent(pathname || '/plan')}`)
+            router.replace(`/billing?next=${encodeURIComponent(next)}`)
             return
           }
         } catch (e: any) {

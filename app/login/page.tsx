@@ -54,7 +54,8 @@ export default function LoginPage() {
         setError(result.error.message || 'Login failed')
         return
       }
-      router.replace('/plan')
+      router.refresh()
+      router.push('/plan')
     } catch (err) {
       console.error('AUTH_ERROR', err)
       const message = err instanceof Error ? err.message : 'Login failed'

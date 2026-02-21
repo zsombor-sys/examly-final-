@@ -76,8 +76,8 @@ export default function LoginPage() {
   }
 
   return (
-    <div className="mx-auto max-w-md px-4 py-16">
-      <Card>
+    <div className="relative z-20 mx-auto max-w-md px-4 py-16 pointer-events-auto">
+      <Card className="pointer-events-auto">
         <h1 className="text-xl font-semibold">Log in</h1>
         <p className="mt-1 text-sm text-dim">Welcome back.</p>
 

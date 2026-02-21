@@ -15,23 +15,42 @@ export default function LoginPage() {
   const [resendMsg, setResendMsg] = useState<string | null>(null)
 
   async function onSubmit(e: React.FormEvent) {
+    console.log('SIGNIN_CLICK')
     e.preventDefault()
     setError(null)
     setResendMsg(null)
 
-    if (!supabase) {
-      setError('Auth is not configured (missing Supabase env vars).')
+    const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
+    const supabaseAnon = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
+    if (!supabaseUrl || !supabaseAnon) {
+      const missing = [
+        !supabaseUrl ? 'NEXT_PUBLIC_SUPABASE_URL' : null,
+        !supabaseAnon ? 'NEXT_PUBLIC_SUPABASE_ANON_KEY' : null,
+      ]
+        .filter(Boolean)
+        .join(', ')
+      const message = `Auth is not configured (missing ${missing}).`
+      console.error('AUTH_ERROR', new Error(message))
+      setError(message)
       return
     }
 
     setLoading(true)
-    const { error } = await supabase.auth.signInWithPassword({ email, password })
-    setLoading(false)
-
-    if (error) {
-      setError(error.message || 'Login failed')
-    } else {
+    try {
+      console.log('AUTH_START')
+      const result = await supabase.auth.signInWithPassword({ email, password })
+      console.log('AUTH_RESULT', result)
+      if (result.error) {
+        setError(result.error.message || 'Login failed')
+        return
+      }
       router.replace('/plan')
+    } catch (err) {
+      console.error('AUTH_ERROR', err)
+      const message = err instanceof Error ? err.message : 'Login failed'
+      setError(message)
+    } finally {
+      setLoading(false)
     }
   }
 
@@ -67,14 +86,14 @@ export default function LoginPage() {
           <Input value={password} onChange={(e) => setPassword(e.target.value)} placeholder="Password" type="password" />
           {error && <p className="text-sm text-red-400">{error}</p>}
           {resendMsg && <p className="text-sm text-green-400">{resendMsg}</p>}
-          <Button disabled={loading} className="w-full">
+          <Button type="submit" disabled={loading} className="w-full">
             {loading ? 'Signing in…' : 'Sign in'}
           </Button>
         </form>
 
         {error?.toLowerCase().includes('confirm') && (
           <div className="mt-3">
-            <Button variant="ghost" className="w-full" onClick={onResendConfirmation}>
+            <Button type="button" variant="ghost" className="w-full" onClick={onResendConfirmation}>
               Resend confirmation email
             </Button>
           </div>

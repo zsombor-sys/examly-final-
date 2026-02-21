@@ -13,12 +13,19 @@ export default function LoginPage() {
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
   const [resendMsg, setResendMsg] = useState<string | null>(null)
+  const emailNormalized = email.trim().toLowerCase()
+  const inputValid = emailNormalized.includes('@') && password.trim().length > 0
+  const submitDisabled = loading
+
+  function onSignInClick() {
+    console.log('SIGN_IN_CLICK', { disabled: submitDisabled, loading, inputValid })
+  }
 
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault()
+    console.log('SIGN_IN_SUBMIT', { disabled: submitDisabled, loading, inputValid })
     setError(null)
     setResendMsg(null)
-    const emailNormalized = email.trim().toLowerCase()
 
     console.log('AUTH_MODE', 'signin')
     console.log('AUTH_METHOD', 'signInWithPassword')
@@ -89,7 +96,7 @@ export default function LoginPage() {
           <Input value={password} onChange={(e) => setPassword(e.target.value)} placeholder="Password" type="password" />
           {error && <p className="text-sm text-red-400">{error}</p>}
           {resendMsg && <p className="text-sm text-green-400">{resendMsg}</p>}
-          <Button type="submit" disabled={loading} className="w-full">
+          <Button type="submit" disabled={submitDisabled} className="w-full" onClick={onSignInClick}>
             {loading ? 'Signing in…' : 'Sign in'}
           </Button>
         </form>

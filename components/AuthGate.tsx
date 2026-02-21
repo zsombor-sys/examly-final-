@@ -12,6 +12,11 @@ type Me = {
   }
 }
 
+function isGenerationPath(pathname: string | null) {
+  const p = pathname || ''
+  return p === '/plan' || p.startsWith('/plan/') || p === '/practice' || p.startsWith('/practice/') || p === '/homework' || p.startsWith('/homework/') || p === '/vocab' || p.startsWith('/vocab/')
+}
+
 export default function AuthGate({
   children,
   requireEntitlement = true,
@@ -46,7 +51,7 @@ export default function AuthGate({
         return
       }
 
-      if (requireEntitlement) {
+      if (requireEntitlement && isGenerationPath(pathname)) {
         try {
           const res = await authedFetch('/api/me', {
             method: 'GET',
@@ -58,7 +63,7 @@ export default function AuthGate({
 
           if (!res.ok) throw new Error((json as any)?.error || `Error (${res.status})`)
 
-          if (!json?.entitlement?.ok) {
+          if (Number(json?.entitlement?.credits ?? 0) <= 0) {
             // No credits -> send to billing.
             router.replace(`/billing?next=${encodeURIComponent(pathname || '/plan')}`)
             return

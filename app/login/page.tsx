@@ -54,6 +54,13 @@ export default function LoginPage() {
         setError(result.error.message || 'Login failed')
         return
       }
+      console.log('AUTH_SUCCESS', { userId: result.data?.user?.id ?? null })
+      const sessionCheck = await supabase.auth.getSession()
+      console.log('AUTH_SESSION_CHECK', {
+        hasSession: !!sessionCheck?.data?.session,
+        userId: sessionCheck?.data?.session?.user?.id ?? null,
+        sessionError: sessionCheck?.error?.message ?? null,
+      })
       router.refresh()
       router.push('/plan')
     } catch (err) {

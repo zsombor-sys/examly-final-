@@ -26,6 +26,21 @@ export const DailyScheduleDaySchema = z.object({
   blocks: z.array(DailyScheduleBlockSchema),
 })
 
+export const DailyTimedBlockSchema = z.object({
+  start: z.string(),
+  end: z.string(),
+  title: z.string(),
+  type: z.enum(['study', 'break']),
+  pomodoro: z.boolean(),
+  details: z.string().optional(),
+})
+
+export const DailyTimedDaySchema = z.object({
+  day: z.number(),
+  focus: z.string(),
+  blocks: z.array(DailyTimedBlockSchema),
+})
+
 export const PracticeQuestionSchema = z.object({
   q: z.string(),
   choices: z.array(z.string()).optional(),
@@ -46,6 +61,7 @@ export const PlanDocumentSchema = z.object({
   }),
   daily: z.object({
     schedule: z.array(DailyScheduleDaySchema),
+    days: z.array(DailyTimedDaySchema),
   }),
   practice: z.object({
     questions: z.array(PracticeQuestionSchema),
@@ -106,6 +122,34 @@ export const PlanDocumentJsonSchema = {
       type: 'object',
       additionalProperties: false,
       properties: {
+        days: {
+          type: 'array',
+          items: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              day: { type: 'number' },
+              focus: { type: 'string' },
+              blocks: {
+                type: 'array',
+                items: {
+                  type: 'object',
+                  additionalProperties: false,
+                  properties: {
+                    start: { type: 'string' },
+                    end: { type: 'string' },
+                    title: { type: 'string' },
+                    type: { type: 'string', enum: ['study', 'break'] },
+                    pomodoro: { type: 'boolean' },
+                    details: { type: 'string' },
+                  },
+                  required: ['start', 'end', 'title', 'type', 'pomodoro'],
+                },
+              },
+            },
+            required: ['day', 'focus', 'blocks'],
+          },
+        },
         schedule: {
           type: 'array',
           items: {
@@ -133,7 +177,7 @@ export const PlanDocumentJsonSchema = {
           },
         },
       },
-      required: ['schedule'],
+      required: ['schedule', 'days'],
     },
     practice: {
       type: 'object',
@@ -402,6 +446,28 @@ function convertLegacyDailySlotsToSchedule(rawSlots: any[], isHu: boolean) {
     }))
 }
 
+function buildTimedDaysFromSchedule(
+  schedule: Array<{
+    day: number
+    label: string
+    blocks: Array<{ start_time: string; end_time: string; title: string; details: string }>
+  }>,
+  isHu: boolean
+) {
+  return schedule.map((day) => ({
+    day: day.day,
+    focus: asText(day.label) || (isHu ? `Nap ${day.day}` : `Day ${day.day}`),
+    blocks: day.blocks.map((block) => ({
+      start: block.start_time,
+      end: block.end_time,
+      title: block.title,
+      type: /szünet|break/i.test(block.title) ? ('break' as const) : ('study' as const),
+      pomodoro: true,
+      details: block.details,
+    })),
+  }))
+}
+
 function containsTomorrowHint(prompt: string) {
   return /\bholnap\b|\btomorrow\b/i.test(prompt)
 }
@@ -479,6 +545,11 @@ function buildScheduleFromBlocks(blocks: PlanBlock[], isHu: boolean, prompt = ''
       ]
 }
 
+function buildTimedDaysFromBlocks(blocks: PlanBlock[], isHu: boolean, prompt = '') {
+  const schedule = buildScheduleFromBlocks(blocks, isHu, prompt)
+  return buildTimedDaysFromSchedule(schedule, isHu)
+}
+
 export function fallbackPlanDocument(isHu: boolean, prompt = ''): PlanDocument {
   const title = truncate(asText(prompt) || (isHu ? 'Tanulasi terv' : 'Study plan'), 90)
   const blocks = fallbackBlocks(isHu)
@@ -508,6 +579,7 @@ export function fallbackPlanDocument(isHu: boolean, prompt = ''): PlanDocument {
     ),
     daily: {
       schedule: buildScheduleFromBlocks(blocks, isHu, prompt),
+      days: buildTimedDaysFromBlocks(blocks, isHu, prompt),
     },
     practice: {
       questions: ensureMinPracticeQuestions([
@@ -582,6 +654,37 @@ export function normalizePlanDocument(input: any, isHu: boolean, prompt = ''): P
       : buildScheduleFromBlocks(blocks, isHu, prompt)
   }
 
+  const rawDays = Array.isArray(input?.daily?.days)
+    ? input.daily.days
+    : Array.isArray(input?.daily_json?.days)
+      ? input.daily_json.days
+      : null
+
+  let days: PlanDocument['daily']['days'] = []
+  if (rawDays) {
+    days = rawDays
+      .map((day: any) => ({
+        day: clamp(Math.round(Number(day?.day) || 1), 1, 6),
+        focus: truncate(asText(day?.focus) || (isHu ? `Nap ${day?.day ?? 1}` : `Day ${day?.day ?? 1}`), 80),
+        blocks: (Array.isArray(day?.blocks) ? day.blocks : [])
+          .map((block: any) => ({
+            start: asText(block?.start) || asText(block?.start_time) || '18:00',
+            end: asText(block?.end) || asText(block?.end_time) || '18:30',
+            title: truncate(asText(block?.title) || (isHu ? 'Tanulas' : 'Study'), 80),
+            type: String(block?.type) === 'break' ? ('break' as const) : ('study' as const),
+            pomodoro: typeof block?.pomodoro === 'boolean' ? block.pomodoro : true,
+            details: truncate(asText(block?.details), 180) || undefined,
+          }))
+          .filter((block: any) => block.title),
+      }))
+      .filter((day: any) => day.blocks.length)
+      .slice(0, 6)
+  }
+
+  if (!days.length) {
+    days = buildTimedDaysFromSchedule(schedule, isHu)
+  }
+
   const rawQuestions = Array.isArray(input?.practice?.questions)
     ? input.practice.questions
     : Array.isArray(input?.practice_json?.questions)
@@ -613,6 +716,7 @@ export function normalizePlanDocument(input: any, isHu: boolean, prompt = ''): P
     notes,
     daily: {
       schedule: schedule.length ? schedule : fallback.daily.schedule,
+      days: days.length ? days : fallback.daily.days,
     },
     practice: {
       questions: questions.length ? questions : ensureMinPracticeQuestions(fallback.practice.questions, isHu, notes.outline),

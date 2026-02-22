@@ -11,22 +11,21 @@ import { throwIfMissingTable } from '@/lib/supabaseErrors'
 import { optimizeImageForVision, type OptimizedVisionImage } from '@/lib/imageOptimize'
 import { extractFromImagesWithVision } from '@/lib/visionExtract'
 import {
-  PlanDocumentJsonSchema,
   fallbackPlanDocument,
   normalizePlanDocument,
   type PlanDocument,
 } from '@/lib/planDocument'
 
 export const runtime = 'nodejs'
-export const maxDuration = 60
+export const maxDuration = 300
 export const dynamic = 'force-dynamic'
 
 const MODEL = OPENAI_MODEL
 const VISION_MODEL = process.env.OPENAI_VISION_MODEL || OPENAI_MODEL
 const MAX_OUTPUT_TOKENS = 1400
-const STEP1_TIMEOUT_MS = 11_000
+const STEP1_TIMEOUT_MS = 12_000
 const STEP2_TIMEOUT_MS = 14_000
-const OPENAI_ATTEMPTS = 3
+const OPENAI_ATTEMPTS = 2
 const MAX_VISION_BYTES = 8 * 1024 * 1024
 
 const planRequestSchema = z.object({
@@ -276,6 +275,121 @@ function normalizeStoredResult(raw: any) {
   )
 }
 
+const planDailySchema = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    title: { type: 'string' },
+    language: { type: 'string', enum: ['hu', 'en'] },
+    summary: { type: 'string' },
+    plan: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        blocks: {
+          type: 'array',
+          items: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              title: { type: 'string' },
+              description: { type: 'string' },
+              duration_minutes: { type: 'number' },
+            },
+            required: ['title', 'description', 'duration_minutes'],
+          },
+        },
+      },
+      required: ['blocks'],
+    },
+    daily: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        days: {
+          type: 'array',
+          items: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              day: { type: 'number' },
+              focus: { type: 'string' },
+              blocks: {
+                type: 'array',
+                items: {
+                  type: 'object',
+                  additionalProperties: false,
+                  properties: {
+                    start: { type: 'string' },
+                    end: { type: 'string' },
+                    title: { type: 'string' },
+                    type: { type: 'string', enum: ['study', 'break'] },
+                    pomodoro: { type: 'boolean' },
+                    details: { type: 'string' },
+                  },
+                  required: ['start', 'end', 'title', 'type', 'pomodoro'],
+                },
+              },
+            },
+            required: ['day', 'focus', 'blocks'],
+          },
+        },
+      },
+      required: ['days'],
+    },
+  },
+  required: ['title', 'language', 'summary', 'plan', 'daily'],
+} as const
+
+const notesPracticeSchema = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    notes: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        outline: {
+          type: 'array',
+          items: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              heading: { type: 'string' },
+              bullets: { type: 'array', items: { type: 'string' } },
+            },
+            required: ['heading', 'bullets'],
+          },
+        },
+        summary: { type: 'string' },
+      },
+      required: ['outline', 'summary'],
+    },
+    practice: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        questions: {
+          type: 'array',
+          items: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              q: { type: 'string' },
+              choices: { type: 'array', items: { type: 'string' } },
+              a: { type: 'string' },
+              explanation: { type: 'string' },
+            },
+            required: ['q', 'a', 'explanation'],
+          },
+        },
+      },
+      required: ['questions'],
+    },
+  },
+  required: ['notes', 'practice'],
+} as const
+
 /** GET /api/plan?id=... */
 export async function GET(req: Request) {
   try {
@@ -508,10 +622,9 @@ export async function POST(req: Request) {
     const systemText = [
       'Return ONLY valid JSON. No markdown. No commentary.',
       `Language target: ${targetLang === 'hu' ? 'Hungarian' : 'English'}; output language must be "${targetLang}" unless impossible.`,
-      'Output must match the exact PlanDocument schema keys.',
       'Plan summary must be concise: 2-4 lines maximum.',
-      'Notes are the primary value: rich, structured, Hungarian outline with headings + bullets + formulas + typical mistakes + quick examples.',
-      'Daily schedule must include realistic HH:MM start_time/end_time blocks by day.',
+      'Daily days blocks must include start/end time strings and pomodoro-friendly study blocks.',
+      'Notes are the primary value and must be an outline with headings + bullets. Hungarian for Hungarian prompts.',
       'Practice must include at least 8 short exercises with compact answers/explanations.',
     ].join('\n')
 
@@ -522,25 +635,27 @@ export async function POST(req: Request) {
       `Tasks found:\n${extracted.tasks_found.join(' | ') || '(none)'}`,
     ].join('\n\n')
 
-    const runStructuredAttempt = async (attempt: number): Promise<PlanDocument> => {
-      const extra = attempt > 0 ? 'Return ONLY valid JSON matching schema. No prose. No code fences.' : ''
-
-      const completion = await withTimeout(STEP2_TIMEOUT_MS, (signal) =>
+    const runPlanDailyAttempt = async (attempt: number): Promise<PlanDocument> => {
+      const extra = attempt > 0 ? 'Repair JSON: return ONLY valid JSON matching schema exactly. No prose.' : ''
+      const completion = await withTimeout(STEP1_TIMEOUT_MS, (signal) =>
         client.chat.completions.create(
           {
             model: MODEL,
             messages: [
               { role: 'system', content: [systemText, extra].filter(Boolean).join('\n') },
-              { role: 'user', content: userText },
+              {
+                role: 'user',
+                content: `${userText}\n\nGenerate only title, language, summary, plan.blocks and daily.days. Keep it compact.`,
+              },
             ],
             temperature: 0,
-            max_tokens: MAX_OUTPUT_TOKENS,
+            max_tokens: 700,
             response_format: {
               type: 'json_schema',
               json_schema: {
-                name: 'plan_document',
+                name: 'plan_daily',
                 strict: true,
-                schema: PlanDocumentJsonSchema as any,
+                schema: planDailySchema as any,
               },
             },
           },
@@ -555,16 +670,80 @@ export async function POST(req: Request) {
         throw err
       }
 
-      return normalizePlanDocument(parsed, isHu, prompt)
+      const seeded = {
+        ...fallbackPlanDocument(isHu, prompt),
+        title: (parsed as any).title,
+        language: (parsed as any).language,
+        summary: (parsed as any).summary,
+        plan: (parsed as any).plan,
+        daily: {
+          days: (parsed as any)?.daily?.days,
+        },
+      }
+      return normalizePlanDocument(seeded, isHu, prompt)
+    }
+
+    const runNotesPracticeAttempt = async (base: PlanDocument, attempt: number): Promise<PlanDocument> => {
+      const extra = attempt > 0 ? 'Repair JSON: return ONLY valid JSON matching schema exactly. No prose.' : ''
+      const completion = await withTimeout(STEP2_TIMEOUT_MS, (signal) =>
+        client.chat.completions.create(
+          {
+            model: MODEL,
+            messages: [
+              { role: 'system', content: [systemText, extra].filter(Boolean).join('\n') },
+              {
+                role: 'user',
+                content:
+                  `${userText}\n\n` +
+                  `Existing compact plan:\n${JSON.stringify({
+                    title: base.title,
+                    language: base.language,
+                    summary: base.summary,
+                    plan: base.plan,
+                    daily: base.daily,
+                  })}\n\n` +
+                  'Generate only notes and practice keys. Keep structure strict and concise.',
+              },
+            ],
+            temperature: 0,
+            max_tokens: MAX_OUTPUT_TOKENS,
+            response_format: {
+              type: 'json_schema',
+              json_schema: {
+                name: 'notes_practice',
+                strict: true,
+                schema: notesPracticeSchema as any,
+              },
+            },
+          },
+          { signal }
+        )
+      )
+
+      const parsed = (completion.choices?.[0]?.message as any)?.parsed
+      if (!parsed || typeof parsed !== 'object') {
+        const err: any = new Error('OPENAI_INVALID_STRUCTURED_OUTPUT')
+        err.code = 'OPENAI_INVALID_STRUCTURED_OUTPUT'
+        throw err
+      }
+      const merged = {
+        ...base,
+        notes: (parsed as any).notes,
+        practice: (parsed as any).practice,
+      }
+      return normalizePlanDocument(merged, isHu, prompt)
     }
 
     let document: PlanDocument | null = null
+    let finalStatus: 'done' | 'partial' = 'partial'
     let finalPath: 'strict_success' | 'strict_retry_success' | 'fallback_used' = 'fallback_used'
+    let retriesUsed = 0
 
     for (let attempt = 0; attempt < OPENAI_ATTEMPTS; attempt += 1) {
       try {
-        document = await runStructuredAttempt(attempt)
+        document = await runPlanDailyAttempt(attempt)
         finalPath = attempt === 0 ? 'strict_success' : 'strict_retry_success'
+        retriesUsed = attempt
         break
       } catch (err: any) {
         console.warn('plan.generate.retry', {
@@ -579,6 +758,48 @@ export async function POST(req: Request) {
     if (!document) {
       document = fallbackPlanDocument(isHu, prompt)
       finalPath = 'fallback_used'
+      retriesUsed = OPENAI_ATTEMPTS
+    }
+
+    await savePlanToDbBestEffort({
+      id: planId,
+      userId: user.id,
+      prompt,
+      title: document.title,
+      language: document.language,
+      created_at: new Date().toISOString(),
+      result: document,
+      creditsCharged: 0,
+      inputChars: prompt.length,
+      imagesCount: imagesDownloaded,
+      outputChars: JSON.stringify(document).length,
+      status: 'partial',
+      generationId: requestId,
+      materials: rawImages.map((x) => x.name),
+      error: finalPath === 'fallback_used' ? 'PLAN_DAILY_FALLBACK' : null,
+    })
+
+    if (finalPath !== 'fallback_used') {
+      let step2Done = false
+      for (let attempt = 0; attempt < OPENAI_ATTEMPTS; attempt += 1) {
+        try {
+          document = await runNotesPracticeAttempt(document, attempt)
+          step2Done = true
+          finalStatus = 'done'
+          retriesUsed += attempt
+          break
+        } catch (err: any) {
+          console.warn('plan.generate.step2_retry', {
+            requestId,
+            attempt: attempt + 1,
+            code: String(err?.code || ''),
+            message: String(err?.message || ''),
+          })
+        }
+      }
+      if (!step2Done) {
+        finalStatus = 'partial'
+      }
     }
 
     if (cost > 0) {
@@ -644,10 +865,15 @@ export async function POST(req: Request) {
       inputChars: prompt.length,
       imagesCount: imagesDownloaded,
       outputChars,
-      status: 'done',
+      status: finalStatus,
       generationId: requestId,
       materials: rawImages.map((x) => x.name),
-      error: finalPath === 'fallback_used' ? 'OPENAI_INVALID_STRUCTURED_OUTPUT_FALLBACK' : null,
+      error:
+        finalPath === 'fallback_used'
+          ? 'OPENAI_INVALID_STRUCTURED_OUTPUT_FALLBACK'
+          : finalStatus === 'partial'
+            ? 'NOTES_PRACTICE_PARTIAL'
+            : null,
     })
 
     upsertPlanInMemory({
@@ -664,17 +890,18 @@ export async function POST(req: Request) {
       requestId,
       planId,
       finalPath,
-      finalSchemaValid: finalPath !== 'fallback_used',
+      finalSchemaValid: finalPath !== 'fallback_used' && finalStatus === 'done',
+      status: finalStatus,
       imagesSelected,
       imagesDownloaded,
       imagesSentToVision,
       extractLength,
       elapsed_ms: Date.now() - startedAt,
-      retries: finalPath === 'strict_success' ? 0 : finalPath === 'strict_retry_success' ? 1 : OPENAI_ATTEMPTS,
+      retries: retriesUsed,
     })
 
     return NextResponse.json(
-      { planId, status: 'done' },
+      { planId, status: finalStatus },
       { headers: { 'cache-control': 'no-store', 'x-examly-plan': 'ok' } }
     )
   } catch (e: any) {

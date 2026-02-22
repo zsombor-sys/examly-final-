@@ -1,7 +1,7 @@
 'use client'
 
 import Link from 'next/link'
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Button, Textarea } from '@/components/ui'
 import MarkdownMath from '@/components/MarkdownMath'
 import { FileUp, Loader2, Trash2, ArrowLeft, Send } from 'lucide-react'
@@ -18,6 +18,15 @@ type PlanBlock = { title: string; duration_minutes: number; description: string 
 type OutlineSection = { heading: string; bullets: string[] }
 type DailyBlock = { start_time: string; end_time: string; title: string; details: string }
 type DailyDay = { day: number; label: string; blocks: DailyBlock[] }
+type DailyTimedBlock = {
+  start: string
+  end: string
+  title: string
+  type?: 'study' | 'break'
+  pomodoro?: boolean
+  details?: string
+}
+type DailyTimedDay = { day: number; focus?: string; blocks: DailyTimedBlock[] }
 type PracticeQuestion = { q: string; choices?: string[]; a: string; explanation: string }
 type NotesValue =
   | string
@@ -36,11 +45,11 @@ type PlanResult = {
   summary?: string | null
   plan?: { blocks?: PlanBlock[] } | null
   notes?: NotesValue
-  daily?: { schedule?: DailyDay[] } | null
+  daily?: { schedule?: DailyDay[]; days?: DailyTimedDay[] } | null
   practice?: { questions?: PracticeQuestion[] } | null
   plan_json?: { blocks?: PlanBlock[] } | null
   notes_json?: NotesValue
-  daily_json?: { schedule?: DailyDay[] } | null
+  daily_json?: { schedule?: DailyDay[]; days?: DailyTimedDay[] } | null
   practice_json?: { questions?: PracticeQuestion[] } | null
   fallback?: boolean
   errorCode?: string | null
@@ -200,6 +209,23 @@ function getPlanBlocks(result: PlanResult | null): PlanBlock[] {
 
 function getDailySchedule(result: PlanResult | null): DailyDay[] {
   if (!result) return []
+  const timedDays = Array.isArray(result.daily?.days)
+    ? result.daily.days
+    : Array.isArray(result.daily_json?.days)
+      ? result.daily_json.days
+      : []
+  if (timedDays.length) {
+    return timedDays.map((day) => ({
+      day: Math.max(1, Math.min(6, Number(day?.day) || 1)),
+      label: String(day?.focus ?? `Day ${day?.day ?? 1}`).trim() || `Day ${day?.day ?? 1}`,
+      blocks: (Array.isArray(day?.blocks) ? day.blocks : []).map((block) => ({
+        start_time: String(block?.start ?? '18:00'),
+        end_time: String(block?.end ?? '18:30'),
+        title: String(block?.title ?? '').trim() || 'Study',
+        details: String(block?.details ?? '').trim(),
+      })),
+    }))
+  }
   const schedule = Array.isArray(result.daily?.schedule)
     ? result.daily.schedule
     : Array.isArray(result.daily_json?.schedule)
@@ -273,14 +299,24 @@ function getRequestId(source: any): string | null {
 }
 
 export default function PlanPage() {
+  const [entitlement, setEntitlement] = useState<{ credits: number | null; entitlementOk: boolean | null }>({
+    credits: null,
+    entitlementOk: null,
+  })
+  const handleEntitlement = useCallback((state: { credits: number | null; entitlementOk: boolean | null }) => {
+    setEntitlement(state)
+  }, [])
   return (
-    <AuthGate requireEntitlement={true}>
-      <Inner />
+    <AuthGate
+      requireEntitlement={true}
+      onEntitlement={handleEntitlement}
+    >
+      <Inner entitlement={entitlement} />
     </AuthGate>
   )
 }
 
-function Inner() {
+function Inner({ entitlement }: { entitlement: { credits: number | null; entitlementOk: boolean | null } }) {
   const [prompt, setPrompt] = useState('')
   const [files, setFiles] = useState<File[]>([])
   const [loading, setLoading] = useState(false)
@@ -302,6 +338,7 @@ function Inner() {
 
   const [userId, setUserId] = useState<string | null>(null)
   const [credits, setCredits] = useState<number | null>(null)
+  const [entitlementOk, setEntitlementOk] = useState<boolean | null>(null)
 
   useEffect(() => {
     let active = true
@@ -332,6 +369,11 @@ function Inner() {
       })
       .catch(() => setCredits(null))
   }, [userId])
+
+  useEffect(() => {
+    if (typeof entitlement.credits === 'number') setCredits(entitlement.credits)
+    if (typeof entitlement.entitlementOk === 'boolean') setEntitlementOk(entitlement.entitlementOk)
+  }, [entitlement])
 
   async function loadHistory(uid: string | null) {
     if (!uid) {
@@ -634,7 +676,7 @@ function Inner() {
 
   const displayTitle = result?.title?.trim() ? result.title : 'Study plan'
   const displayInput = shortPrompt(prompt)
-  const creditsOk = credits == null ? true : credits >= 1
+  const creditsOk = entitlementOk != null ? entitlementOk : credits == null ? true : credits >= 1
   const canGenerate =
     !loading &&
     !isGenerating &&
@@ -750,6 +792,16 @@ function Inner() {
             This will cost {costEstimate} credit.
           </div>
           {!creditsOk ? <div className="mt-2 text-xs text-red-400">Insufficient credits.</div> : null}
+          {!creditsOk ? (
+            <div className="mt-3 rounded-xl border border-amber-400/40 bg-amber-500/10 p-3 text-xs text-amber-100">
+              Nincs elég kredited a generáláshoz.
+              <div className="mt-2">
+                <Link href="/billing" className="underline underline-offset-4">
+                  Kredit vásárlás
+                </Link>
+              </div>
+            </div>
+          ) : null}
 
           <Button className="mt-4 w-full" onClick={generate} disabled={!canGenerate}>
             {loading ? (

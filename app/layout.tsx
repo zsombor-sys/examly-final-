@@ -40,7 +40,14 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
             src="https://plausible.io/js/pa-iaW_HdUIHs9BEThk16j5Z.js"
           />
           <Script id="plausible-init" strategy="afterInteractive">
-            {"window.plausible=window.plausible||function(){(plausible.q=plausible.q||[]).push(arguments)},plausible.init=plausible.init||function(i){plausible.o=i||{}};\nplausible.init()"}
+            {`try {
+  window.plausible = window.plausible || function () { (window.plausible.q = window.plausible.q || []).push(arguments) }
+  if (typeof window.plausible.init === 'function') {
+    window.plausible.init()
+  }
+} catch (_err) {
+  // analytics must never block app flow
+}`}
           </Script>
         </TimerProvider>
       </body>

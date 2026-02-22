@@ -69,6 +69,7 @@ export default function LoginPage() {
         userId: sessionCheck?.data?.session?.user?.id ?? null,
         sessionError: sessionCheck?.error?.message ?? null,
       })
+      console.log('AUTH_NAVIGATE', { target: nextSafe || '/plan' })
       router.replace(nextSafe || '/plan')
     } catch (err) {
       console.error('AUTH_ERROR', err)

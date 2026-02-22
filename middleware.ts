@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
+import { getMiddlewareSession } from '@/lib/supabase/middleware'
 
 const PUBLIC_ROUTES = new Set<string>(['/', '/login', '/signup', '/register'])
 const PUBLIC_PREFIXES = ['/auth/callback']
@@ -14,11 +15,12 @@ function isProtectedPath(pathname: string) {
   return PROTECTED_PREFIXES.some((p) => pathname === p || pathname.startsWith(`${p}/`))
 }
 
-function hasAuthCookie(req: NextRequest) {
-  // Supabase cookie names vary by project and may be chunked; detect common token patterns.
-  return req.cookies
-    .getAll()
-    .some((c) => c.name.includes('auth-token') || c.name.startsWith('sb-'))
+function guardsDisabled() {
+  return String(process.env.DISABLE_GUARDS || '').toLowerCase() === 'true'
+}
+
+function authDebugEnabled() {
+  return process.env.AUTH_DEBUG === '1'
 }
 
 function safeNext(next: string) {
@@ -28,7 +30,7 @@ function safeNext(next: string) {
   return next
 }
 
-export function middleware(req: NextRequest) {
+export async function middleware(req: NextRequest) {
   const host = (req.headers.get('host') || '').toLowerCase()
 
   // ✅ Canonical domain: www.examly.dev
@@ -47,6 +49,8 @@ export function middleware(req: NextRequest) {
 
   const { pathname, search } = req.nextUrl
 
+  if (guardsDisabled()) return NextResponse.next()
+
   // Never gate API/static asset requests in middleware; API handles auth itself.
   if (
     pathname.startsWith('/api') ||
@@ -60,11 +64,33 @@ export function middleware(req: NextRequest) {
 
   if (isPublicPath(pathname)) return NextResponse.next()
 
-  if (isProtectedPath(pathname) && !hasAuthCookie(req)) {
+  const protectedPath = isProtectedPath(pathname)
+  if (!protectedPath) return NextResponse.next()
+
+  const sessionInfo = await getMiddlewareSession(req)
+  if (authDebugEnabled()) {
+    console.log('middleware.auth.check', {
+      pathname,
+      protected: protectedPath,
+      public: isPublicPath(pathname),
+      hasSession: sessionInfo.hasSession,
+      tokenFound: sessionInfo.tokenFound,
+      error: sessionInfo.error,
+    })
+  }
+
+  if (!sessionInfo.hasSession) {
     const url = req.nextUrl.clone()
     url.pathname = '/login'
     const next = safeNext(`${pathname}${search || ''}`)
     url.searchParams.set('next', next)
+    if (authDebugEnabled()) {
+      console.log('middleware.auth.redirect_login', {
+        pathname,
+        next,
+        hasSession: sessionInfo.hasSession,
+      })
+    }
     return NextResponse.redirect(url, 307)
   }
 

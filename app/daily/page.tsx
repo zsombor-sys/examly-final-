@@ -13,13 +13,15 @@ type DayPlan = { day: string; focus: string; tasks: string[]; minutes: number; b
 type PlanBlock = { title: string; duration_minutes: number; description: string }
 type DailyBlock = { start_time: string; end_time: string; title: string; details: string }
 type DailyDay = { day: number; label: string; blocks: DailyBlock[] }
+type TimedDailyBlock = { start: string; end: string; title: string; details?: string }
+type TimedDailyDay = { day: number; focus?: string; blocks: TimedDailyBlock[] }
 
 type PlanResult = {
   title?: string | null
   plan?: { blocks?: PlanBlock[] } | null
-  daily?: { schedule?: DailyDay[] } | null
+  daily?: { schedule?: DailyDay[]; days?: TimedDailyDay[] } | null
   plan_json?: { blocks?: PlanBlock[] } | null
-  daily_json?: { schedule?: DailyDay[] } | null
+  daily_json?: { schedule?: DailyDay[]; days?: TimedDailyDay[] } | null
 }
 
 function historyKeyForUser(userId: string | null) {
@@ -72,6 +74,23 @@ function minutesBetween(start: string, end: string) {
 
 function getDailySchedule(plan: PlanResult | null): DailyDay[] {
   if (!plan) return []
+  const timed = Array.isArray(plan.daily?.days)
+    ? plan.daily.days
+    : Array.isArray(plan.daily_json?.days)
+      ? plan.daily_json.days
+      : []
+  if (timed.length > 0) {
+    return timed.map((day) => ({
+      day: Math.max(1, Math.min(6, Number(day?.day) || 1)),
+      label: String(day?.focus ?? `Day ${day?.day ?? 1}`).trim() || `Day ${day?.day ?? 1}`,
+      blocks: (Array.isArray(day?.blocks) ? day.blocks : []).map((b) => ({
+        start_time: String(b?.start ?? '18:00'),
+        end_time: String(b?.end ?? '18:30'),
+        title: String(b?.title ?? '').trim() || 'Study',
+        details: String(b?.details ?? '').trim(),
+      })),
+    }))
+  }
   const schedule = Array.isArray(plan.daily?.schedule)
     ? plan.daily.schedule
     : Array.isArray(plan.daily_json?.schedule)

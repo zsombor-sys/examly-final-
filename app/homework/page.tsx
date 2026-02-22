@@ -5,13 +5,17 @@ import Link from 'next/link'
 import AuthGate from '@/components/AuthGate'
 import { Button, Textarea } from '@/components/ui'
 import { authedFetch } from '@/lib/authClient'
-import { MAX_HOMEWORK_IMAGES, MAX_PROMPT_CHARS } from '@/lib/limits'
+import { MAX_HOMEWORK_IMAGES, MAX_HOMEWORK_PROMPT_CHARS } from '@/lib/limits'
 
+type HomeworkStep = {
+  step: string
+  why: string
+}
 type HomeworkResult = {
   language: 'hu' | 'en'
   solutions: Array<{
     question: string
-    solution_steps: string[]
+    solution_steps: Array<HomeworkStep | string>
     final_answer: string
     common_mistakes: string[]
   }>
@@ -31,12 +35,24 @@ function Inner() {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [result, setResult] = useState<HomeworkResult | null>(null)
+  const [currentStepBySolution, setCurrentStepBySolution] = useState<Record<number, number>>({})
+
+  function normalizeSteps(steps: Array<HomeworkStep | string>) {
+    return (Array.isArray(steps) ? steps : []).map((step) => {
+      if (typeof step === 'string') return { step, why: '' }
+      return {
+        step: String(step?.step ?? '').trim(),
+        why: String(step?.why ?? '').trim(),
+      }
+    })
+  }
 
   async function run() {
     setError(null)
     setResult(null)
-    if (prompt.trim().length > MAX_PROMPT_CHARS) {
-      setError(`Prompt too long (max ${MAX_PROMPT_CHARS}).`)
+    setCurrentStepBySolution({})
+    if (prompt.trim().length > MAX_HOMEWORK_PROMPT_CHARS) {
+      setError(`Prompt too long (max ${MAX_HOMEWORK_PROMPT_CHARS}).`)
       return
     }
     if (files.length > MAX_HOMEWORK_IMAGES) {
@@ -68,10 +84,10 @@ function Inner() {
         <Textarea
           value={prompt}
           onChange={(e) => setPrompt(e.target.value)}
-          maxLength={MAX_PROMPT_CHARS}
-          placeholder="Írd be a feladatot (max 150 karakter), vagy tölts fel képet."
+          maxLength={MAX_HOMEWORK_PROMPT_CHARS}
+          placeholder="Írd be a feladatot (max 500 karakter), vagy tölts fel képet."
         />
-        <div className="text-xs text-white/60">{prompt.length}/{MAX_PROMPT_CHARS} • max {MAX_HOMEWORK_IMAGES} kép • 1 kredit</div>
+        <div className="text-xs text-white/60">{prompt.length}/{MAX_HOMEWORK_PROMPT_CHARS} • max {MAX_HOMEWORK_IMAGES} kép • 1 kredit</div>
         <input
           type="file"
           accept="image/*"
@@ -89,15 +105,56 @@ function Inner() {
               <div className="text-sm text-white/60">Feladat</div>
               <div className="mt-1 text-white/90">{s.question}</div>
               <div className="mt-4 text-sm text-white/60">Lépések</div>
-              <ol className="mt-2 list-decimal pl-5 space-y-1 text-white/80">
-                {s.solution_steps.map((step, si) => <li key={si}>{step}</li>)}
-              </ol>
-              <div className="mt-4 text-sm text-white/60">Végeredmény</div>
-              <div className="mt-1 text-white/90">{s.final_answer}</div>
-              <div className="mt-4 text-sm text-white/60">Gyakori hibák</div>
-              <ul className="mt-2 list-disc pl-5 space-y-1 text-white/80">
-                {s.common_mistakes.map((m, mi) => <li key={mi}>{m}</li>)}
-              </ul>
+              {(() => {
+                const steps = normalizeSteps(s.solution_steps)
+                const current = Math.max(0, Math.min(steps.length - 1, currentStepBySolution[i] ?? 0))
+                const step = steps[current]
+                return (
+                  <>
+                    {step ? (
+                      <div className="mt-2 rounded-2xl border border-white/10 bg-black/30 p-4 text-white/80">
+                        <div className="text-xs text-white/50">Lépés {current + 1}/{steps.length}</div>
+                        <div className="mt-1">{step.step}</div>
+                        <div className="mt-2 text-sm text-white/65">
+                          <span className="text-white/45">Miért?</span> {step.why || 'Rövid indoklás: ez a lépés visz közelebb a végeredményhez.'}
+                        </div>
+                      </div>
+                    ) : null}
+
+                    <div className="mt-3 flex gap-2">
+                      <Button
+                        variant="ghost"
+                        disabled={current <= 0}
+                        onClick={() => setCurrentStepBySolution((prev) => ({ ...prev, [i]: Math.max(0, current - 1) }))}
+                      >
+                        Back
+                      </Button>
+                      <Button
+                        disabled={current >= steps.length - 1}
+                        onClick={() =>
+                          setCurrentStepBySolution((prev) => ({
+                            ...prev,
+                            [i]: Math.min(steps.length - 1, current + 1),
+                          }))
+                        }
+                      >
+                        Next step →
+                      </Button>
+                    </div>
+
+                    {current >= steps.length - 1 ? (
+                      <>
+                        <div className="mt-4 text-sm text-white/60">Végeredmény</div>
+                        <div className="mt-1 text-white/90">{s.final_answer}</div>
+                        <div className="mt-4 text-sm text-white/60">Gyakori hibák</div>
+                        <ul className="mt-2 list-disc pl-5 space-y-1 text-white/80">
+                          {s.common_mistakes.map((m, mi) => <li key={mi}>{m}</li>)}
+                        </ul>
+                      </>
+                    ) : null}
+                  </>
+                )
+              })()}
             </section>
           ))}
         </div>

@@ -4,7 +4,7 @@ import OpenAI from 'openai'
 import { requireUser } from '@/lib/authServer'
 import { getPlan, upsertPlanInMemory } from '@/app/api/plan/store'
 import { createServerAdminClient } from '@/lib/supabase/server'
-import { CREDITS_PER_GENERATION, MAX_PLAN_IMAGES, MAX_PROMPT_CHARS, OPENAI_MODEL } from '@/lib/limits'
+import { CREDITS_PER_GENERATION, MAX_PLAN_IMAGES, MAX_PLAN_PROMPT_CHARS, OPENAI_MODEL } from '@/lib/limits'
 import { getCredits, chargeCredits, refundCredits } from '@/lib/credits'
 import { TABLE_PLANS } from '@/lib/dbTables'
 import { throwIfMissingTable } from '@/lib/supabaseErrors'
@@ -20,17 +20,73 @@ export const runtime = 'nodejs'
 export const maxDuration = 300
 export const dynamic = 'force-dynamic'
 
-const MODEL = OPENAI_MODEL
+const PLAN_MODEL = process.env.OPENAI_PLAN_MODEL || 'gpt-4.1-mini'
 const VISION_MODEL = process.env.OPENAI_VISION_MODEL || OPENAI_MODEL
 const MAX_OUTPUT_TOKENS = 1400
 const STEP1_TIMEOUT_MS = 12_000
 const STEP2_TIMEOUT_MS = 14_000
 const OPENAI_ATTEMPTS = 2
 const MAX_VISION_BYTES = 8 * 1024 * 1024
+const MAX_EXTRACT_CHARS = 12_000
 
 const planRequestSchema = z.object({
-  prompt: z.string().max(MAX_PROMPT_CHARS).optional().default(''),
+  prompt: z.string().max(MAX_PLAN_PROMPT_CHARS).optional().default(''),
   storage_paths: z.array(z.string().min(1)).optional().default([]),
+})
+
+const planDailyZod = z.object({
+  title: z.string(),
+  language: z.enum(['hu', 'en']),
+  summary: z.string(),
+  plan: z.object({
+    blocks: z.array(
+      z.object({
+        title: z.string(),
+        description: z.string(),
+        duration_minutes: z.number(),
+      })
+    ),
+  }),
+  daily: z.object({
+    days: z.array(
+      z.object({
+        day: z.number(),
+        focus: z.string(),
+        blocks: z.array(
+          z.object({
+            start: z.string(),
+            end: z.string(),
+            title: z.string(),
+            type: z.enum(['study', 'break']),
+            pomodoro: z.boolean(),
+            details: z.string().optional(),
+          })
+        ),
+      })
+    ),
+  }),
+})
+
+const notesPracticeZod = z.object({
+  notes: z.object({
+    outline: z.array(
+      z.object({
+        heading: z.string(),
+        bullets: z.array(z.string()),
+      })
+    ),
+    summary: z.string(),
+  }),
+  practice: z.object({
+    questions: z.array(
+      z.object({
+        q: z.string(),
+        choices: z.array(z.string()).optional(),
+        a: z.string(),
+        explanation: z.string(),
+      })
+    ),
+  }),
 })
 
 async function withTimeout<T>(ms: number, fn: (signal: AbortSignal) => Promise<T>) {
@@ -71,7 +127,7 @@ async function parsePlanRequest(req: Request) {
       : storagePaths,
   }
 
-  if (input.prompt.length > MAX_PROMPT_CHARS) {
+  if (input.prompt.length > MAX_PLAN_PROMPT_CHARS) {
     return { ok: false as const, error: 'PROMPT_TOO_LONG' as const }
   }
 
@@ -97,6 +153,47 @@ async function parsePlanRequest(req: Request) {
 
 function detectHungarian(text: string) {
   return /\bhu\b|magyar|szia|tetel|t[eé]tel|vizsga|erettsegi|[áéíóöőúüű]/i.test(text)
+}
+
+function safeExtractJson(text: string) {
+  const raw = String(text ?? '').trim()
+  if (!raw) {
+    const err: any = new Error('PARSE_EMPTY')
+    err.code = 'PARSE_EMPTY'
+    throw err
+  }
+  try {
+    return JSON.parse(raw)
+  } catch {
+    const s = raw.indexOf('{')
+    const e = raw.lastIndexOf('}')
+    if (s < 0 || e <= s) {
+      const err: any = new Error('PARSE_NOT_FOUND')
+      err.code = 'PARSE_NOT_FOUND'
+      throw err
+    }
+    try {
+      return JSON.parse(raw.slice(s, e + 1))
+    } catch {
+      const err: any = new Error('PARSE_FAILED')
+      err.code = 'PARSE_FAILED'
+      throw err
+    }
+  }
+}
+
+function messageContentToText(content: unknown) {
+  if (typeof content === 'string') return content
+  if (Array.isArray(content)) {
+    return content
+      .map((part: any) => {
+        if (typeof part === 'string') return part
+        if (typeof part?.text === 'string') return part.text
+        return ''
+      })
+      .join('\n')
+  }
+  return ''
 }
 
 function logSupabaseError(context: string, error: any) {
@@ -477,7 +574,7 @@ export async function POST(req: Request) {
       }
       if (parsedRequest.error === 'PROMPT_TOO_LONG') {
         return NextResponse.json(
-          { error: { code: 'PROMPT_TOO_LONG', message: `Prompt max ${MAX_PROMPT_CHARS} chars` } },
+          { error: { code: 'PROMPT_TOO_LONG', message: `Prompt max ${MAX_PLAN_PROMPT_CHARS} chars` } },
           { status: 400, headers: { 'cache-control': 'no-store' } }
         )
       }
@@ -625,12 +722,14 @@ export async function POST(req: Request) {
       'Plan summary must be concise: 2-4 lines maximum.',
       'Daily days blocks must include start/end time strings and pomodoro-friendly study blocks.',
       'Notes are the primary value and must be an outline with headings + bullets. Hungarian for Hungarian prompts.',
+      'Notes should target roughly 2500-4000 characters total while staying structured.',
       'Practice must include at least 8 short exercises with compact answers/explanations.',
     ].join('\n')
 
+    const extractedText = String(extracted.extracted || '').slice(0, MAX_EXTRACT_CHARS)
     const userText = [
       `Prompt:\n${prompt || '(empty)'}`,
-      `Extracted material from images:\n${extracted.extracted || '(none)'}`,
+      `Extracted material from images:\n${extractedText || '(none)'}`,
       `Key topics:\n${extracted.key_topics.join(', ') || '(none)'}`,
       `Tasks found:\n${extracted.tasks_found.join(' | ') || '(none)'}`,
     ].join('\n\n')
@@ -640,7 +739,7 @@ export async function POST(req: Request) {
       const completion = await withTimeout(STEP1_TIMEOUT_MS, (signal) =>
         client.chat.completions.create(
           {
-            model: MODEL,
+            model: PLAN_MODEL,
             messages: [
               { role: 'system', content: [systemText, extra].filter(Boolean).join('\n') },
               {
@@ -663,21 +762,18 @@ export async function POST(req: Request) {
         )
       )
 
-      const parsed = (completion.choices?.[0]?.message as any)?.parsed
-      if (!parsed || typeof parsed !== 'object') {
-        const err: any = new Error('OPENAI_INVALID_STRUCTURED_OUTPUT')
-        err.code = 'OPENAI_INVALID_STRUCTURED_OUTPUT'
-        throw err
-      }
+      const text = messageContentToText(completion.choices?.[0]?.message?.content)
+      const parsed = safeExtractJson(text)
+      const validated = planDailyZod.parse(parsed)
 
       const seeded = {
         ...fallbackPlanDocument(isHu, prompt),
-        title: (parsed as any).title,
-        language: (parsed as any).language,
-        summary: (parsed as any).summary,
-        plan: (parsed as any).plan,
+        title: validated.title,
+        language: validated.language,
+        summary: validated.summary,
+        plan: validated.plan,
         daily: {
-          days: (parsed as any)?.daily?.days,
+          days: validated.daily.days,
         },
       }
       return normalizePlanDocument(seeded, isHu, prompt)
@@ -688,7 +784,7 @@ export async function POST(req: Request) {
       const completion = await withTimeout(STEP2_TIMEOUT_MS, (signal) =>
         client.chat.completions.create(
           {
-            model: MODEL,
+            model: PLAN_MODEL,
             messages: [
               { role: 'system', content: [systemText, extra].filter(Boolean).join('\n') },
               {
@@ -720,16 +816,13 @@ export async function POST(req: Request) {
         )
       )
 
-      const parsed = (completion.choices?.[0]?.message as any)?.parsed
-      if (!parsed || typeof parsed !== 'object') {
-        const err: any = new Error('OPENAI_INVALID_STRUCTURED_OUTPUT')
-        err.code = 'OPENAI_INVALID_STRUCTURED_OUTPUT'
-        throw err
-      }
+      const text = messageContentToText(completion.choices?.[0]?.message?.content)
+      const parsed = safeExtractJson(text)
+      const validated = notesPracticeZod.parse(parsed)
       const merged = {
         ...base,
-        notes: (parsed as any).notes,
-        practice: (parsed as any).practice,
+        notes: validated.notes,
+        practice: validated.practice,
       }
       return normalizePlanDocument(merged, isHu, prompt)
     }

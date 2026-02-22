@@ -10,7 +10,7 @@ import { authedFetch } from '@/lib/authClient'
 import { supabase } from '@/lib/supabaseClient'
 import HScroll from '@/components/HScroll'
 import Pomodoro from '@/components/Pomodoro'
-import { MAX_PLAN_IMAGES, MAX_PROMPT_CHARS, CREDITS_PER_GENERATION } from '@/lib/limits'
+import { MAX_PLAN_IMAGES, MAX_PLAN_PROMPT_CHARS, CREDITS_PER_GENERATION } from '@/lib/limits'
 
 type Block = { type: 'study' | 'break'; minutes: number; label: string }
 type DayPlan = { day: string; focus: string; tasks: string[]; minutes: number; blocks?: Block[] }
@@ -553,8 +553,8 @@ function Inner({ entitlement }: { entitlement: { credits: number | null; entitle
 
   async function generate() {
     setError(null)
-    if (prompt.trim().length > MAX_PROMPT_CHARS) {
-      setError(`Prompt too long (max ${MAX_PROMPT_CHARS} characters).`)
+    if (prompt.trim().length > MAX_PLAN_PROMPT_CHARS) {
+      setError(`Prompt too long (max ${MAX_PLAN_PROMPT_CHARS} characters).`)
       return
     }
     if (files.length > MAX_PLAN_IMAGES) {
@@ -681,7 +681,7 @@ function Inner({ entitlement }: { entitlement: { credits: number | null; entitle
     !loading &&
     !isGenerating &&
     creditsOk &&
-    prompt.trim().length <= MAX_PROMPT_CHARS &&
+    prompt.trim().length <= MAX_PLAN_PROMPT_CHARS &&
     files.length <= MAX_PLAN_IMAGES &&
     (prompt.trim().length >= 6 || files.length > 0)
   const summaryText = getNotesModel(result?.notes ?? result?.notes_json).summary || extractNotesText(result?.notes ?? result?.notes_json).trim()
@@ -760,9 +760,9 @@ function Inner({ entitlement }: { entitlement: { credits: number | null; entitle
             onChange={(e) => setPrompt(e.target.value)}
             placeholder="What’s your exam about? When is it? What material do you have?"
             className="mt-3 min-h-[110px]"
-            maxLength={MAX_PROMPT_CHARS}
+            maxLength={MAX_PLAN_PROMPT_CHARS}
           />
-          <div className="mt-2 text-xs text-white/60">{promptChars}/{MAX_PROMPT_CHARS}</div>
+          <div className="mt-2 text-xs text-white/60">{promptChars}/{MAX_PLAN_PROMPT_CHARS}</div>
 
           <label className="mt-3 flex cursor-pointer items-center justify-between gap-3 rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm text-white/70 hover:bg-white/10">
             <span className="inline-flex items-center gap-2">

@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { getMiddlewareSession } from '@/lib/supabase/middleware'
 
 const PUBLIC_ROUTES = new Set<string>(['/', '/login', '/signup', '/register'])
+PUBLIC_ROUTES.add('/pricing')
 const PUBLIC_PREFIXES = ['/auth/callback']
 const PROTECTED_PREFIXES = ['/plan', '/practice', '/homework', '/vocab', '/daily', '/notes', '/guide', '/billing']
 
@@ -62,12 +63,26 @@ export async function middleware(req: NextRequest) {
     return NextResponse.next()
   }
 
-  if (isPublicPath(pathname)) return NextResponse.next()
+  const res = NextResponse.next()
+  const sessionInfo = await getMiddlewareSession(req, res)
+
+  if (isPublicPath(pathname)) {
+    if (
+      sessionInfo.hasSession &&
+      (pathname === '/login' || pathname === '/signup' || pathname === '/register')
+    ) {
+      const nextParam = safeNext(req.nextUrl.searchParams.get('next') || '/plan')
+      const redirectUrl =
+        pathname === '/login'
+          ? new URL(nextParam, req.url)
+          : new URL('/plan', req.url)
+      return NextResponse.redirect(redirectUrl, 307)
+    }
+    return res
+  }
 
   const protectedPath = isProtectedPath(pathname)
-  if (!protectedPath) return NextResponse.next()
-
-  const sessionInfo = await getMiddlewareSession(req)
+  if (!protectedPath) return res
   if (authDebugEnabled()) {
     console.log('middleware.auth.check', {
       pathname,
@@ -94,7 +109,7 @@ export async function middleware(req: NextRequest) {
     return NextResponse.redirect(url, 307)
   }
 
-  return NextResponse.next()
+  return res
 }
 
 export const config = {

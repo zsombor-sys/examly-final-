@@ -3,14 +3,31 @@ import OpenAI from 'openai'
 import { z } from 'zod'
 import { requireUser } from '@/lib/authServer'
 import { createServerAdminClient } from '@/lib/supabase/server'
-import { CREDITS_PER_GENERATION, MAX_HOMEWORK_IMAGES, MAX_PROMPT_CHARS, OPENAI_MODEL } from '@/lib/limits'
+import { CREDITS_PER_GENERATION, MAX_HOMEWORK_IMAGES, MAX_HOMEWORK_PROMPT_CHARS, OPENAI_MODEL } from '@/lib/limits'
 
 export const runtime = 'nodejs'
 
 const COST = CREDITS_PER_GENERATION
 
 const reqSchema = z.object({
-  prompt: z.string().max(MAX_PROMPT_CHARS).optional().default(''),
+  prompt: z.string().max(MAX_HOMEWORK_PROMPT_CHARS).optional().default(''),
+})
+
+const homeworkResponseSchema = z.object({
+  language: z.enum(['hu', 'en']),
+  solutions: z.array(
+    z.object({
+      question: z.string(),
+      solution_steps: z.array(
+        z.object({
+          step: z.string(),
+          why: z.string(),
+        })
+      ),
+      final_answer: z.string(),
+      common_mistakes: z.array(z.string()),
+    })
+  ),
 })
 
 const homeworkSchema = {
@@ -25,7 +42,18 @@ const homeworkSchema = {
         additionalProperties: false,
         properties: {
           question: { type: 'string' },
-          solution_steps: { type: 'array', items: { type: 'string' } },
+          solution_steps: {
+            type: 'array',
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                step: { type: 'string' },
+                why: { type: 'string' },
+              },
+              required: ['step', 'why'],
+            },
+          },
           final_answer: { type: 'string' },
           common_mistakes: { type: 'array', items: { type: 'string' } },
         },
@@ -49,6 +77,20 @@ function extractJson(text: string) {
   }
 }
 
+function normalizeContent(content: unknown) {
+  if (typeof content === 'string') return content
+  if (Array.isArray(content)) {
+    return content
+      .map((part: any) => {
+        if (typeof part === 'string') return part
+        if (typeof part?.text === 'string') return part.text
+        return ''
+      })
+      .join('\n')
+  }
+  return ''
+}
+
 export async function POST(req: Request) {
   try {
     const user = await requireUser(req)
@@ -58,7 +100,7 @@ export async function POST(req: Request) {
 
     const parsed = reqSchema.safeParse({ prompt })
     if (!parsed.success) {
-      return NextResponse.json({ error: { code: 'PROMPT_TOO_LONG', message: `Prompt max ${MAX_PROMPT_CHARS}` } }, { status: 400 })
+      return NextResponse.json({ error: { code: 'PROMPT_TOO_LONG', message: `Prompt max ${MAX_HOMEWORK_PROMPT_CHARS}` } }, { status: 400 })
     }
     const imageFiles = files.filter((f) => f.type.startsWith('image/'))
     if (imageFiles.length > MAX_HOMEWORK_IMAGES) {
@@ -83,26 +125,42 @@ export async function POST(req: Request) {
       content.push({ type: 'image_url', image_url: { url: `data:${file.type};base64,${b}` } })
     }
 
-    const resp = await client.chat.completions.create({
-      model: OPENAI_MODEL,
-      messages: [
-        {
-          role: 'system',
-          content:
-            'Adj reszletes, lepesrol lepesre magyarazatot kozepiskolai szinten. A megoldas legyen ellenorizheto es tanulasra alkalmas.',
+    const runAttempt = async (repair = false) => {
+      const resp = await client.chat.completions.create({
+        model: OPENAI_MODEL,
+        messages: [
+          {
+            role: 'system',
+            content:
+              [
+                'Adj reszletes, lepesrol lepesre magyarazatot kozepiskolai szinten.',
+                'Minden lépéshez rövid "miért" magyarázat kell.',
+                'Csak érvényes JSON-t adj vissza.',
+                repair ? 'Return ONLY valid JSON matching schema. No prose, no markdown.' : '',
+              ]
+                .filter(Boolean)
+                .join('\n'),
+          },
+          { role: 'user', content: content as any },
+        ],
+        temperature: 0,
+        max_tokens: 1100,
+        response_format: {
+          type: 'json_schema',
+          json_schema: { name: 'homework_help', schema: homeworkSchema, strict: true },
         },
-        { role: 'user', content: content as any },
-      ],
-      temperature: 0.2,
-      max_tokens: 1400,
-      response_format: {
-        type: 'json_schema',
-        json_schema: { name: 'homework_help', schema: homeworkSchema, strict: true },
-      },
-    })
+      })
+      const raw = normalizeContent(resp.choices?.[0]?.message?.content)
+      const parsedJson = extractJson(raw)
+      return homeworkResponseSchema.parse(parsedJson)
+    }
 
-    const raw = String(resp.choices?.[0]?.message?.content ?? '').trim()
-    const parsedJson = extractJson(raw)
+    let parsedJson: z.infer<typeof homeworkResponseSchema>
+    try {
+      parsedJson = await runAttempt(false)
+    } catch {
+      parsedJson = await runAttempt(true)
+    }
 
     const sb = createServerAdminClient()
     const { error: rpcErr } = await sb.rpc('consume_credits', { user_id: user.id, cost: COST })

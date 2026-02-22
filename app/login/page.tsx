@@ -1,9 +1,9 @@
 'use client'
 
 import Link from 'next/link'
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import { useRouter } from 'next/navigation'
-import { supabase } from '@/lib/supabaseClient'
+import { createBrowserClient } from '@/lib/supabase/browser'
 import { Button, Card, Input } from '@/components/ui'
 
 function safeNext(nextValue: string | null) {
@@ -15,6 +15,13 @@ function safeNext(nextValue: string | null) {
 
 export default function LoginPage() {
   const router = useRouter()
+  const supabase = useMemo(() => {
+    try {
+      return createBrowserClient()
+    } catch {
+      return null
+    }
+  }, [])
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [error, setError] = useState<string | null>(null)
@@ -53,6 +60,10 @@ export default function LoginPage() {
       setError(message)
       return
     }
+    if (!supabase) {
+      setError('Auth is not configured (Supabase client unavailable).')
+      return
+    }
 
     setLoading(true)
     try {
@@ -71,6 +82,7 @@ export default function LoginPage() {
       })
       console.log('AUTH_NAVIGATE', { target: nextSafe || '/plan' })
       router.replace(nextSafe || '/plan')
+      router.refresh()
     } catch (err) {
       console.error('AUTH_ERROR', err)
       const message = err instanceof Error ? err.message : 'Login failed'
@@ -86,6 +98,10 @@ export default function LoginPage() {
     const normalized = email.trim().toLowerCase()
     if (!normalized) {
       setError('Please enter your email.')
+      return
+    }
+    if (!supabase) {
+      setError('Auth is not configured (Supabase client unavailable).')
       return
     }
     try {

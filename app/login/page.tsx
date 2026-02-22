@@ -79,9 +79,16 @@ export default function LoginPage() {
         return
       }
 
+      const sessionCheck = await supabase.auth.getSession()
+      if (!sessionCheck?.data?.session) {
+        setError('Sikeres bejelentkezés után nem található session. Próbáld újra.')
+        return
+      }
+
       if (DEBUG_AUTH) console.log('AUTH_RESULT', { userId: data?.user?.id ?? null })
-      router.push(nextSafe || '/plan')
-      router.refresh()
+      const target = nextSafe || '/plan'
+window.location.assign(target)
+return
     } catch (err: any) {
       const msg = String(err?.message || 'Login failed')
       if (isInvalidRefreshTokenError(msg) && supabase) {

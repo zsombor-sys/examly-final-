@@ -22,7 +22,7 @@ export const dynamic = 'force-dynamic'
 
 const PLAN_MODEL = process.env.OPENAI_PLAN_MODEL || OPENAI_MODEL
 const VISION_MODEL = process.env.OPENAI_VISION_MODEL || OPENAI_MODEL
-const MAX_OUTPUT_TOKENS = 1400
+const MAX_OUTPUT_TOKENS = 2400
 const STEP1_TIMEOUT_MS = 12_000
 const STEP2_TIMEOUT_MS = 14_000
 const OPENAI_ATTEMPTS = 2
@@ -721,8 +721,11 @@ export async function POST(req: Request) {
       `Language target: ${targetLang === 'hu' ? 'Hungarian' : 'English'}; output language must be "${targetLang}" unless impossible.`,
       'Plan summary must be concise: 2-4 lines maximum.',
       'Daily days blocks must include start/end time strings and pomodoro-friendly study blocks.',
+      'You MUST incorporate extracted facts from uploaded images. Do not output generic content.',
+      'If extracted material is empty, still generate a useful plan but explicitly mention this is a fallback context in notes summary.',
       'Notes are the primary value and must be an outline with headings + bullets. Hungarian for Hungarian prompts.',
-      'Notes should target roughly 2500-4000 characters total while staying structured.',
+      'Notes must have at least 8 sections, each with 5-10 bullets.',
+      'Notes should target roughly 3200-4200 characters total while staying structured.',
       'Practice must include at least 8 short exercises with compact answers/explanations.',
     ].join('\n')
 

@@ -17,10 +17,10 @@ import {
 } from '@/lib/planDocument'
 
 export const runtime = 'nodejs'
-export const maxDuration = 300
+export const maxDuration = 60
 export const dynamic = 'force-dynamic'
 
-const PLAN_MODEL = process.env.OPENAI_PLAN_MODEL || 'gpt-4.1-mini'
+const PLAN_MODEL = process.env.OPENAI_PLAN_MODEL || OPENAI_MODEL
 const VISION_MODEL = process.env.OPENAI_VISION_MODEL || OPENAI_MODEL
 const MAX_OUTPUT_TOKENS = 1400
 const STEP1_TIMEOUT_MS = 12_000

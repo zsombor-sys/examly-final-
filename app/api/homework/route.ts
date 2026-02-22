@@ -6,6 +6,8 @@ import { createServerAdminClient } from '@/lib/supabase/server'
 import { CREDITS_PER_GENERATION, MAX_HOMEWORK_IMAGES, MAX_HOMEWORK_PROMPT_CHARS, OPENAI_MODEL } from '@/lib/limits'
 
 export const runtime = 'nodejs'
+export const maxDuration = 60
+export const dynamic = 'force-dynamic'
 
 const COST = CREDITS_PER_GENERATION
 
@@ -18,10 +20,12 @@ const homeworkResponseSchema = z.object({
   solutions: z.array(
     z.object({
       question: z.string(),
-      solution_steps: z.array(
+      steps: z.array(
         z.object({
-          step: z.string(),
-          why: z.string(),
+          title: z.string(),
+          explanation: z.string(),
+          work: z.string(),
+          check: z.string(),
         })
       ),
       final_answer: z.string(),
@@ -42,22 +46,24 @@ const homeworkSchema = {
         additionalProperties: false,
         properties: {
           question: { type: 'string' },
-          solution_steps: {
+          steps: {
             type: 'array',
             items: {
               type: 'object',
               additionalProperties: false,
               properties: {
-                step: { type: 'string' },
-                why: { type: 'string' },
+                title: { type: 'string' },
+                explanation: { type: 'string' },
+                work: { type: 'string' },
+                check: { type: 'string' },
               },
-              required: ['step', 'why'],
+              required: ['title', 'explanation', 'work', 'check'],
             },
           },
           final_answer: { type: 'string' },
           common_mistakes: { type: 'array', items: { type: 'string' } },
         },
-        required: ['question', 'solution_steps', 'final_answer', 'common_mistakes'],
+        required: ['question', 'steps', 'final_answer', 'common_mistakes'],
       },
     },
   },
@@ -134,7 +140,8 @@ export async function POST(req: Request) {
             content:
               [
                 'Adj reszletes, lepesrol lepesre magyarazatot kozepiskolai szinten.',
-                'Minden lépéshez rövid "miért" magyarázat kell.',
+                'Minden lépésnek legyen címe és rövid "miért" magyarázata.',
+                'Minden lépésben legyen konkrét munkarész (képlet/számolás) és egy gyors önellenőrző kérdés.',
                 'Csak érvényes JSON-t adj vissza.',
                 repair ? 'Return ONLY valid JSON matching schema. No prose, no markdown.' : '',
               ]

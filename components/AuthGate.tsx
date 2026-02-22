@@ -17,6 +17,8 @@ type EntitlementState = {
   entitlementOk: boolean | null
 }
 
+const DEBUG_AUTH = process.env.NEXT_PUBLIC_AUTH_DEBUG === '1'
+
 function isGenerationPath(pathname: string | null) {
   const p = pathname || ''
   return p === '/plan' || p.startsWith('/plan/') || p === '/practice' || p.startsWith('/practice/') || p === '/homework' || p.startsWith('/homework/') || p === '/vocab' || p.startsWith('/vocab/')
@@ -31,6 +33,26 @@ function safeNext(next: string) {
 
 function guardsDisabled() {
   return String(process.env.NEXT_PUBLIC_DISABLE_GUARDS || '').toLowerCase() === 'true'
+}
+
+function isInvalidRefreshTokenError(message: string) {
+  const msg = String(message || '').toLowerCase()
+  return msg.includes('invalid refresh token') || msg.includes('refresh token not found')
+}
+
+function clearAuthStorage() {
+  if (typeof window === 'undefined') return
+  try {
+    const keys: string[] = []
+    for (let i = 0; i < window.localStorage.length; i += 1) {
+      const key = window.localStorage.key(i)
+      if (!key) continue
+      if (key.includes('supabase') || key.startsWith('sb-')) keys.push(key)
+    }
+    for (const key of keys) window.localStorage.removeItem(key)
+  } catch {
+    // ignore
+  }
 }
 
 export default function AuthGate({
@@ -68,13 +90,17 @@ export default function AuthGate({
         return
       }
 
-      const { data } = await supabase.auth.getSession()
+      const { data, error: sessionErr } = await supabase.auth.getSession()
+      if (sessionErr && isInvalidRefreshTokenError(sessionErr.message)) {
+        await supabase.auth.signOut({ scope: 'local' })
+        clearAuthStorage()
+      }
       const session = data.session
       const search = typeof window !== 'undefined' ? window.location.search || '' : ''
       const next = safeNext(`${pathname || '/plan'}${search}`)
 
       if (!session) {
-        console.log('AuthGate: no session', { path: pathname })
+        if (DEBUG_AUTH) console.log('AuthGate: no session', { path: pathname })
         router.replace(`/login?next=${encodeURIComponent(next)}`)
         return
       }
@@ -98,7 +124,7 @@ export default function AuthGate({
           })
         } catch (e: any) {
           if (!alive) return
-          console.log('AuthGate: entitlement check failed', { path: pathname, error: e?.message })
+          if (DEBUG_AUTH) console.log('AuthGate: entitlement check failed', { path: pathname, error: e?.message })
           onEntitlement?.({ credits: null, entitlementOk: null })
           setError(e?.message ?? 'Error')
           setReady(true)

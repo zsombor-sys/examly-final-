@@ -8,14 +8,17 @@ import { authedFetch } from '@/lib/authClient'
 import { MAX_HOMEWORK_IMAGES, MAX_HOMEWORK_PROMPT_CHARS } from '@/lib/limits'
 
 type HomeworkStep = {
-  step: string
-  why: string
+  title: string
+  explanation: string
+  work: string
+  check: string
 }
 type HomeworkResult = {
   language: 'hu' | 'en'
   solutions: Array<{
     question: string
-    solution_steps: Array<HomeworkStep | string>
+    steps?: HomeworkStep[]
+    solution_steps?: Array<{ step?: string; why?: string } | string>
     final_answer: string
     common_mistakes: string[]
   }>
@@ -37,12 +40,32 @@ function Inner() {
   const [result, setResult] = useState<HomeworkResult | null>(null)
   const [currentStepBySolution, setCurrentStepBySolution] = useState<Record<number, number>>({})
 
-  function normalizeSteps(steps: Array<HomeworkStep | string>) {
-    return (Array.isArray(steps) ? steps : []).map((step) => {
-      if (typeof step === 'string') return { step, why: '' }
+  function normalizeSteps(
+    steps: HomeworkStep[] | undefined,
+    legacy: Array<{ step?: string; why?: string } | string> | undefined
+  ) {
+    if (Array.isArray(steps) && steps.length) {
+      return steps.map((step) => ({
+        title: String(step?.title ?? '').trim() || 'Lépés',
+        explanation: String(step?.explanation ?? '').trim(),
+        work: String(step?.work ?? '').trim(),
+        check: String(step?.check ?? '').trim(),
+      }))
+    }
+    return (Array.isArray(legacy) ? legacy : []).map((step) => {
+      if (typeof step === 'string') {
+        return {
+          title: 'Lépés',
+          explanation: '',
+          work: step,
+          check: 'Ellenőrizd, hogy az eredmény logikus-e.',
+        }
+      }
       return {
-        step: String(step?.step ?? '').trim(),
-        why: String(step?.why ?? '').trim(),
+        title: 'Lépés',
+        explanation: String(step?.why ?? '').trim(),
+        work: String(step?.step ?? '').trim(),
+        check: 'Ellenőrizd, hogy az eredmény logikus-e.',
       }
     })
   }
@@ -106,7 +129,7 @@ function Inner() {
               <div className="mt-1 text-white/90">{s.question}</div>
               <div className="mt-4 text-sm text-white/60">Lépések</div>
               {(() => {
-                const steps = normalizeSteps(s.solution_steps)
+                const steps = normalizeSteps(s.steps, s.solution_steps)
                 const current = Math.max(0, Math.min(steps.length - 1, currentStepBySolution[i] ?? 0))
                 const step = steps[current]
                 return (
@@ -114,9 +137,13 @@ function Inner() {
                     {step ? (
                       <div className="mt-2 rounded-2xl border border-white/10 bg-black/30 p-4 text-white/80">
                         <div className="text-xs text-white/50">Lépés {current + 1}/{steps.length}</div>
-                        <div className="mt-1">{step.step}</div>
+                        <div className="mt-1 font-semibold text-white/90">{step.title}</div>
+                        <div className="mt-2">{step.work}</div>
                         <div className="mt-2 text-sm text-white/65">
-                          <span className="text-white/45">Miért?</span> {step.why || 'Rövid indoklás: ez a lépés visz közelebb a végeredményhez.'}
+                          <span className="text-white/45">Miért?</span> {step.explanation || 'Rövid indoklás: ez a lépés visz közelebb a végeredményhez.'}
+                        </div>
+                        <div className="mt-2 text-sm text-white/65">
+                          <span className="text-white/45">Check:</span> {step.check || 'Gyorsan ellenőrizd az előjelet és a mértékegységet.'}
                         </div>
                       </div>
                     ) : null}

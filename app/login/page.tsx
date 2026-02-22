@@ -1,153 +1,59 @@
-'use client'
+"use client";
 
-import Link from 'next/link'
-import { useMemo, useState } from 'react'
-import { useRouter } from 'next/navigation'
-import { createBrowserClient } from '@/lib/supabase/browser'
-import { Button, Card, Input } from '@/components/ui'
+import { useRouter, useSearchParams } from "next/navigation";
+import { useState } from "react";
+import { createClient } from "@supabase/supabase-js";
 
-function safeNext(nextValue: string | null) {
-  const raw = String(nextValue || '').trim()
-  if (!raw.startsWith('/')) return '/plan'
-  if (raw.startsWith('//')) return '/plan'
-  return raw
-}
+const supabase = createClient(
+  process.env.NEXT_PUBLIC_SUPABASE_URL!,
+  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+);
 
 export default function LoginPage() {
-  const router = useRouter()
-  const supabase = useMemo(() => {
-    try {
-      return createBrowserClient()
-    } catch {
-      return null
-    }
-  }, [])
-  const [email, setEmail] = useState('')
-  const [password, setPassword] = useState('')
-  const [error, setError] = useState<string | null>(null)
-  const [loading, setLoading] = useState(false)
-  const [resendMsg, setResendMsg] = useState<string | null>(null)
-  const emailNormalized = email.trim().toLowerCase()
-  const inputValid = emailNormalized.includes('@') && password.trim().length > 0
-  const submitDisabled = loading
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const next = searchParams.get("next") || "/plan";
 
-  function onSignInClick() {
-    console.log('SIGN_IN_CLICK', { disabled: submitDisabled, loading, inputValid })
-  }
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [loading, setLoading] = useState(false);
 
-  async function onSubmit(e: React.FormEvent) {
-    e.preventDefault()
-    console.log('SIGN_IN_SUBMIT', { disabled: submitDisabled, loading, inputValid })
-    setError(null)
-    setResendMsg(null)
-    const nextSafe = safeNext(new URLSearchParams(window.location.search).get('next'))
+  async function handleLogin() {
+    setLoading(true);
 
-    console.log('AUTH_MODE', 'signin')
-    console.log('AUTH_METHOD', 'signInWithPassword')
-    console.log('AUTH_START', { email: emailNormalized })
+    const { data, error } = await supabase.auth.signInWithPassword({
+      email,
+      password,
+    });
 
-    const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
-    const supabaseAnon = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
-    if (!supabaseUrl || !supabaseAnon) {
-      const missing = [
-        !supabaseUrl ? 'NEXT_PUBLIC_SUPABASE_URL' : null,
-        !supabaseAnon ? 'NEXT_PUBLIC_SUPABASE_ANON_KEY' : null,
-      ]
-        .filter(Boolean)
-        .join(', ')
-      const message = `Auth is not configured (missing ${missing}).`
-      console.error('AUTH_ERROR', new Error(message))
-      setError(message)
-      return
-    }
-    if (!supabase) {
-      setError('Auth is not configured (Supabase client unavailable).')
-      return
+    if (error) {
+      alert(error.message);
+      setLoading(false);
+      return;
     }
 
-    setLoading(true)
-    try {
-      const result = await supabase.auth.signInWithPassword({ email: emailNormalized, password })
-      console.log('AUTH_RESULT', result)
-      if (result.error) {
-        setError(result.error.message || 'Login failed')
-        return
-      }
-      console.log('AUTH_SUCCESS', { userId: result.data?.user?.id ?? null })
-      const sessionCheck = await supabase.auth.getSession()
-      console.log('AUTH_SESSION_CHECK', {
-        hasSession: !!sessionCheck?.data?.session,
-        userId: sessionCheck?.data?.session?.user?.id ?? null,
-        sessionError: sessionCheck?.error?.message ?? null,
-      })
-      console.log('AUTH_NAVIGATE', { target: nextSafe || '/plan' })
-      router.replace(nextSafe || '/plan')
-      router.refresh()
-    } catch (err) {
-      console.error('AUTH_ERROR', err)
-      const message = err instanceof Error ? err.message : 'Login failed'
-      setError(message)
-    } finally {
-      setLoading(false)
-    }
-  }
-
-  async function onResendConfirmation() {
-    setError(null)
-    setResendMsg(null)
-    const normalized = email.trim().toLowerCase()
-    if (!normalized) {
-      setError('Please enter your email.')
-      return
-    }
-    if (!supabase) {
-      setError('Auth is not configured (Supabase client unavailable).')
-      return
-    }
-    try {
-      const { error: resendErr } = await supabase.auth.resend({
-        type: 'signup',
-        email: normalized,
-      })
-      if (resendErr) throw resendErr
-      setResendMsg('Confirmation email sent.')
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : 'Resend failed'
-      setError(msg)
-    }
+    // FORCE redirect
+    window.location.href = next;
   }
 
   return (
-    <div className="relative z-20 mx-auto max-w-md px-4 py-16 pointer-events-auto">
-      <Card className="pointer-events-auto">
-        <h1 className="text-xl font-semibold">Log in</h1>
-        <p className="mt-1 text-sm text-dim">Welcome back.</p>
+    <div>
+      <input
+        value={email}
+        onChange={(e) => setEmail(e.target.value)}
+        placeholder="Email"
+      />
 
-        <form className="mt-6 space-y-3" onSubmit={onSubmit}>
-          <Input value={email} onChange={(e) => setEmail(e.target.value)} placeholder="Email" type="email" />
-          <Input value={password} onChange={(e) => setPassword(e.target.value)} placeholder="Password" type="password" />
-          {error && <p className="text-sm text-red-400">{error}</p>}
-          {resendMsg && <p className="text-sm text-green-400">{resendMsg}</p>}
-          <Button type="submit" disabled={submitDisabled} className="w-full" onClick={onSignInClick}>
-            {loading ? 'Signing in…' : 'Sign in'}
-          </Button>
-        </form>
+      <input
+        type="password"
+        value={password}
+        onChange={(e) => setPassword(e.target.value)}
+        placeholder="Password"
+      />
 
-        {error?.toLowerCase().includes('confirm') && (
-          <div className="mt-3">
-            <Button type="button" variant="ghost" className="w-full" onClick={onResendConfirmation}>
-              Resend confirmation email
-            </Button>
-          </div>
-        )}
-
-        <p className="mt-6 text-sm text-dim">
-          No account?{' '}
-          <Link className="text-white underline underline-offset-4" href="/signup">
-            Sign up
-          </Link>
-        </p>
-      </Card>
+      <button onClick={handleLogin} disabled={loading}>
+        {loading ? "Signing in..." : "Sign in"}
+      </button>
     </div>
-  )
+  );
 }

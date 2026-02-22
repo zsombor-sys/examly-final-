@@ -11,7 +11,30 @@ import { supabase } from '@/lib/supabaseClient'
 import HScroll from '@/components/HScroll'
 import Pomodoro from '@/components/Pomodoro'
 import { MAX_PLAN_IMAGES, MAX_PLAN_PROMPT_CHARS, CREDITS_PER_GENERATION } from '@/lib/limits'
+import { useEffect } from "react";
+import { useRouter } from "next/navigation";
+import { createClient } from "@supabase/supabase-js";
 
+const supabase = createClient(
+  process.env.NEXT_PUBLIC_SUPABASE_URL!,
+  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+);
+
+export default function PlanPage() {
+  const router = useRouter();
+
+  useEffect(() => {
+    async function check() {
+      const { data } = await supabase.auth.getSession();
+      if (!data.session) {
+        router.replace("/login");
+      }
+    }
+    check();
+  }, []);
+
+  return <div>PLAN PAGE</div>;
+}
 type Block = { type: 'study' | 'break'; minutes: number; label: string }
 type DayPlan = { day: string; focus: string; tasks: string[]; minutes: number; blocks?: Block[] }
 type PlanBlock = { title: string; duration_minutes: number; description: string }

@@ -6,6 +6,13 @@ import { useRouter } from 'next/navigation'
 import { supabase } from '@/lib/supabaseClient'
 import { Button, Card, Input } from '@/components/ui'
 
+function safeNext(nextValue: string | null) {
+  const raw = String(nextValue || '').trim()
+  if (!raw.startsWith('/')) return '/plan'
+  if (raw.startsWith('//')) return '/plan'
+  return raw
+}
+
 export default function LoginPage() {
   const router = useRouter()
   const [email, setEmail] = useState('')
@@ -26,6 +33,7 @@ export default function LoginPage() {
     console.log('SIGN_IN_SUBMIT', { disabled: submitDisabled, loading, inputValid })
     setError(null)
     setResendMsg(null)
+    const nextSafe = safeNext(new URLSearchParams(window.location.search).get('next'))
 
     console.log('AUTH_MODE', 'signin')
     console.log('AUTH_METHOD', 'signInWithPassword')
@@ -61,8 +69,7 @@ export default function LoginPage() {
         userId: sessionCheck?.data?.session?.user?.id ?? null,
         sessionError: sessionCheck?.error?.message ?? null,
       })
-      router.refresh()
-      router.push('/plan')
+      router.replace(nextSafe || '/plan')
     } catch (err) {
       console.error('AUTH_ERROR', err)
       const message = err instanceof Error ? err.message : 'Login failed'

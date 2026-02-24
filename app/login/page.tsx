@@ -87,8 +87,8 @@ export default function LoginPage() {
 
       if (DEBUG_AUTH) console.log('AUTH_RESULT', { userId: data?.user?.id ?? null })
       const target = nextSafe || '/plan'
-window.location.assign(target)
-return
+      window.location.assign(target)
+      return
     } catch (err: any) {
       const msg = String(err?.message || 'Login failed')
       if (isInvalidRefreshTokenError(msg) && supabase) {

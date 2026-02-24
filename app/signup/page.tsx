@@ -2,12 +2,10 @@
 
 import Link from 'next/link'
 import { useState } from 'react'
-import { useRouter } from 'next/navigation'
 import { supabase } from '@/lib/supabaseClient'
 import { Button, Card, Input } from '@/components/ui'
 
 export default function SignupPage() {
-  const router = useRouter()
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [fullName, setFullName] = useState('')
@@ -22,6 +20,15 @@ export default function SignupPage() {
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault()
     setError(null)
+    const nextSafe =
+      typeof window !== 'undefined'
+        ? (() => {
+            const raw = String(new URLSearchParams(window.location.search).get('next') || '').trim()
+            if (!raw.startsWith('/')) return '/plan'
+            if (raw.startsWith('//')) return '/plan'
+            return raw
+          })()
+        : '/plan'
     const emailNormalized = email.trim().toLowerCase()
 
     console.log('AUTH_MODE', 'signup')
@@ -49,6 +56,7 @@ export default function SignupPage() {
         email: emailNormalized,
         password,
         options: {
+          emailRedirectTo: `${window.location.origin}/auth/callback`,
           data: {
             full_name: fullName.trim(),
             phone: phoneTrim,
@@ -64,10 +72,10 @@ export default function SignupPage() {
         return
       }
       if (data?.session) {
-        router.replace('/plan')
+        window.location.assign(nextSafe || '/plan')
         return
       }
-      router.replace('/login')
+      setError('Check your email to confirm')
     } catch (e: any) {
       console.error('AUTH_ERROR', e)
       setError(e?.message ?? 'Error')

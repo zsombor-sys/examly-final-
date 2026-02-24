@@ -16,6 +16,12 @@ export function createBrowserClient(): SupabaseClient {
   if (!env) {
     throw new Error('Auth is not configured (missing Supabase env vars).')
   }
-  client = createSsrBrowserClient(env.url, env.anon)
+  client = createSsrBrowserClient(env.url, env.anon, {
+    auth: {
+      persistSession: true,
+      autoRefreshToken: true,
+      detectSessionInUrl: true,
+    },
+  })
   return client
 }

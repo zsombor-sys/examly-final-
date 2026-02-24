@@ -1,7 +1,6 @@
 'use client'
 
-import { useMemo, useState } from 'react'
-import { useRouter } from 'next/navigation'
+import { useEffect, useMemo, useState } from 'react'
 import { createBrowserClient } from '@/lib/supabase/browser'
 
 const DEBUG_AUTH = process.env.NEXT_PUBLIC_AUTH_DEBUG === '1'
@@ -34,7 +33,6 @@ function clearAuthStorage() {
 }
 
 export default function LoginPage() {
-  const router = useRouter()
   const supabase = useMemo(() => {
     try {
       return createBrowserClient()
@@ -47,6 +45,35 @@ export default function LoginPage() {
   const [password, setPassword] = useState('')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (!supabase) return
+    const nextSafe = safeNext(
+      typeof window !== 'undefined' ? new URLSearchParams(window.location.search).get('next') : null
+    )
+
+    let active = true
+
+    void supabase.auth.getSession().then((sessionCheck) => {
+      if (!active) return
+      if (sessionCheck?.data?.session) {
+        window.location.assign(nextSafe || '/plan')
+      }
+    })
+
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange((event) => {
+      if (event === 'SIGNED_IN') {
+        window.location.assign(nextSafe || '/plan')
+      }
+    })
+
+    return () => {
+      active = false
+      subscription.unsubscribe()
+    }
+  }, [supabase])
 
   async function handleLogin(e: React.FormEvent) {
     e.preventDefault()

@@ -328,6 +328,43 @@ function normalizeOutline(rawOutline: unknown, isHu: boolean) {
   return normalized.slice(0, 8)
 }
 
+function ensureTopSummarySection(
+  outline: Array<{ heading: string; bullets: string[] }>,
+  summary: string,
+  isHu: boolean
+) {
+  const summaryBullets = summary
+    .split(/\r?\n+/)
+    .map((line) => line.replace(/^[-*]\s*/, '').trim())
+    .filter(Boolean)
+    .slice(0, 5)
+  while (summaryBullets.length < 3) {
+    summaryBullets.push(
+      isHu ? 'Fő cél: fókuszálj a kulcsfogalmakra.' : 'Main goal: focus on the key concepts.'
+    )
+  }
+
+  const first = outline[0]
+  const isSummaryHeading = /summary|összefoglal|osszefoglal/i.test(String(first?.heading || ''))
+  if (first && isSummaryHeading) {
+    return [
+      {
+        heading: first.heading,
+        bullets: first.bullets.length ? first.bullets.slice(0, 5) : summaryBullets,
+      },
+      ...outline.slice(1),
+    ]
+  }
+
+  return [
+    {
+      heading: isHu ? 'Rövid összefoglaló' : 'Quick summary',
+      bullets: summaryBullets,
+    },
+    ...outline,
+  ].slice(0, 9)
+}
+
 function normalizeShortIntro(raw: string, isHu: boolean) {
   const text = asText(raw)
   if (!text) return isHu ? 'Rövid, fókuszált tanulási terv.' : 'Short, focused study plan.'
@@ -616,7 +653,8 @@ export function normalizePlanDocument(input: any, isHu: boolean, prompt = ''): P
     asText(input?.notes_json?.summary) ||
     fallback.notes.summary
 
-  const notes = clampNotesChars({ outline, summary: notesSummary }, isHu)
+  const outlinedWithSummary = ensureTopSummarySection(outline, notesSummary, isHu)
+  const notes = clampNotesChars({ outline: outlinedWithSummary, summary: notesSummary }, isHu)
 
   const rawSchedule = Array.isArray(input?.daily?.schedule)
     ? input.daily.schedule

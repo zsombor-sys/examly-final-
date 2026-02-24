@@ -151,6 +151,16 @@ async function parsePlanRequest(req: Request) {
   }
 }
 
+function limitExceeded(message: string) {
+  return {
+    error: {
+      code: 'LIMIT_EXCEEDED',
+      errorCode: 'LIMIT_EXCEEDED',
+      message,
+    },
+  }
+}
+
 function detectHungarian(text: string) {
   return /\bhu\b|magyar|szia|tetel|t[eé]tel|vizsga|erettsegi|[áéíóöőúüű]/i.test(text)
 }
@@ -568,13 +578,13 @@ export async function POST(req: Request) {
     if (!parsedRequest.ok) {
       if (parsedRequest.error === 'TOO_MANY_FILES') {
         return NextResponse.json(
-          { error: { code: 'TOO_MANY_FILES', message: `Max ${MAX_PLAN_IMAGES} images` } },
+          limitExceeded(`Max ${MAX_PLAN_IMAGES} images`),
           { status: 400, headers: { 'cache-control': 'no-store' } }
         )
       }
       if (parsedRequest.error === 'PROMPT_TOO_LONG') {
         return NextResponse.json(
-          { error: { code: 'PROMPT_TOO_LONG', message: `Prompt max ${MAX_PLAN_PROMPT_CHARS} chars` } },
+          limitExceeded(`Prompt max ${MAX_PLAN_PROMPT_CHARS} chars`),
           { status: 400, headers: { 'cache-control': 'no-store' } }
         )
       }
@@ -594,7 +604,7 @@ export async function POST(req: Request) {
     const requestedImageCount = files.filter((f) => f.type.startsWith('image/')).length + storagePaths.length
     if (requestedImageCount > MAX_PLAN_IMAGES) {
       return NextResponse.json(
-        { error: { code: 'TOO_MANY_FILES', message: `Max ${MAX_PLAN_IMAGES} images` } },
+        limitExceeded(`Max ${MAX_PLAN_IMAGES} images`),
         { status: 400, headers: { 'cache-control': 'no-store' } }
       )
     }
@@ -724,7 +734,7 @@ export async function POST(req: Request) {
       'You MUST incorporate extracted facts from uploaded images. Do not output generic content.',
       'If extracted material is empty, still generate a useful plan but explicitly mention this is a fallback context in notes summary.',
       'Notes are the primary value and must be an outline with headings + bullets. Hungarian for Hungarian prompts.',
-      'Notes must have at least 8 sections, each with 5-10 bullets.',
+      'Notes must start with a short summary section of 3-5 bullets, then continue with at least 8 sections total, each with 5-10 bullets.',
       'Notes should target roughly 3200-4200 characters total while staying structured.',
       'Practice must include at least 8 short exercises with compact answers/explanations.',
     ].join('\n')
@@ -766,7 +776,18 @@ export async function POST(req: Request) {
       )
 
       const text = messageContentToText(completion.choices?.[0]?.message?.content)
-      const parsed = safeExtractJson(text)
+      let parsed: any
+      try {
+        parsed = safeExtractJson(text)
+      } catch (err: any) {
+        console.error('plan.generate.parse_error.step1', {
+          requestId,
+          attempt,
+          code: String(err?.code || ''),
+          raw: String(text || '').slice(0, 1200),
+        })
+        throw err
+      }
       const validated = planDailyZod.parse(parsed)
 
       const seeded = {
@@ -820,7 +841,18 @@ export async function POST(req: Request) {
       )
 
       const text = messageContentToText(completion.choices?.[0]?.message?.content)
-      const parsed = safeExtractJson(text)
+      let parsed: any
+      try {
+        parsed = safeExtractJson(text)
+      } catch (err: any) {
+        console.error('plan.generate.parse_error.step2', {
+          requestId,
+          attempt,
+          code: String(err?.code || ''),
+          raw: String(text || '').slice(0, 1200),
+        })
+        throw err
+      }
       const validated = notesPracticeZod.parse(parsed)
       const merged = {
         ...base,

@@ -11,7 +11,7 @@ type HomeworkStep = {
   title: string
   explanation: string
   work: string
-  check: string
+  why: string
 }
 type HomeworkResult = {
   language: 'hu' | 'en'
@@ -49,7 +49,7 @@ function Inner() {
         title: String(step?.title ?? '').trim() || 'Lépés',
         explanation: String(step?.explanation ?? '').trim(),
         work: String(step?.work ?? '').trim(),
-        check: String(step?.check ?? '').trim(),
+        why: String(step?.why ?? '').trim() || String(step?.explanation ?? '').trim(),
       }))
     }
     return (Array.isArray(legacy) ? legacy : []).map((step) => {
@@ -58,14 +58,14 @@ function Inner() {
           title: 'Lépés',
           explanation: '',
           work: step,
-          check: 'Ellenőrizd, hogy az eredmény logikus-e.',
+          why: 'Ezt a lépést azért végezzük, hogy tiszta legyen a következő számolás.',
         }
       }
       return {
         title: 'Lépés',
         explanation: String(step?.why ?? '').trim(),
         work: String(step?.step ?? '').trim(),
-        check: 'Ellenőrizd, hogy az eredmény logikus-e.',
+        why: String(step?.why ?? '').trim() || 'Ezt a lépést azért végezzük, hogy tiszta legyen a következő számolás.',
       }
     })
   }
@@ -115,7 +115,15 @@ function Inner() {
           type="file"
           accept="image/*"
           multiple
-          onChange={(e) => setFiles(Array.from(e.target.files ?? []).slice(0, MAX_HOMEWORK_IMAGES))}
+          onChange={(e) => {
+            const next = Array.from(e.target.files ?? [])
+            if (next.length > MAX_HOMEWORK_IMAGES) {
+              setError(`Max ${MAX_HOMEWORK_IMAGES} images.`)
+              return
+            }
+            setFiles(next)
+            setError(null)
+          }}
         />
         <Button onClick={run} disabled={loading}>{loading ? 'Dolgozom…' : 'Megoldás készítése'}</Button>
         {error ? <div className="text-sm text-red-400">{error}</div> : null}
@@ -140,10 +148,10 @@ function Inner() {
                         <div className="mt-1 font-semibold text-white/90">{step.title}</div>
                         <div className="mt-2">{step.work}</div>
                         <div className="mt-2 text-sm text-white/65">
-                          <span className="text-white/45">Miért?</span> {step.explanation || 'Rövid indoklás: ez a lépés visz közelebb a végeredményhez.'}
+                          <span className="text-white/45">Magyarázat:</span> {step.explanation || 'Rövid magyarázat a lépéshez.'}
                         </div>
                         <div className="mt-2 text-sm text-white/65">
-                          <span className="text-white/45">Check:</span> {step.check || 'Gyorsan ellenőrizd az előjelet és a mértékegységet.'}
+                          <span className="text-white/45">Miért?</span> {step.why || 'Ez a lépés visz közelebb a végeredményhez.'}
                         </div>
                       </div>
                     ) : null}

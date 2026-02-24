@@ -1,6 +1,7 @@
 'use client'
 
 import { useEffect, useMemo, useState } from 'react'
+import { useRouter } from 'next/navigation'
 import { createBrowserClient } from '@/lib/supabase/browser'
 
 const DEBUG_AUTH = process.env.NEXT_PUBLIC_AUTH_DEBUG === '1'
@@ -33,6 +34,7 @@ function clearAuthStorage() {
 }
 
 export default function LoginPage() {
+  const router = useRouter()
   const supabase = useMemo(() => {
     try {
       return createBrowserClient()
@@ -57,7 +59,7 @@ export default function LoginPage() {
     void supabase.auth.getSession().then((sessionCheck) => {
       if (!active) return
       if (sessionCheck?.data?.session) {
-        window.location.assign(nextSafe || '/plan')
+        router.replace(nextSafe || '/plan')
       }
     })
 
@@ -65,7 +67,7 @@ export default function LoginPage() {
       data: { subscription },
     } = supabase.auth.onAuthStateChange((event) => {
       if (event === 'SIGNED_IN') {
-        window.location.assign(nextSafe || '/plan')
+        router.replace(nextSafe || '/plan')
       }
     })
 
@@ -73,7 +75,7 @@ export default function LoginPage() {
       active = false
       subscription.unsubscribe()
     }
-  }, [supabase])
+  }, [router, supabase])
 
   async function handleLogin(e: React.FormEvent) {
     e.preventDefault()
@@ -114,7 +116,7 @@ export default function LoginPage() {
 
       if (DEBUG_AUTH) console.log('AUTH_RESULT', { userId: data?.user?.id ?? null })
       const target = nextSafe || '/plan'
-      window.location.assign(target)
+      router.replace(target)
       return
     } catch (err: any) {
       const msg = String(err?.message || 'Login failed')
@@ -154,7 +156,7 @@ export default function LoginPage() {
           disabled={loading}
           className="w-full rounded-xl bg-white px-4 py-2 font-medium text-black disabled:opacity-60"
         >
-          {loading ? 'Signing in…' : 'Sign in'}
+          {loading ? 'Continuing…' : 'Continue'}
         </button>
       </form>
       {error ? (

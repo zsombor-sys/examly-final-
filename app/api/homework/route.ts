@@ -25,7 +25,7 @@ const homeworkResponseSchema = z.object({
           title: z.string(),
           explanation: z.string(),
           work: z.string(),
-          check: z.string(),
+          why: z.string(),
         })
       ),
       final_answer: z.string(),
@@ -55,9 +55,9 @@ const homeworkSchema = {
                 title: { type: 'string' },
                 explanation: { type: 'string' },
                 work: { type: 'string' },
-                check: { type: 'string' },
+                why: { type: 'string' },
               },
-              required: ['title', 'explanation', 'work', 'check'],
+              required: ['title', 'explanation', 'work', 'why'],
             },
           },
           final_answer: { type: 'string' },
@@ -68,6 +68,44 @@ const homeworkSchema = {
     },
   },
   required: ['language', 'solutions'],
+}
+
+function limitExceeded(message: string) {
+  return { error: { code: 'LIMIT_EXCEEDED', errorCode: 'LIMIT_EXCEEDED', message } }
+}
+
+function fallbackHomework(prompt: string) {
+  const q = prompt || 'Oldd meg a feladatot lépésenként.'
+  return {
+    language: 'hu' as const,
+    solutions: [
+      {
+        question: q,
+        steps: [
+          {
+            title: 'Adatok kiírása',
+            explanation: 'Gyűjtsd össze az ismert adatokat és a keresett mennyiséget.',
+            work: 'Írd fel külön: adott, keresett, képlet.',
+            why: 'Ez csökkenti a téves képletválasztás esélyét.',
+          },
+          {
+            title: 'Képlet kiválasztása',
+            explanation: 'Válaszd ki a feladattípushoz tartozó alapképletet.',
+            work: 'Helyettesítsd be az ismert adatokat és rendezd az egyenletet.',
+            why: 'A helyes képletből vezethető le biztosan a jó eredmény.',
+          },
+          {
+            title: 'Számolás és ellenőrzés',
+            explanation: 'Számolj pontosan, majd ellenőrizd az egységeket és az előjeleket.',
+            work: 'Számold ki a végeredményt, majd becsléssel validáld.',
+            why: 'A gyors ellenőrzés kiszűri a tipikus számolási hibákat.',
+          },
+        ],
+        final_answer: 'A végső értéket a fenti lépések alapján kapod meg; ellenőrizd mértékegységgel.',
+        common_mistakes: ['Rossz képlet választása', 'Előjelhiba', 'Mértékegység kihagyása'],
+      },
+    ],
+  }
 }
 
 function extractJson(text: string) {
@@ -106,11 +144,11 @@ export async function POST(req: Request) {
 
     const parsed = reqSchema.safeParse({ prompt })
     if (!parsed.success) {
-      return NextResponse.json({ error: { code: 'PROMPT_TOO_LONG', message: `Prompt max ${MAX_HOMEWORK_PROMPT_CHARS}` } }, { status: 400 })
+      return NextResponse.json(limitExceeded(`Prompt max ${MAX_HOMEWORK_PROMPT_CHARS}`), { status: 400 })
     }
     const imageFiles = files.filter((f) => f.type.startsWith('image/'))
     if (imageFiles.length > MAX_HOMEWORK_IMAGES) {
-      return NextResponse.json({ error: { code: 'TOO_MANY_FILES', message: `Max ${MAX_HOMEWORK_IMAGES} images` } }, { status: 400 })
+      return NextResponse.json(limitExceeded(`Max ${MAX_HOMEWORK_IMAGES} images`), { status: 400 })
     }
 
     const key = process.env.OPENAI_API_KEY
@@ -158,15 +196,33 @@ export async function POST(req: Request) {
         },
       })
       const raw = normalizeContent(resp.choices?.[0]?.message?.content)
-      const parsedJson = extractJson(raw)
+      let parsedJson: any
+      try {
+        parsedJson = extractJson(raw)
+      } catch (err: any) {
+        console.error('homework.parse_error', {
+          repair,
+          code: String(err?.message || ''),
+          raw: String(raw || '').slice(0, 1200),
+        })
+        throw err
+      }
       return homeworkResponseSchema.parse(parsedJson)
     }
 
     let parsedJson: z.infer<typeof homeworkResponseSchema>
     try {
       parsedJson = await runAttempt(false)
-    } catch {
-      parsedJson = await runAttempt(true)
+    } catch (firstErr: any) {
+      try {
+        parsedJson = await runAttempt(true)
+      } catch (secondErr: any) {
+        console.error('homework.structured_output_fallback', {
+          first: String(firstErr?.message || ''),
+          second: String(secondErr?.message || ''),
+        })
+        parsedJson = fallbackHomework(parsed.data.prompt) as z.infer<typeof homeworkResponseSchema>
+      }
     }
 
     const sb = createServerAdminClient()

@@ -2,10 +2,27 @@
 
 import Link from 'next/link'
 import { useState } from 'react'
+import { useRouter } from 'next/navigation'
 import { supabase } from '@/lib/supabaseClient'
 import { Button, Card, Input } from '@/components/ui'
 
+function safeNext(nextValue: string | null) {
+  const raw = String(nextValue || '').trim()
+  if (!raw.startsWith('/')) return '/plan'
+  if (raw.startsWith('//')) return '/plan'
+  return raw
+}
+
+function isEmailNotConfirmedError(message: string) {
+  const msg = String(message || '').toLowerCase()
+  return msg.includes('email not confirmed') || msg.includes('confirm your email')
+}
+
+const NO_SESSION_MESSAGE =
+  'A fiók létrejött, de az email még nincs megerősítve / auth beállítás miatt nincs session. Állítsd be a Supabase Auth beállításokat (Confirm email OFF vagy SMTP).'
+
 export default function SignupPage() {
+  const router = useRouter()
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [fullName, setFullName] = useState('')
@@ -20,15 +37,9 @@ export default function SignupPage() {
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault()
     setError(null)
-    const nextSafe =
-      typeof window !== 'undefined'
-        ? (() => {
-            const raw = String(new URLSearchParams(window.location.search).get('next') || '').trim()
-            if (!raw.startsWith('/')) return '/plan'
-            if (raw.startsWith('//')) return '/plan'
-            return raw
-          })()
-        : '/plan'
+    const nextSafe = safeNext(
+      typeof window !== 'undefined' ? new URLSearchParams(window.location.search).get('next') : null
+    )
     const emailNormalized = email.trim().toLowerCase()
 
     console.log('AUTH_MODE', 'signup')
@@ -72,10 +83,27 @@ export default function SignupPage() {
         return
       }
       if (data?.session) {
-        window.location.assign(nextSafe || '/plan')
+        router.replace(nextSafe || '/plan')
         return
       }
-      setError('Check your email to confirm')
+      const signInResult = await supabase.auth.signInWithPassword({
+        email: emailNormalized,
+        password,
+      })
+      if (signInResult.error) {
+        if (isEmailNotConfirmedError(signInResult.error.message)) {
+          setError(NO_SESSION_MESSAGE)
+          return
+        }
+        setError(signInResult.error.message || 'Signup failed')
+        return
+      }
+      const signInSession = await supabase.auth.getSession()
+      if (signInSession?.data?.session) {
+        router.replace(nextSafe || '/plan')
+        return
+      }
+      setError(NO_SESSION_MESSAGE)
     } catch (e: any) {
       console.error('AUTH_ERROR', e)
       setError(e?.message ?? 'Error')
@@ -96,7 +124,7 @@ export default function SignupPage() {
           <Input value={phone} onChange={(e) => setPhone(e.target.value)} placeholder="Phone number" />
           <Input value={password} onChange={(e) => setPassword(e.target.value)} placeholder="Password" type="password" />
           {error && <p className="text-sm text-red-400">{error}</p>}
-          <Button type="submit" disabled={loading} className="w-full">{loading ? 'Creating…' : 'Create account'}</Button>
+          <Button type="submit" disabled={loading} className="w-full">{loading ? 'Continuing…' : 'Continue'}</Button>
         </form>
 
         <p className="mt-6 text-sm text-dim">

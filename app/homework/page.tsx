@@ -9,18 +9,18 @@ import { MAX_HOMEWORK_IMAGES, MAX_HOMEWORK_PROMPT_CHARS } from '@/lib/limits'
 
 type HomeworkStep = {
   title: string
-  explanation: string
-  work: string
   why: string
+  work: string
 }
 type HomeworkResult = {
-  language: 'hu' | 'en'
-  solutions: Array<{
+  answer?: string
+  steps?: HomeworkStep[]
+  solutions?: Array<{
     question: string
-    steps?: HomeworkStep[]
+    steps?: Array<{ title?: string; explanation?: string; work?: string; why?: string }>
     solution_steps?: Array<{ step?: string; why?: string } | string>
-    final_answer: string
-    common_mistakes: string[]
+    final_answer?: string
+    common_mistakes?: string[]
   }>
 }
 
@@ -38,42 +38,55 @@ function Inner() {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [result, setResult] = useState<HomeworkResult | null>(null)
-  const [currentStepBySolution, setCurrentStepBySolution] = useState<Record<number, number>>({})
+  const [currentStep, setCurrentStep] = useState(0)
 
-  function normalizeSteps(
-    steps: HomeworkStep[] | undefined,
-    legacy: Array<{ step?: string; why?: string } | string> | undefined
-  ) {
+  function normalizeSteps(steps: HomeworkStep[] | undefined) {
     if (Array.isArray(steps) && steps.length) {
       return steps.map((step) => ({
         title: String(step?.title ?? '').trim() || 'Lépés',
-        explanation: String(step?.explanation ?? '').trim(),
         work: String(step?.work ?? '').trim(),
-        why: String(step?.why ?? '').trim() || String(step?.explanation ?? '').trim(),
+        why: String(step?.why ?? '').trim() || 'Ez a lépés visz közelebb a megoldáshoz.',
       }))
     }
-    return (Array.isArray(legacy) ? legacy : []).map((step) => {
-      if (typeof step === 'string') {
-        return {
-          title: 'Lépés',
-          explanation: '',
-          work: step,
-          why: 'Ezt a lépést azért végezzük, hogy tiszta legyen a következő számolás.',
-        }
-      }
-      return {
-        title: 'Lépés',
-        explanation: String(step?.why ?? '').trim(),
-        work: String(step?.step ?? '').trim(),
-        why: String(step?.why ?? '').trim() || 'Ezt a lépést azért végezzük, hogy tiszta legyen a következő számolás.',
-      }
-    })
+    return []
+  }
+
+  function getDisplayData(json: HomeworkResult | null) {
+    if (!json) return { answer: '', steps: [] as HomeworkStep[] }
+    const directSteps = normalizeSteps(json.steps)
+    if (directSteps.length) {
+      return { answer: String(json.answer ?? '').trim(), steps: directSteps }
+    }
+    const first = Array.isArray(json.solutions) ? json.solutions[0] : null
+    const legacySteps = Array.isArray(first?.steps)
+      ? first!.steps!.map((step) => ({
+          title: String(step?.title ?? '').trim() || 'Lépés',
+          work: String(step?.work ?? '').trim(),
+          why: String(step?.why ?? step?.explanation ?? '').trim() || 'Ez a lépés visz közelebb a megoldáshoz.',
+        }))
+      : []
+    const fallbackSteps =
+      Array.isArray(first?.solution_steps)
+        ? first!.solution_steps!.map((s) =>
+            typeof s === 'string'
+              ? { title: 'Lépés', work: s, why: 'Ez a lépés visz közelebb a megoldáshoz.' }
+              : {
+                  title: 'Lépés',
+                  work: String(s?.step ?? '').trim(),
+                  why: String(s?.why ?? '').trim() || 'Ez a lépés visz közelebb a megoldáshoz.',
+                }
+          )
+        : []
+    return {
+      answer: String(json.answer ?? first?.final_answer ?? '').trim(),
+      steps: legacySteps.length ? legacySteps : fallbackSteps,
+    }
   }
 
   async function run() {
     setError(null)
     setResult(null)
-    setCurrentStepBySolution({})
+    setCurrentStep(0)
     if (prompt.trim().length > MAX_HOMEWORK_PROMPT_CHARS) {
       setError(`Prompt too long (max ${MAX_HOMEWORK_PROMPT_CHARS}).`)
       return
@@ -131,67 +144,41 @@ function Inner() {
 
       {result ? (
         <div className="space-y-4">
-          {result.solutions.map((s, i) => (
-            <section key={i} className="rounded-3xl border border-white/10 bg-white/[0.02] p-5">
-              <div className="text-sm text-white/60">Feladat</div>
-              <div className="mt-1 text-white/90">{s.question}</div>
-              <div className="mt-4 text-sm text-white/60">Lépések</div>
-              {(() => {
-                const steps = normalizeSteps(s.steps, s.solution_steps)
-                const current = Math.max(0, Math.min(steps.length - 1, currentStepBySolution[i] ?? 0))
-                const step = steps[current]
-                return (
-                  <>
-                    {step ? (
-                      <div className="mt-2 rounded-2xl border border-white/10 bg-black/30 p-4 text-white/80">
-                        <div className="text-xs text-white/50">Lépés {current + 1}/{steps.length}</div>
-                        <div className="mt-1 font-semibold text-white/90">{step.title}</div>
-                        <div className="mt-2">{step.work}</div>
-                        <div className="mt-2 text-sm text-white/65">
-                          <span className="text-white/45">Magyarázat:</span> {step.explanation || 'Rövid magyarázat a lépéshez.'}
-                        </div>
-                        <div className="mt-2 text-sm text-white/65">
-                          <span className="text-white/45">Miért?</span> {step.why || 'Ez a lépés visz közelebb a végeredményhez.'}
-                        </div>
-                      </div>
-                    ) : null}
-
-                    <div className="mt-3 flex gap-2">
-                      <Button
-                        variant="ghost"
-                        disabled={current <= 0}
-                        onClick={() => setCurrentStepBySolution((prev) => ({ ...prev, [i]: Math.max(0, current - 1) }))}
-                      >
-                        Back
-                      </Button>
-                      <Button
-                        disabled={current >= steps.length - 1}
-                        onClick={() =>
-                          setCurrentStepBySolution((prev) => ({
-                            ...prev,
-                            [i]: Math.min(steps.length - 1, current + 1),
-                          }))
-                        }
-                      >
-                        Next step →
-                      </Button>
+          {(() => {
+            const data = getDisplayData(result)
+            const steps = data.steps
+            const current = Math.max(0, Math.min(steps.length - 1, currentStep))
+            const step = steps[current]
+            return (
+              <section className="rounded-3xl border border-white/10 bg-white/[0.02] p-5">
+                <div className="text-sm text-white/60">Lépések</div>
+                {step ? (
+                  <div className="mt-2 rounded-2xl border border-white/10 bg-black/30 p-4 text-white/80">
+                    <div className="text-xs text-white/50">Lépés {current + 1}/{steps.length}</div>
+                    <div className="mt-1 font-semibold text-white/90">{step.title}</div>
+                    <div className="mt-2">{step.work}</div>
+                    <div className="mt-2 text-sm text-white/65">
+                      <span className="text-white/45">Miért?</span> {step.why || 'Ez a lépés visz közelebb a végeredményhez.'}
                     </div>
-
-                    {current >= steps.length - 1 ? (
-                      <>
-                        <div className="mt-4 text-sm text-white/60">Végeredmény</div>
-                        <div className="mt-1 text-white/90">{s.final_answer}</div>
-                        <div className="mt-4 text-sm text-white/60">Gyakori hibák</div>
-                        <ul className="mt-2 list-disc pl-5 space-y-1 text-white/80">
-                          {s.common_mistakes.map((m, mi) => <li key={mi}>{m}</li>)}
-                        </ul>
-                      </>
-                    ) : null}
+                  </div>
+                ) : null}
+                <div className="mt-3 flex gap-2">
+                  <Button variant="ghost" disabled={current <= 0} onClick={() => setCurrentStep(Math.max(0, current - 1))}>
+                    Back
+                  </Button>
+                  <Button disabled={current >= steps.length - 1} onClick={() => setCurrentStep(Math.min(steps.length - 1, current + 1))}>
+                    Next step →
+                  </Button>
+                </div>
+                {current >= steps.length - 1 && data.answer ? (
+                  <>
+                    <div className="mt-4 text-sm text-white/60">Végeredmény</div>
+                    <div className="mt-1 text-white/90">{data.answer}</div>
                   </>
-                )
-              })()}
-            </section>
-          ))}
+                ) : null}
+              </section>
+            )
+          })()}
         </div>
       ) : null}
     </div>

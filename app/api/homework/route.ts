@@ -16,20 +16,12 @@ const reqSchema = z.object({
 })
 
 const homeworkResponseSchema = z.object({
-  language: z.enum(['hu', 'en']),
-  solutions: z.array(
+  answer: z.string(),
+  steps: z.array(
     z.object({
-      question: z.string(),
-      steps: z.array(
-        z.object({
-          title: z.string(),
-          explanation: z.string(),
-          work: z.string(),
-          why: z.string(),
-        })
-      ),
-      final_answer: z.string(),
-      common_mistakes: z.array(z.string()),
+      title: z.string(),
+      why: z.string(),
+      work: z.string(),
     })
   ),
 })
@@ -38,36 +30,22 @@ const homeworkSchema = {
   type: 'object',
   additionalProperties: false,
   properties: {
-    language: { type: 'string', enum: ['hu', 'en'] },
-    solutions: {
+    answer: { type: 'string' },
+    steps: {
       type: 'array',
       items: {
         type: 'object',
         additionalProperties: false,
         properties: {
-          question: { type: 'string' },
-          steps: {
-            type: 'array',
-            items: {
-              type: 'object',
-              additionalProperties: false,
-              properties: {
-                title: { type: 'string' },
-                explanation: { type: 'string' },
-                work: { type: 'string' },
-                why: { type: 'string' },
-              },
-              required: ['title', 'explanation', 'work', 'why'],
-            },
-          },
-          final_answer: { type: 'string' },
-          common_mistakes: { type: 'array', items: { type: 'string' } },
+          title: { type: 'string' },
+          why: { type: 'string' },
+          work: { type: 'string' },
         },
-        required: ['question', 'steps', 'final_answer', 'common_mistakes'],
+        required: ['title', 'why', 'work'],
       },
     },
   },
-  required: ['language', 'solutions'],
+  required: ['answer', 'steps'],
 }
 
 function limitExceeded(message: string) {
@@ -75,34 +53,61 @@ function limitExceeded(message: string) {
 }
 
 function fallbackHomework(prompt: string) {
-  const q = prompt || 'Oldd meg a feladatot lépésenként.'
+  return {
+    answer: 'A feladat lépésről lépésre megoldható az alábbi menettel. A végén ellenőrizd az eredményt mértékegységgel.',
+    steps: [
+      {
+        title: 'Adatok kiírása',
+        work: `Írd fel külön: adott, keresett, képlet. ${prompt ? `Feladat: ${prompt}` : ''}`.trim(),
+        why: 'Ez csökkenti a téves képletválasztás esélyét.',
+      },
+      {
+        title: 'Képlet kiválasztása',
+        work: 'Válaszd ki a feladattípushoz tartozó alapképletet, majd helyettesítsd be az adatokat.',
+        why: 'A helyes képletből vezethető le biztosan a jó eredmény.',
+      },
+      {
+        title: 'Számolás és ellenőrzés',
+        work: 'Számold ki a végeredményt, majd ellenőrizd az előjeleket és a mértékegységet.',
+        why: 'A gyors ellenőrzés kiszűri a tipikus számolási hibákat.',
+      },
+    ],
+  }
+}
+
+function ensureHomeworkShape(data: z.infer<typeof homeworkResponseSchema>) {
+  const normalizedSteps = (Array.isArray(data.steps) ? data.steps : [])
+    .map((s) => ({
+      title: String(s?.title || '').trim(),
+      work: String(s?.work || '').trim(),
+      why: String(s?.why || '').trim(),
+    }))
+    .filter((s) => s.title && s.work)
+    .map((step, i) => ({
+      ...step,
+      why: step.why || (i < 2 ? 'Ez a lépés szükséges a helyes módszer kiválasztásához.' : 'Ez visz közelebb a megoldáshoz.'),
+    }))
+
+  return {
+    answer: String(data.answer || '').trim() || 'Kövesd a lépéseket, majd ellenőrizd a végeredményt.',
+    steps: normalizedSteps.length ? normalizedSteps : fallbackHomework('').steps,
+  }
+}
+
+function toLegacyHomeworkResponse(data: ReturnType<typeof ensureHomeworkShape>) {
   return {
     language: 'hu' as const,
     solutions: [
       {
-        question: q,
-        steps: [
-          {
-            title: 'Adatok kiírása',
-            explanation: 'Gyűjtsd össze az ismert adatokat és a keresett mennyiséget.',
-            work: 'Írd fel külön: adott, keresett, képlet.',
-            why: 'Ez csökkenti a téves képletválasztás esélyét.',
-          },
-          {
-            title: 'Képlet kiválasztása',
-            explanation: 'Válaszd ki a feladattípushoz tartozó alapképletet.',
-            work: 'Helyettesítsd be az ismert adatokat és rendezd az egyenletet.',
-            why: 'A helyes képletből vezethető le biztosan a jó eredmény.',
-          },
-          {
-            title: 'Számolás és ellenőrzés',
-            explanation: 'Számolj pontosan, majd ellenőrizd az egységeket és az előjeleket.',
-            work: 'Számold ki a végeredményt, majd becsléssel validáld.',
-            why: 'A gyors ellenőrzés kiszűri a tipikus számolási hibákat.',
-          },
-        ],
-        final_answer: 'A végső értéket a fenti lépések alapján kapod meg; ellenőrizd mértékegységgel.',
-        common_mistakes: ['Rossz képlet választása', 'Előjelhiba', 'Mértékegység kihagyása'],
+        question: 'Házi feladat',
+        steps: data.steps.map((step) => ({
+          title: step.title,
+          explanation: '',
+          work: step.work,
+          why: step.why,
+        })),
+        final_answer: data.answer,
+        common_mistakes: ['Előjelhiba', 'Rossz képletválasztás', 'Mértékegység kihagyása'],
       },
     ],
   }
@@ -178,8 +183,9 @@ export async function POST(req: Request) {
             content:
               [
                 'Adj reszletes, lepesrol lepesre magyarazatot kozepiskolai szinten.',
-                'Minden lépésnek legyen címe és rövid "miért" magyarázata.',
-                'Minden lépésben legyen konkrét munkarész (képlet/számolás) és egy gyors önellenőrző kérdés.',
+                'Valasz schema: { answer: string, steps: [{ title, why, work }] }.',
+                'Minden lépésnek legyen címe, rövid "miért" magyarázata és konkrét munkarésze (képlet/számolás).',
+                'Az első 1-2 lépésnél a why legyen különösen egyértelmű és rövid.',
                 'Csak érvényes JSON-t adj vissza.',
                 repair ? 'Return ONLY valid JSON matching schema. No prose, no markdown.' : '',
               ]
@@ -224,6 +230,7 @@ export async function POST(req: Request) {
         parsedJson = fallbackHomework(parsed.data.prompt) as z.infer<typeof homeworkResponseSchema>
       }
     }
+    const normalized = ensureHomeworkShape(parsedJson)
 
     const sb = createServerAdminClient()
     const { error: rpcErr } = await sb.rpc('consume_credits', { user_id: user.id, cost: COST })
@@ -235,7 +242,11 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: { code: 'CREDITS_CHARGE_FAILED', message: 'Credits charge failed' } }, { status: 500 })
     }
 
-    return NextResponse.json(parsedJson)
+    return NextResponse.json({
+      ...toLegacyHomeworkResponse(normalized),
+      answer: normalized.answer,
+      steps: normalized.steps,
+    })
   } catch (e: any) {
     return NextResponse.json({ error: { code: 'HOMEWORK_FAILED', message: String(e?.message || 'Server error') } }, { status: 500 })
   }

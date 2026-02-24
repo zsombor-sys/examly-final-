@@ -61,9 +61,9 @@ const planDailyZod = z.object({
             pomodoro: z.boolean(),
             details: z.string().optional(),
           })
-        ),
+        ).min(6).max(12),
       })
-    ),
+    ).min(1),
   }),
 })
 
@@ -165,30 +165,23 @@ function detectHungarian(text: string) {
   return /\bhu\b|magyar|szia|tetel|t[eé]tel|vizsga|erettsegi|[áéíóöőúüű]/i.test(text)
 }
 
-function safeExtractJson(text: string) {
-  const raw = String(text ?? '').trim()
-  if (!raw) {
-    const err: any = new Error('PARSE_EMPTY')
-    err.code = 'PARSE_EMPTY'
-    throw err
-  }
+function parseStructuredMessageContent(content: unknown) {
+  const raw = typeof content === 'string'
+    ? content
+    : Array.isArray(content)
+      ? content
+          .map((part: any) => {
+            if (typeof part === 'string') return part
+            if (typeof part?.text === 'string') return part.text
+            return ''
+          })
+          .join('\n')
+      : ''
+  if (!raw) throw new Error('OPENAI_NO_CONTENT')
   try {
     return JSON.parse(raw)
-  } catch {
-    const s = raw.indexOf('{')
-    const e = raw.lastIndexOf('}')
-    if (s < 0 || e <= s) {
-      const err: any = new Error('PARSE_NOT_FOUND')
-      err.code = 'PARSE_NOT_FOUND'
-      throw err
-    }
-    try {
-      return JSON.parse(raw.slice(s, e + 1))
-    } catch {
-      const err: any = new Error('PARSE_FAILED')
-      err.code = 'PARSE_FAILED'
-      throw err
-    }
+  } catch (e) {
+    throw new Error(`OPENAI_JSON_PARSE_FAILED: ${String(e)}`)
   }
 }
 
@@ -730,12 +723,13 @@ export async function POST(req: Request) {
       'Return ONLY valid JSON. No markdown. No commentary.',
       `Language target: ${targetLang === 'hu' ? 'Hungarian' : 'English'}; output language must be "${targetLang}" unless impossible.`,
       'Plan summary must be concise: 2-4 lines maximum.',
-      'Daily days blocks must include start/end time strings and pomodoro-friendly study blocks.',
+      'Daily must always include Day 1 with 6-12 time blocks and pomodoro-friendly sequencing (25m study / 5m break pattern with one longer break).',
       'You MUST incorporate extracted facts from uploaded images. Do not output generic content.',
       'If extracted material is empty, still generate a useful plan but explicitly mention this is a fallback context in notes summary.',
       'Notes are the primary value and must be an outline with headings + bullets. Hungarian for Hungarian prompts.',
       'Notes must start with a short summary section of 3-5 bullets, then continue with at least 8 sections total, each with 5-10 bullets.',
-      'Notes should target roughly 3200-4200 characters total while staying structured.',
+      'Return 6-10 outline sections. Bullets should be one-line concrete facts/definitions/dates; use LaTeX in bullets for chemistry/math formulas.',
+      'Notes should target roughly 3500-4500 characters total while staying structured.',
       'Practice must include at least 8 short exercises with compact answers/explanations.',
     ].join('\n')
 
@@ -775,20 +769,22 @@ export async function POST(req: Request) {
         )
       )
 
-      const text = messageContentToText(completion.choices?.[0]?.message?.content)
+      const rawContent = completion.choices?.[0]?.message?.content
       let parsed: any
       try {
-        parsed = safeExtractJson(text)
+        parsed = parseStructuredMessageContent(rawContent)
       } catch (err: any) {
         console.error('plan.generate.parse_error.step1', {
           requestId,
           attempt,
           code: String(err?.code || ''),
-          raw: String(text || '').slice(0, 1200),
+          raw: String(messageContentToText(rawContent) || '').slice(0, 1200),
         })
         throw err
       }
       const validated = planDailyZod.parse(parsed)
+      const hasDay1 = validated.daily.days.some((d) => Number(d?.day) === 1)
+      if (!hasDay1) throw new Error('OPENAI_DAILY_DAY1_MISSING')
 
       const seeded = {
         ...fallbackPlanDocument(isHu, prompt),
@@ -822,7 +818,7 @@ export async function POST(req: Request) {
                     plan: base.plan,
                     daily: base.daily,
                   })}\n\n` +
-                  'Generate only notes and practice keys. Keep structure strict and concise.',
+                  'Generate only notes and practice keys. Keep structure strict and concise. Notes must be outline-first and around 4000 chars total.',
               },
             ],
             temperature: 0,
@@ -840,16 +836,16 @@ export async function POST(req: Request) {
         )
       )
 
-      const text = messageContentToText(completion.choices?.[0]?.message?.content)
+      const rawContent = completion.choices?.[0]?.message?.content
       let parsed: any
       try {
-        parsed = safeExtractJson(text)
+        parsed = parseStructuredMessageContent(rawContent)
       } catch (err: any) {
         console.error('plan.generate.parse_error.step2', {
           requestId,
           attempt,
           code: String(err?.code || ''),
-          raw: String(text || '').slice(0, 1200),
+          raw: String(messageContentToText(rawContent) || '').slice(0, 1200),
         })
         throw err
       }

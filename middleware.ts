@@ -1,17 +1,15 @@
-import { NextRequest, NextResponse } from 'next/server'
+import { NextResponse } from 'next/server'
+import type { NextRequest } from 'next/server'
 
-export async function middleware(req: NextRequest) {
-  const host = (req.headers.get('host') || '').toLowerCase()
-  const isHu = host === 'examly.hu' || host === 'www.examly.hu' || host.endsWith('.examly.hu')
-  if (isHu) {
-    const url = req.nextUrl.clone()
-    url.protocol = 'https:'
-    url.hostname = 'www.examly.dev'
-    return NextResponse.redirect(url, 308)
-  }
+export function middleware(_req: NextRequest) {
+  // IMPORTANT: Do not enforce Supabase auth in middleware because our client auth stores session in localStorage.
+  // Auth is enforced in the client via <AuthGate /> to avoid redirect loops / "nothing happens" after login.
   return NextResponse.next()
 }
 
 export const config = {
-  matcher: ['/:path*'],
+  matcher: [
+    // Keep middleware active but non-blocking for all app pages (or you can remove matcher entirely).
+    '/((?!_next/static|_next/image|favicon.ico).*)',
+  ],
 }

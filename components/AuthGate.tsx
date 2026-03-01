@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useState } from 'react'
-import { usePathname, useRouter } from 'next/navigation'
+import { usePathname } from 'next/navigation'
 import { supabase } from '@/lib/supabaseClient'
 import { isSupabaseConfigured } from '@/lib/supabase/public'
 import { getSupabaseMissingEnvMessage } from '@/lib/supabase/browser'
@@ -27,16 +27,24 @@ function isInvalidRefreshTokenError(message: string) {
   return msg.includes('invalid refresh token') || msg.includes('refresh token not found')
 }
 
+function clearAuthStorage() {
+  if (typeof window === 'undefined') return
+  try {
+    const keys: string[] = []
+    for (let i = 0; i < window.localStorage.length; i += 1) {
+      const key = window.localStorage.key(i)
+      if (!key) continue
+      if (key.includes('supabase') || key.startsWith('sb-')) keys.push(key)
+    }
+    for (const key of keys) window.localStorage.removeItem(key)
+  } catch {
+    // ignore
+  }
+}
+
 function isGenerationPath(pathname: string | null) {
   const p = pathname || ''
   return p === '/plan' || p.startsWith('/plan/') || p === '/practice' || p.startsWith('/practice/') || p === '/homework' || p.startsWith('/homework/') || p === '/vocab' || p.startsWith('/vocab/')
-}
-
-function safeNext(next: string) {
-  if (typeof next !== 'string') return '/plan'
-  if (!next.startsWith('/')) return '/plan'
-  if (next.startsWith('//')) return '/plan'
-  return next
 }
 
 function guardsDisabled() {
@@ -52,7 +60,6 @@ export default function AuthGate({
   requireEntitlement?: boolean
   onEntitlement?: (state: EntitlementState) => void
 }) {
-  const router = useRouter()
   const pathname = usePathname()
   const { ready: authReady, session } = useAuthState()
   const [ready, setReady] = useState(false)
@@ -93,19 +100,22 @@ export default function AuthGate({
         return
       }
 
-      const search = typeof window !== 'undefined' ? window.location.search || '' : ''
-      const next = safeNext(`${pathname || '/plan'}${search}`)
-
       const sessionState = await supabase.auth.getSession()
       if (sessionState.error && isInvalidRefreshTokenError(sessionState.error.message)) {
         await supabase.auth.signOut({ scope: 'local' })
-        router.replace(`/login?next=${encodeURIComponent(next)}&message=${encodeURIComponent('Session expired. Please sign in again.')}`)
+        clearAuthStorage()
+        onEntitlement?.({ credits: null, entitlementOk: null })
+        if (!alive) return
+        setError('Session expired. Please sign in again.')
+        setReady(true)
         return
       }
 
       if (!session) {
         if (DEBUG_AUTH) console.log('AuthGate: no session', { path: pathname })
-        router.replace(`/login?next=${encodeURIComponent(next)}`)
+        onEntitlement?.({ credits: null, entitlementOk: null })
+        if (!alive) return
+        setReady(true)
         return
       }
 
@@ -147,7 +157,7 @@ export default function AuthGate({
     return () => {
       alive = false
     }
-  }, [router, pathname, requireEntitlement, onEntitlement, authReady, session])
+  }, [pathname, requireEntitlement, onEntitlement, authReady, session])
 
   if (ready) {
     return (

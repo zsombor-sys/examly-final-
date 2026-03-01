@@ -3,20 +3,15 @@
 import Link from 'next/link'
 import { useState } from 'react'
 import { useRouter } from 'next/navigation'
-import { supabase } from '@/lib/supabaseClient'
-import { getSupabaseMissingEnvMessage } from '@/lib/supabase/browser'
 import { Button, Card, Input } from '@/components/ui'
+import { signupAndSignInAction } from '@/app/signup/actions'
 
 function safeNext(nextValue: string | null) {
   const raw = String(nextValue || '').trim()
   if (!raw.startsWith('/')) return '/plan'
   if (raw.startsWith('//')) return '/plan'
+  if (raw.startsWith('/login') || raw.startsWith('/signup') || raw.startsWith('/register')) return '/plan'
   return raw
-}
-
-function isEmailNotConfirmedError(message: string) {
-  const msg = String(message || '').toLowerCase()
-  return msg.includes('email not confirmed') || msg.includes('confirm your email')
 }
 
 const NO_SESSION_MESSAGE =
@@ -31,10 +26,6 @@ export default function SignupPage() {
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
 
-  function normalizePhoneDigits(raw: string) {
-    return raw.replace(/\D/g, '')
-  }
-
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault()
     setError(null)
@@ -42,15 +33,6 @@ export default function SignupPage() {
       typeof window !== 'undefined' ? new URLSearchParams(window.location.search).get('next') : null
     )
     const emailNormalized = email.trim().toLowerCase()
-
-    console.log('AUTH_MODE', 'signup')
-    console.log('AUTH_METHOD', 'signUp')
-    console.log('AUTH_START', { email: emailNormalized })
-
-    if (!supabase) {
-      setError(getSupabaseMissingEnvMessage())
-      return
-    }
     if (fullName.trim().length < 2) {
       setError('Full name is required')
       return
@@ -62,61 +44,31 @@ export default function SignupPage() {
 
     setLoading(true)
     try {
-      const phoneTrim = phone.trim()
-      const phoneNorm = normalizePhoneDigits(phoneTrim)
-      const result = await supabase.auth.signUp({
-        email: emailNormalized,
-        password,
-        options: {
-          emailRedirectTo: `${window.location.origin}/auth/callback`,
-          data: {
-            full_name: fullName.trim(),
-            phone: phoneTrim,
-            phone_normalized: phoneNorm,
-          },
-        },
-      })
-      console.log('AUTH_RESULT', result)
-      const { data, error } = result
-      if (error) {
-        console.error('AUTH_ERROR', error)
-        setError(error.message || 'Signup failed')
+      const formData = new FormData()
+      formData.set('email', emailNormalized)
+      formData.set('password', password)
+      formData.set('fullName', fullName.trim())
+      formData.set('phone', phone.trim())
+
+      const result = await signupAndSignInAction(formData)
+      if (!result.ok) {
+        setError(result.message || 'Signup failed')
         return
       }
-      if (data?.session) {
-        const target = nextSafe || '/plan'
-        router.replace(target)
-        window.setTimeout(() => {
-          if (typeof window !== 'undefined' && window.location.pathname !== target) {
-            window.location.assign(target)
-          }
-        }, 800)
+      if (result.needsEmailVerification) {
+        setError(NO_SESSION_MESSAGE)
         return
       }
-      const signInResult = await supabase.auth.signInWithPassword({
-        email: emailNormalized,
-        password,
-      })
-      if (signInResult.error) {
-        if (isEmailNotConfirmedError(signInResult.error.message)) {
-          setError(NO_SESSION_MESSAGE)
-          return
+
+      const target = nextSafe || '/plan'
+      router.replace(target)
+      router.refresh()
+      window.setTimeout(() => {
+        if (typeof window !== 'undefined' && window.location.pathname !== target) {
+          window.location.assign(target)
         }
-        setError(signInResult.error.message || 'Signup failed')
-        return
-      }
-      const signInSession = await supabase.auth.getSession()
-      if (signInSession?.data?.session) {
-        const target = nextSafe || '/plan'
-        router.replace(target)
-        window.setTimeout(() => {
-          if (typeof window !== 'undefined' && window.location.pathname !== target) {
-            window.location.assign(target)
-          }
-        }, 800)
-        return
-      }
-      setError(NO_SESSION_MESSAGE)
+      }, 800)
+      return
     } catch (e: any) {
       console.error('AUTH_ERROR', e)
       setError(e?.message ?? 'Error')

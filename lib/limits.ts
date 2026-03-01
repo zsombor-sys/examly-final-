@@ -11,7 +11,11 @@ export const MAX_IMAGES = readInt(
 )
 export const MAX_PLAN_IMAGES = 7
 export const MAX_HOMEWORK_IMAGES = 2
+export const MAX_HW_IMAGES = MAX_HOMEWORK_IMAGES
 export const MAX_PLAN_PROMPT_CHARS = 150
 export const MAX_HOMEWORK_PROMPT_CHARS = 500
+export const MAX_HW_PROMPT_CHARS = MAX_HOMEWORK_PROMPT_CHARS
+export const NOTES_TARGET_MIN_CHARS = 3000
+export const NOTES_TARGET_MAX_CHARS = 4500
 export const MAX_OUTPUT_CHARS = 4000
 export const CREDITS_PER_GENERATION = 1

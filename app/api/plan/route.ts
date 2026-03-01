@@ -4,7 +4,14 @@ import OpenAI from 'openai'
 import { requireUser } from '@/lib/authServer'
 import { getPlan, upsertPlanInMemory } from '@/app/api/plan/store'
 import { createServerAdminClient } from '@/lib/supabase/server'
-import { CREDITS_PER_GENERATION, MAX_PLAN_IMAGES, MAX_PLAN_PROMPT_CHARS, OPENAI_MODEL } from '@/lib/limits'
+import {
+  CREDITS_PER_GENERATION,
+  MAX_PLAN_IMAGES,
+  MAX_PLAN_PROMPT_CHARS,
+  NOTES_TARGET_MAX_CHARS,
+  NOTES_TARGET_MIN_CHARS,
+  OPENAI_MODEL,
+} from '@/lib/limits'
 import { getCredits, chargeCredits, refundCredits } from '@/lib/credits'
 import { TABLE_PLANS } from '@/lib/dbTables'
 import { throwIfMissingTable } from '@/lib/supabaseErrors'
@@ -54,8 +61,8 @@ const planDailyZod = z.object({
         focus: z.string(),
         blocks: z.array(
           z.object({
-            start: z.string(),
-            end: z.string(),
+            start: z.string().regex(/^\d{2}:\d{2}$/),
+            end: z.string().regex(/^\d{2}:\d{2}$/),
             title: z.string(),
             type: z.enum(['study', 'break']),
             pomodoro: z.boolean(),
@@ -69,13 +76,13 @@ const planDailyZod = z.object({
 
 const notesPracticeZod = z.object({
   notes: z.object({
-    outline: z.array(
+    sections: z.array(
       z.object({
         heading: z.string(),
         bullets: z.array(z.string()),
       })
     ),
-    summary: z.string(),
+    recap: z.string(),
   }),
   practice: z.object({
     questions: z.array(
@@ -296,11 +303,26 @@ type SavePlanRow = {
   error?: string | null
 }
 
+function notesOutlineToMarkdown(notes: { outline: Array<{ heading: string; bullets: string[] }>; summary: string }) {
+  const sections = (Array.isArray(notes.outline) ? notes.outline : [])
+    .map((section) => {
+      const heading = String(section?.heading || 'Notes').trim()
+      const bullets = (Array.isArray(section?.bullets) ? section.bullets : [])
+        .map((b) => `- ${String(b || '').trim()}`)
+        .join('\n')
+      return `## ${heading}\n${bullets}`
+    })
+    .join('\n\n')
+  const recap = String(notes.summary || '').trim()
+  return recap ? `${sections}\n\n### Összefoglaló\n${recap}` : sections
+}
+
 async function savePlanToDbBestEffort(row: SavePlanRow) {
   try {
     const sb = createServerAdminClient()
     const safePlan = row.result.plan
     const safeNotes = row.result.notes
+    const safeNotesMarkdown = notesOutlineToMarkdown(safeNotes)
     const safeDaily = row.result.daily
     const safePractice = row.result.practice
     const safeMaterials = Array.isArray(row.materials) ? row.materials : []
@@ -326,7 +348,7 @@ async function savePlanToDbBestEffort(row: SavePlanRow) {
       daily_json: safeDaily,
       practice_json: safePractice,
       plan: safePlan,
-      notes: safeNotes,
+      notes: safeNotesMarkdown,
       daily: safeDaily,
       practice: safePractice,
     }
@@ -420,8 +442,8 @@ const planDailySchema = {
                   type: 'object',
                   additionalProperties: false,
                   properties: {
-                    start: { type: 'string' },
-                    end: { type: 'string' },
+                    start: { type: 'string', pattern: '^\\d{2}:\\d{2}$' },
+                    end: { type: 'string', pattern: '^\\d{2}:\\d{2}$' },
                     title: { type: 'string' },
                     type: { type: 'string', enum: ['study', 'break'] },
                     pomodoro: { type: 'boolean' },
@@ -449,7 +471,7 @@ const notesPracticeSchema = {
       type: 'object',
       additionalProperties: false,
       properties: {
-        outline: {
+        sections: {
           type: 'array',
           items: {
             type: 'object',
@@ -461,9 +483,9 @@ const notesPracticeSchema = {
             required: ['heading', 'bullets'],
           },
         },
-        summary: { type: 'string' },
+        recap: { type: 'string' },
       },
-      required: ['outline', 'summary'],
+      required: ['sections', 'recap'],
     },
     practice: {
       type: 'object',
@@ -489,6 +511,57 @@ const notesPracticeSchema = {
   },
   required: ['notes', 'practice'],
 } as const
+
+function notesCharCount(notes: { outline: Array<{ heading: string; bullets: string[] }>; summary: string }) {
+  const outlineChars = notes.outline.reduce(
+    (sum, section) =>
+      sum +
+      String(section.heading || '').length +
+      (Array.isArray(section.bullets) ? section.bullets.reduce((s, b) => s + String(b || '').length, 0) : 0),
+    0
+  )
+  return outlineChars + String(notes.summary || '').length
+}
+
+function ensureNotesLength(
+  notes: { outline: Array<{ heading: string; bullets: string[] }>; summary: string },
+  isHu: boolean
+) {
+  const out = {
+    outline: (Array.isArray(notes.outline) ? notes.outline : []).map((section) => ({
+      heading: String(section?.heading || '').trim() || (isHu ? 'Jegyzet' : 'Notes'),
+      bullets: (Array.isArray(section?.bullets) ? section.bullets : [])
+        .map((b) => String(b || '').trim())
+        .filter(Boolean),
+    })),
+    summary: String(notes.summary || '').trim(),
+  }
+  if (!out.outline.length) {
+    out.outline = [{ heading: isHu ? 'Összefoglaló' : 'Summary', bullets: [isHu ? 'Kulcspontok röviden.' : 'Key points briefly.'] }]
+  }
+
+  let total = notesCharCount(out)
+  if (total < NOTES_TARGET_MIN_CHARS) {
+    const pad = isHu
+      ? 'Részletezd: definíció, összefüggés, példa, tipikus hiba, gyors ellenőrzés.'
+      : 'Expand with definition, relation, example, common mistake, and quick check.'
+    let i = 0
+    while (total < NOTES_TARGET_MIN_CHARS && i < 120) {
+      const idx = i % out.outline.length
+      out.outline[idx].bullets.push(pad)
+      total = notesCharCount(out)
+      i += 1
+    }
+  }
+
+  if (total > NOTES_TARGET_MAX_CHARS) {
+    for (const section of out.outline) {
+      section.bullets = section.bullets.map((b) => (b.length > 220 ? `${b.slice(0, 220)}…` : b))
+    }
+    if (out.summary.length > 420) out.summary = `${out.summary.slice(0, 420)}…`
+  }
+  return out
+}
 
 /** GET /api/plan?id=... */
 export async function GET(req: Request) {
@@ -727,9 +800,10 @@ export async function POST(req: Request) {
       'You MUST incorporate extracted facts from uploaded images. Do not output generic content.',
       'If extracted material is empty, still generate a useful plan but explicitly mention this is a fallback context in notes summary.',
       'Notes are the primary value and must be an outline with headings + bullets. Hungarian for Hungarian prompts.',
-      'Notes must start with a short summary section of 3-5 bullets, then continue with at least 8 sections total, each with 5-10 bullets.',
+      'Notes schema uses notes.sections + notes.recap. Start with a short summary section (3-5 bullets), then continue with 6-10 sections total and 5-10 bullets each.',
       'Return 6-10 outline sections. Bullets should be one-line concrete facts/definitions/dates; use LaTeX in bullets for chemistry/math formulas.',
-      'Notes should target roughly 3500-4500 characters total while staying structured.',
+      `Notes should target ${NOTES_TARGET_MIN_CHARS}-${NOTES_TARGET_MAX_CHARS} characters total while staying structured.`,
+      'If draft notes are shorter than minimum, expand bullets and recap in the same response before returning JSON.',
       'Practice must include at least 8 short exercises with compact answers/explanations.',
     ].join('\n')
 
@@ -818,7 +892,7 @@ export async function POST(req: Request) {
                     plan: base.plan,
                     daily: base.daily,
                   })}\n\n` +
-                  'Generate only notes and practice keys. Keep structure strict and concise. Notes must be outline-first and around 4000 chars total.',
+                  `Generate only notes and practice keys. Notes must follow this exact shape: notes.sections[] and notes.recap. Keep notes in ${NOTES_TARGET_MIN_CHARS}-${NOTES_TARGET_MAX_CHARS} chars.`,
               },
             ],
             temperature: 0,
@@ -850,9 +924,22 @@ export async function POST(req: Request) {
         throw err
       }
       const validated = notesPracticeZod.parse(parsed)
+      const notesPrepared = ensureNotesLength(
+        {
+          outline: validated.notes.sections.map((section) => ({
+            heading: section.heading,
+            bullets: section.bullets,
+          })),
+          summary: validated.notes.recap,
+        },
+        isHu
+      )
       const merged = {
         ...base,
-        notes: validated.notes,
+        notes: {
+          outline: notesPrepared.outline,
+          summary: notesPrepared.summary,
+        },
         practice: validated.practice,
       }
       return normalizePlanDocument(merged, isHu, prompt)

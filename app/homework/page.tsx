@@ -9,12 +9,23 @@ import { MAX_HOMEWORK_IMAGES, MAX_HOMEWORK_PROMPT_CHARS } from '@/lib/limits'
 
 type HomeworkStep = {
   title: string
+  explanation?: string
   why: string
   work: string
+  result?: string
 }
 type HomeworkResult = {
   answer?: string
   steps?: HomeworkStep[]
+  homework_json?: {
+    steps?: Array<{
+      title?: string
+      explanation_short?: string
+      why?: string
+      result_hint?: string
+      next_check_question?: string
+    }>
+  }
   solutions?: Array<{
     question: string
     steps?: Array<{ title?: string; explanation?: string; work?: string; why?: string }>
@@ -40,19 +51,33 @@ function Inner() {
   const [result, setResult] = useState<HomeworkResult | null>(null)
   const [currentStep, setCurrentStep] = useState(0)
 
-  function normalizeSteps(steps: HomeworkStep[] | undefined) {
+  function normalizeSteps(steps: HomeworkStep[] | undefined): HomeworkStep[] {
     if (Array.isArray(steps) && steps.length) {
       return steps.map((step) => ({
         title: String(step?.title ?? '').trim() || 'Lépés',
+        explanation: String(step?.explanation ?? '').trim() || 'Rövid magyarázat a lépéshez.',
         work: String(step?.work ?? '').trim(),
         why: String(step?.why ?? '').trim() || 'Ez a lépés visz közelebb a megoldáshoz.',
+        result: String(step?.result ?? '').trim() || undefined,
       }))
     }
     return []
   }
 
-  function getDisplayData(json: HomeworkResult | null) {
+  function getDisplayData(json: HomeworkResult | null): { answer: string; steps: HomeworkStep[] } {
     if (!json) return { answer: '', steps: [] as HomeworkStep[] }
+    const schemaSteps = Array.isArray(json.homework_json?.steps)
+      ? json.homework_json!.steps!.map((step) => ({
+          title: String(step?.title ?? '').trim() || 'Lépés',
+          explanation: String(step?.explanation_short ?? '').trim() || 'Rövid magyarázat a lépéshez.',
+          work: String(step?.next_check_question ?? '').trim() || 'Végezd el a következő részlépést.',
+          why: String(step?.why ?? '').trim() || 'Ez a lépés visz közelebb a megoldáshoz.',
+          result: String(step?.result_hint ?? '').trim() || undefined,
+        }))
+      : []
+    if (schemaSteps.length) {
+      return { answer: String(json.answer ?? '').trim(), steps: schemaSteps }
+    }
     const directSteps = normalizeSteps(json.steps)
     if (directSteps.length) {
       return { answer: String(json.answer ?? '').trim(), steps: directSteps }
@@ -61,19 +86,23 @@ function Inner() {
     const legacySteps = Array.isArray(first?.steps)
       ? first!.steps!.map((step) => ({
           title: String(step?.title ?? '').trim() || 'Lépés',
+          explanation: String(step?.explanation ?? '').trim() || 'Rövid magyarázat a lépéshez.',
           work: String(step?.work ?? '').trim(),
           why: String(step?.why ?? step?.explanation ?? '').trim() || 'Ez a lépés visz közelebb a megoldáshoz.',
+          result: undefined,
         }))
       : []
     const fallbackSteps =
       Array.isArray(first?.solution_steps)
         ? first!.solution_steps!.map((s) =>
             typeof s === 'string'
-              ? { title: 'Lépés', work: s, why: 'Ez a lépés visz közelebb a megoldáshoz.' }
+              ? { title: 'Lépés', explanation: 'Rövid magyarázat a lépéshez.', work: s, why: 'Ez a lépés visz közelebb a megoldáshoz.', result: undefined }
               : {
                   title: 'Lépés',
+                  explanation: 'Rövid magyarázat a lépéshez.',
                   work: String(s?.step ?? '').trim(),
                   why: String(s?.why ?? '').trim() || 'Ez a lépés visz közelebb a megoldáshoz.',
+                  result: undefined,
                 }
           )
         : []
@@ -157,9 +186,19 @@ function Inner() {
                     <div className="text-xs text-white/50">Lépés {current + 1}/{steps.length}</div>
                     <div className="mt-1 font-semibold text-white/90">{step.title}</div>
                     <div className="mt-2">{step.work}</div>
+                    {step.explanation ? (
+                      <div className="mt-2 text-sm text-white/65">
+                        <span className="text-white/45">Magyarázat:</span> {step.explanation}
+                      </div>
+                    ) : null}
                     <div className="mt-2 text-sm text-white/65">
                       <span className="text-white/45">Miért?</span> {step.why || 'Ez a lépés visz közelebb a végeredményhez.'}
                     </div>
+                    {step.result ? (
+                      <div className="mt-2 text-sm text-white/65">
+                        <span className="text-white/45">Rész-eredmény:</span> {step.result}
+                      </div>
+                    ) : null}
                   </div>
                 ) : null}
                 <div className="mt-3 flex gap-2">

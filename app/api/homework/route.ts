@@ -20,8 +20,10 @@ const homeworkResponseSchema = z.object({
   steps: z.array(
     z.object({
       title: z.string(),
+      explanation: z.string(),
       why: z.string(),
       work: z.string(),
+      result: z.string().optional(),
     })
   ),
 })
@@ -38,10 +40,12 @@ const homeworkSchema = {
         additionalProperties: false,
         properties: {
           title: { type: 'string' },
+          explanation: { type: 'string' },
           why: { type: 'string' },
           work: { type: 'string' },
+          result: { type: 'string' },
         },
-        required: ['title', 'why', 'work'],
+        required: ['title', 'explanation', 'why', 'work'],
       },
     },
   },
@@ -58,18 +62,24 @@ function fallbackHomework(prompt: string) {
     steps: [
       {
         title: 'Adatok kiírása',
+        explanation: 'Gyűjtsd össze az ismert adatokat és a keresett mennyiséget.',
         work: `Írd fel külön: adott, keresett, képlet. ${prompt ? `Feladat: ${prompt}` : ''}`.trim(),
         why: 'Ez csökkenti a téves képletválasztás esélyét.',
+        result: undefined,
       },
       {
         title: 'Képlet kiválasztása',
+        explanation: 'Válaszd ki a feladattípushoz tartozó alapképletet.',
         work: 'Válaszd ki a feladattípushoz tartozó alapképletet, majd helyettesítsd be az adatokat.',
         why: 'A helyes képletből vezethető le biztosan a jó eredmény.',
+        result: undefined,
       },
       {
         title: 'Számolás és ellenőrzés',
+        explanation: 'Számolj pontosan, majd ellenőrizd az előjeleket és a mértékegységet.',
         work: 'Számold ki a végeredményt, majd ellenőrizd az előjeleket és a mértékegységet.',
         why: 'A gyors ellenőrzés kiszűri a tipikus számolási hibákat.',
+        result: undefined,
       },
     ],
   }
@@ -79,12 +89,15 @@ function ensureHomeworkShape(data: z.infer<typeof homeworkResponseSchema>) {
   const normalizedSteps = (Array.isArray(data.steps) ? data.steps : [])
     .map((s) => ({
       title: String(s?.title || '').trim(),
+      explanation: String(s?.explanation || '').trim(),
       work: String(s?.work || '').trim(),
       why: String(s?.why || '').trim(),
+      result: String(s?.result || '').trim() || undefined,
     }))
     .filter((s) => s.title && s.work)
     .map((step, i) => ({
       ...step,
+      explanation: step.explanation || 'Rövid magyarázat a lépéshez.',
       why: step.why || (i < 2 ? 'Ez a lépés szükséges a helyes módszer kiválasztásához.' : 'Ez visz közelebb a megoldáshoz.'),
     }))
 
@@ -102,7 +115,7 @@ function toLegacyHomeworkResponse(data: ReturnType<typeof ensureHomeworkShape>) 
         question: 'Házi feladat',
         steps: data.steps.map((step) => ({
           title: step.title,
-          explanation: '',
+          explanation: step.explanation,
           work: step.work,
           why: step.why,
         })),
@@ -183,7 +196,7 @@ export async function POST(req: Request) {
             content:
               [
                 'Adj reszletes, lepesrol lepesre magyarazatot kozepiskolai szinten.',
-                'Valasz schema: { answer: string, steps: [{ title, why, work }] }.',
+                'Valasz schema: { answer: string, steps: [{ title, explanation, why, work, result? }] }.',
                 'Minden lépésnek legyen címe, rövid "miért" magyarázata és konkrét munkarésze (képlet/számolás).',
                 'Az első 1-2 lépésnél a why legyen különösen egyértelmű és rövid.',
                 'Csak érvényes JSON-t adj vissza.',
@@ -246,6 +259,15 @@ export async function POST(req: Request) {
       ...toLegacyHomeworkResponse(normalized),
       answer: normalized.answer,
       steps: normalized.steps,
+      homework_json: {
+        steps: normalized.steps.map((step) => ({
+          title: step.title,
+          explanation_short: step.explanation,
+          why: step.why,
+          result_hint: step.result ?? '',
+          next_check_question: 'Mi a következő szükséges adat vagy átalakítás?',
+        })),
+      },
     })
   } catch (e: any) {
     return NextResponse.json({ error: { code: 'HOMEWORK_FAILED', message: String(e?.message || 'Server error') } }, { status: 500 })

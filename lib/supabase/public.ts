@@ -1,26 +1,44 @@
 import type { SupabaseClient } from '@supabase/supabase-js'
-import { createBrowserClient } from '@/lib/supabase/browser'
+import { createBrowserClientSafe, getSupabaseMissingEnvMessage } from '@/lib/supabase/client'
 
-const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
-const supabaseAnon = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
+let configuredClient: SupabaseClient | null = createBrowserClientSafe()
+export const isSupabaseConfigured = Boolean(configuredClient)
 
-let client: SupabaseClient | null = null
-
-if (supabaseUrl && supabaseAnon) {
-  client = createBrowserClient()
-} else {
-  // Do not throw at build time. Client routes will fail at runtime if used.
-  console.warn('Supabase env vars missing: NEXT_PUBLIC_SUPABASE_URL / NEXT_PUBLIC_SUPABASE_ANON_KEY')
+export function getPublicSupabase(): SupabaseClient | null {
+  return configuredClient
 }
 
-export const supabasePublic: SupabaseClient =
-  client ??
-  (new Proxy({} as SupabaseClient, {
-    get() {
-      throw new Error('Auth is not configured (missing Supabase env vars).')
+function buildNoopClient(): SupabaseClient {
+  const missingError = { message: getSupabaseMissingEnvMessage() } as any
+  const noSession = { data: { session: null }, error: missingError } as any
+  return {
+    auth: {
+      getSession: async () => noSession,
+      getUser: async () => ({ data: { user: null }, error: missingError }),
+      signInWithPassword: async () => ({ data: { user: null, session: null }, error: missingError }),
+      signUp: async () => ({ data: { user: null, session: null }, error: missingError }),
+      signOut: async () => ({ error: null }),
+      resend: async () => ({ data: null, error: missingError }),
+      onAuthStateChange: () => ({ data: { subscription: { unsubscribe() {} } } }),
     },
-  }) as SupabaseClient)
+    storage: {
+      from: () => ({
+        upload: async () => ({ data: null, error: missingError }),
+        download: async () => ({ data: null, error: missingError }),
+      }),
+    },
+  } as any
+}
+
+if (!configuredClient) {
+  if (typeof window !== 'undefined') {
+    console.warn(getSupabaseMissingEnvMessage())
+  }
+  configuredClient = buildNoopClient()
+}
+
+export const supabasePublic: SupabaseClient = configuredClient
 
 export function createPublicClient() {
-  return createBrowserClient()
+  return createBrowserClientSafe() ?? supabasePublic
 }

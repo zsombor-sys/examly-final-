@@ -4,6 +4,7 @@ import Link from 'next/link'
 import { useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { supabase } from '@/lib/supabaseClient'
+import { getSupabaseMissingEnvMessage } from '@/lib/supabase/browser'
 import { Button, Card, Input } from '@/components/ui'
 
 function safeNext(nextValue: string | null) {
@@ -47,7 +48,7 @@ export default function SignupPage() {
     console.log('AUTH_START', { email: emailNormalized })
 
     if (!supabase) {
-      setError('Auth is not configured (missing Supabase env vars).')
+      setError(getSupabaseMissingEnvMessage())
       return
     }
     if (fullName.trim().length < 2) {
@@ -83,7 +84,13 @@ export default function SignupPage() {
         return
       }
       if (data?.session) {
-        router.replace(nextSafe || '/plan')
+        const target = nextSafe || '/plan'
+        router.replace(target)
+        window.setTimeout(() => {
+          if (typeof window !== 'undefined' && window.location.pathname !== target) {
+            window.location.assign(target)
+          }
+        }, 800)
         return
       }
       const signInResult = await supabase.auth.signInWithPassword({
@@ -100,7 +107,13 @@ export default function SignupPage() {
       }
       const signInSession = await supabase.auth.getSession()
       if (signInSession?.data?.session) {
-        router.replace(nextSafe || '/plan')
+        const target = nextSafe || '/plan'
+        router.replace(target)
+        window.setTimeout(() => {
+          if (typeof window !== 'undefined' && window.location.pathname !== target) {
+            window.location.assign(target)
+          }
+        }, 800)
         return
       }
       setError(NO_SESSION_MESSAGE)

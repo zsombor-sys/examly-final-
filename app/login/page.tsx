@@ -1,8 +1,8 @@
 'use client'
 
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useRouter } from 'next/navigation'
-import { createBrowserClient } from '@/lib/supabase/browser'
+import { createBrowserClientSafe, getSupabaseMissingEnvMessage } from '@/lib/supabase/browser'
 
 const DEBUG_AUTH = process.env.NEXT_PUBLIC_AUTH_DEBUG === '1'
 
@@ -35,18 +35,19 @@ function clearAuthStorage() {
 
 export default function LoginPage() {
   const router = useRouter()
-  const supabase = useMemo(() => {
-    try {
-      return createBrowserClient()
-    } catch {
-      return null
-    }
-  }, [])
+  const supabase = useMemo(() => createBrowserClientSafe(), [])
 
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const redirectedRef = useRef(false)
+
+  useEffect(() => {
+    const urlMessage =
+      typeof window !== 'undefined' ? new URLSearchParams(window.location.search).get('message') : null
+    if (urlMessage) setError(urlMessage)
+  }, [])
 
   useEffect(() => {
     if (!supabase) return
@@ -58,16 +59,32 @@ export default function LoginPage() {
 
     void supabase.auth.getSession().then((sessionCheck) => {
       if (!active) return
-      if (sessionCheck?.data?.session) {
-        router.replace(nextSafe || '/plan')
+      if (sessionCheck?.data?.session && !redirectedRef.current) {
+        redirectedRef.current = true
+        const target = nextSafe || '/plan'
+        router.replace(target)
+        router.refresh()
+        window.setTimeout(() => {
+          if (typeof window !== 'undefined' && window.location.pathname !== target) {
+            window.location.assign(target)
+          }
+        }, 800)
       }
     })
 
     const {
       data: { subscription },
     } = supabase.auth.onAuthStateChange((event) => {
-      if (event === 'SIGNED_IN') {
-        router.replace(nextSafe || '/plan')
+      if (event === 'SIGNED_IN' && !redirectedRef.current) {
+        redirectedRef.current = true
+        const target = nextSafe || '/plan'
+        router.replace(target)
+        router.refresh()
+        window.setTimeout(() => {
+          if (typeof window !== 'undefined' && window.location.pathname !== target) {
+            window.location.assign(target)
+          }
+        }, 800)
       }
     })
 
@@ -85,7 +102,7 @@ export default function LoginPage() {
     )
 
     if (!supabase) {
-      setError('Auth is not configured (missing Supabase env).')
+      setError(getSupabaseMissingEnvMessage())
       return
     }
 
@@ -116,7 +133,14 @@ export default function LoginPage() {
 
       if (DEBUG_AUTH) console.log('AUTH_RESULT', { userId: data?.user?.id ?? null })
       const target = nextSafe || '/plan'
+      redirectedRef.current = true
       router.replace(target)
+      router.refresh()
+      window.setTimeout(() => {
+        if (typeof window !== 'undefined' && window.location.pathname !== target) {
+          window.location.assign(target)
+        }
+      }, 800)
       return
     } catch (err: any) {
       const msg = String(err?.message || 'Login failed')
@@ -152,6 +176,7 @@ export default function LoginPage() {
           required
         />
         <button
+          id="login-submit"
           type="submit"
           disabled={loading}
           className="w-full rounded-xl bg-white px-4 py-2 font-medium text-black disabled:opacity-60"

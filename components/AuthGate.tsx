@@ -3,6 +3,8 @@
 import { useEffect, useState } from 'react'
 import { usePathname, useRouter } from 'next/navigation'
 import { supabase } from '@/lib/supabaseClient'
+import { isSupabaseConfigured } from '@/lib/supabase/public'
+import { getSupabaseMissingEnvMessage } from '@/lib/supabase/browser'
 import { authedFetch } from '@/lib/authClient'
 import { useAuthState } from '@/components/AuthProvider'
 
@@ -19,6 +21,11 @@ type EntitlementState = {
 }
 
 const DEBUG_AUTH = process.env.NEXT_PUBLIC_AUTH_DEBUG === '1'
+
+function isInvalidRefreshTokenError(message: string) {
+  const msg = String(message || '').toLowerCase()
+  return msg.includes('invalid refresh token') || msg.includes('refresh token not found')
+}
 
 function isGenerationPath(pathname: string | null) {
   const p = pathname || ''
@@ -67,6 +74,14 @@ export default function AuthGate({
       if (!supabase) {
         // auth not configured -> let app render
         onEntitlement?.({ credits: null, entitlementOk: null })
+        setError(getSupabaseMissingEnvMessage())
+        if (!alive) return
+        setReady(true)
+        return
+      }
+      if (!isSupabaseConfigured) {
+        onEntitlement?.({ credits: null, entitlementOk: null })
+        setError(getSupabaseMissingEnvMessage())
         if (!alive) return
         setReady(true)
         return
@@ -80,6 +95,13 @@ export default function AuthGate({
 
       const search = typeof window !== 'undefined' ? window.location.search || '' : ''
       const next = safeNext(`${pathname || '/plan'}${search}`)
+
+      const sessionState = await supabase.auth.getSession()
+      if (sessionState.error && isInvalidRefreshTokenError(sessionState.error.message)) {
+        await supabase.auth.signOut({ scope: 'local' })
+        router.replace(`/login?next=${encodeURIComponent(next)}&message=${encodeURIComponent('Session expired. Please sign in again.')}`)
+        return
+      }
 
       if (!session) {
         if (DEBUG_AUTH) console.log('AuthGate: no session', { path: pathname })
@@ -127,7 +149,18 @@ export default function AuthGate({
     }
   }, [router, pathname, requireEntitlement, onEntitlement, authReady, session])
 
-  if (ready) return <>{children}</>
+  if (ready) {
+    return (
+      <>
+        {error ? (
+          <div className="mx-auto mt-3 max-w-2xl rounded-lg border border-amber-400/40 bg-amber-500/10 px-3 py-2 text-sm text-amber-100">
+            {error}
+          </div>
+        ) : null}
+        {children}
+      </>
+    )
+  }
 
   return (
     <div className="mx-auto max-w-2xl px-4 py-16 text-center">

@@ -21,7 +21,7 @@ export default function MarkdownMath({ content }: { content: string }) {
     <div className="text-white/80 leading-relaxed">
       <ReactMarkdown
         remarkPlugins={[remarkMath]}
-        rehypePlugins={[rehypeKatex]}
+        rehypePlugins={[[rehypeKatex, { strict: 'warn', trust: true, throwOnError: false }]]}
         components={{
           h1: ({ children }) => <h1 className="mt-4 text-2xl font-semibold text-white">{children}</h1>,
           h2: ({ children }) => <h2 className="mt-4 text-xl font-semibold text-white">{children}</h2>,

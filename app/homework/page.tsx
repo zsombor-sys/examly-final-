@@ -105,9 +105,6 @@ function Inner() {
     t = t.replace(/\$\$+$/, '').trim()
     t = t.replace(/\$$/, '').trim()
 
-    // stabilize line breaks for KaTeX
-    t = t.replace(/\\\\/g, '\\newline ')
-
     return t || null
   }
 

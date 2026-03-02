@@ -14,6 +14,15 @@ const NOTES_MIN_CHARS = 2000
 const NOTES_MAX_CHARS = 3000
 const NOTES_MAX_CALLS = 3
 const NOTES_MAX_TOKENS = 2200
+const FORBIDDEN_TEMPLATE_PATTERNS: RegExp[] = [
+  /rövid definíció/i,
+  /mini példa/i,
+  /quick summary/i,
+  /main goal:\s*/i,
+  /concepts?\s*:\s*short definition/i,
+  /short definition/i,
+  /template/i,
+]
 
 type VisionImage = { mime: string; b64: string }
 
@@ -73,6 +82,11 @@ function normalizeBase64Image(input: string): VisionImage {
   const dataUrl = /^data:(.+?);base64,(.+)$/i.exec(value)
   if (dataUrl) return { mime: dataUrl[1], b64: dataUrl[2] }
   return { mime: 'image/png', b64: value }
+}
+
+function hasForbiddenTemplateText(text: string) {
+  const normalized = String(text || '')
+  return FORBIDDEN_TEMPLATE_PATTERNS.some((pattern) => pattern.test(normalized))
 }
 
 async function parseInput(req: Request): Promise<{ prompt: string; language?: SupportedLanguage; images: VisionImage[] }> {
@@ -159,29 +173,41 @@ async function generateChunk(params: {
   previous: string
   language: SupportedLanguage
   continuation: boolean
+  hasImages: boolean
   extractedText: string
   keyTerms: string[]
 }) {
-  const { client, prompt, previous, language, continuation, extractedText, keyTerms } = params
+  const { client, prompt, previous, language, continuation, hasImages, extractedText, keyTerms } = params
   const langInstruction = language === 'hu' ? 'Respond in Hungarian.' : 'Respond in English.'
 
   const system = [
     langInstruction,
     'Write detailed study notes in Markdown as continuous, readable learning material.',
+    'Use clear section headings in Markdown format (## Heading).',
+    'Write mostly short, coherent paragraphs with logical flow.',
+    'Do not output template bullets or placeholder skeletons.',
     `Target: at least ${NOTES_MIN_CHARS} and at most ${NOTES_MAX_CHARS} visible characters.`,
     'Required structure:',
     '- Title',
     '- Short intro paragraph (2-4 sentences)',
     '- Sections with REAL content: Definitions, Deep explanation, Worked examples, Typical tasks and solving approach, Common mistakes, Short summary',
-    '- Include at least 2 worked mini examples',
+    '- Include at least 2 worked mini examples when possible',
     '- Include a practice questions section',
     'Never write placeholder text like "rövid definíció" or "mini példa".',
+    'Never output labels without content.',
+    'Forbidden examples: "short definition", "mini example", "main goal: focus on key concepts".',
     'If details are missing, infer likely educational content from the topic and explain it concretely.',
     'Write as if this is the only material the student will use.',
     'Whenever you write mathematics, you MUST use LaTeX.',
     'Use ONLY \\( \\) for inline math and \\[ \\] for display math.',
     'Do NOT use $...$.',
     'Do NOT write math as plain text.',
+    hasImages
+      ? 'Images were uploaded: use the extracted image material as the primary source of truth for every section.'
+      : 'No images were uploaded: build complete notes from the topic prompt.',
+    hasImages
+      ? 'Do not drift into generic filler; anchor each section to the extracted material.'
+      : 'Do not produce generic filler.',
   ].join('\n')
 
   const user = continuation
@@ -197,9 +223,14 @@ async function generateChunk(params: {
     : [
         language === 'hu' ? 'Felhasználói kérés:' : 'User request:',
         prompt,
-        extractedText ? (language === 'hu' ? 'Kinyert anyag a képekből:' : 'Extracted content from images:') : '',
+        extractedText ? (language === 'hu' ? 'Kinyert anyag a képekből (elsődleges forrás):' : 'Extracted content from images (primary source):') : '',
         extractedText,
         keyTerms.length ? `${language === 'hu' ? 'Kulcskifejezések' : 'Key terms'}: ${keyTerms.join(', ')}` : '',
+        hasImages
+          ? language === 'hu'
+            ? 'Kizárólag a fenti kinyert tartalomra építs; ne használj sablonszöveget.'
+            : 'Base the note on the extracted content above; do not use template wording.'
+          : '',
       ]
         .filter(Boolean)
         .join('\n\n')
@@ -243,18 +274,34 @@ export async function POST(req: Request) {
     })
 
     let markdown = ''
-    for (let i = 0; i < NOTES_MAX_CALLS; i += 1) {
+    let calls = 0
+    while (calls < NOTES_MAX_CALLS) {
       const chunk = await generateChunk({
         client,
         prompt: input.prompt,
         previous: markdown,
         language,
-        continuation: i > 0,
+        continuation: markdown.length > 0,
+        hasImages: input.images.length > 0,
         extractedText: extracted.extracted_text,
         keyTerms: extracted.key_terms,
       })
+      calls += 1
+
+      // Discard templated chunks to prevent placeholder content from entering final notes.
+      if (hasForbiddenTemplateText(chunk)) {
+        continue
+      }
+
       markdown = markdown ? `${markdown}\n\n${chunk}` : chunk
-      if (visibleLength(markdown) >= NOTES_MIN_CHARS) break
+
+      if (visibleLength(markdown) >= NOTES_MIN_CHARS) {
+        break
+      }
+    }
+
+    if (!markdown) {
+      throw new Error('Notes generation produced only invalid template output')
     }
 
     const finalMarkdown = trimMarkdownToVisibleMax(markdown, NOTES_MAX_CHARS)

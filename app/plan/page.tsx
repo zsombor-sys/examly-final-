@@ -299,6 +299,49 @@ function getRequestId(source: any): string | null {
   return typeof maybeId === 'string' && maybeId ? maybeId : null
 }
 
+function toPlanResultFromGenerateApi(payload: any): PlanResult {
+  const structured = payload?.structured ?? {}
+  const blocks = Array.isArray(structured?.plan?.blocks) ? structured.plan.blocks : []
+  const noteSections = Array.isArray(structured?.notes?.sections) ? structured.notes.sections : []
+  const noteRecap = String(structured?.notes?.recap ?? '').trim()
+  const homeworkTasks = Array.isArray(structured?.homework?.tasks) ? structured.homework.tasks : []
+
+  return {
+    title: String(structured?.title ?? 'Study plan'),
+    language: 'en',
+    summary: String(structured?.summary ?? '').trim(),
+    plan: {
+      blocks: blocks.map((b: any) => ({
+        title: String(b?.title ?? '').trim() || 'Study block',
+        description: String(b?.description ?? '').trim(),
+        duration_minutes: Math.max(10, Math.min(180, Number(b?.duration_minutes) || 30)),
+      })),
+    },
+    notes: {
+      sections: noteSections.map((s: any) => ({
+        heading: String(s?.heading ?? '').trim() || 'Notes',
+        bullets: Array.isArray(s?.bullets) ? s.bullets.map((x: any) => String(x ?? '').trim()).filter(Boolean) : [],
+      })),
+      summary: noteRecap,
+    },
+    practice: {
+      questions: homeworkTasks.map((t: any) => ({
+        q: String(t?.title ?? '').trim() || 'Task',
+        choices: [],
+        a: Array.isArray(t?.steps)
+          ? t.steps.map((s: any, idx: number) => `${idx + 1}. ${String(s?.explanation ?? '').trim()}`).join('\n')
+          : '',
+        explanation: Array.isArray(t?.steps)
+          ? t.steps
+              .map((s: any) => String(s?.result ?? '').trim())
+              .filter(Boolean)
+              .join('\n')
+          : '',
+      })),
+    },
+  }
+}
+
 export default function PlanPage() {
   const [entitlement, setEntitlement] = useState<{ credits: number | null; entitlementOk: boolean | null }>({
     credits: null,
@@ -574,7 +617,7 @@ function Inner({ entitlement }: { entitlement: { credits: number | null; entitle
     }
   }
 
-  async function generate() {
+  async function handleGenerate() {
     setError(null)
     if (prompt.trim().length > MAX_PLAN_PROMPT_CHARS) {
       setError(`Prompt too long (max ${MAX_PLAN_PROMPT_CHARS} characters).`)
@@ -588,6 +631,22 @@ function Inner({ entitlement }: { entitlement: { credits: number | null; entitle
     setLoading(true)
     setIsGenerating(true)
     try {
+      if (files.length === 0) {
+        const promptToSend = prompt.trim() || 'Create a compact study plan with notes and homework tasks.'
+        const res = await authedFetch('/api/generate', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ mode: 'plan', prompt: promptToSend }),
+        })
+        const data = await res.json().catch(() => ({} as any))
+        if (!res.ok) throw new Error(data?.error ?? `Generation failed (${res.status})`)
+        if (data?.error) throw new Error(String(data.error))
+        setResult(toPlanResultFromGenerateApi(data))
+        setSelectedId(null)
+        setTab('plan')
+        return
+      }
+
       await uploadMaterials()
       const form = new FormData()
       const promptToSend =
@@ -826,7 +885,7 @@ function Inner({ entitlement }: { entitlement: { credits: number | null; entitle
             </div>
           ) : null}
 
-          <Button className="mt-4 w-full" onClick={generate} disabled={!canGenerate}>
+          <Button className="mt-4 w-full" onClick={handleGenerate} disabled={!canGenerate}>
             {loading ? (
               <span className="inline-flex items-center gap-2">
                 <Loader2 className="animate-spin" size={16} />

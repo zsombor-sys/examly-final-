@@ -1,6 +1,6 @@
 'use client'
 
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import Link from 'next/link'
 import AuthGate from '@/components/AuthGate'
 import ClientAuthGuard from '@/components/ClientAuthGuard'
@@ -8,16 +8,22 @@ import { Button, Textarea } from '@/components/ui'
 import { authedFetch } from '@/lib/authClient'
 import { MAX_HOMEWORK_IMAGES, MAX_HOMEWORK_PROMPT_CHARS } from '@/lib/limits'
 
-type HomeworkStep = {
+type HomeworkTask = {
   title: string
-  explanation?: string
-  why: string
-  work: string
-  result?: string
+  steps: Array<{ explanation: string; result: string }>
 }
+
 type HomeworkResult = {
+  output?: string
   answer?: string
-  steps?: HomeworkStep[]
+  tasks?: HomeworkTask[]
+  steps?: Array<{
+    title: string
+    explanation?: string
+    why: string
+    work: string
+    result?: string
+  }>
   homework_json?: {
     steps?: Array<{
       title?: string
@@ -52,73 +58,60 @@ function Inner() {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [result, setResult] = useState<HomeworkResult | null>(null)
-  const [currentStep, setCurrentStep] = useState(0)
+  const [expandedTask, setExpandedTask] = useState<number | null>(0)
+  const [stepProgress, setStepProgress] = useState<Record<number, number>>({})
 
-  function normalizeSteps(steps: HomeworkStep[] | undefined): HomeworkStep[] {
-    if (Array.isArray(steps) && steps.length) {
-      return steps.map((step) => ({
-        title: String(step?.title ?? '').trim() || 'Lépés',
-        explanation: String(step?.explanation ?? '').trim() || 'Rövid magyarázat a lépéshez.',
-        work: String(step?.work ?? '').trim(),
-        why: String(step?.why ?? '').trim() || 'Ez a lépés visz közelebb a megoldáshoz.',
-        result: String(step?.result ?? '').trim() || undefined,
-      }))
-    }
-    return []
-  }
-
-  function getDisplayData(json: HomeworkResult | null): { answer: string; steps: HomeworkStep[] } {
-    if (!json) return { answer: '', steps: [] as HomeworkStep[] }
-    const schemaSteps = Array.isArray(json.homework_json?.steps)
-      ? json.homework_json!.steps!.map((step) => ({
-          title: String(step?.title ?? '').trim() || 'Lépés',
-          explanation: String(step?.explanation_short ?? '').trim() || 'Rövid magyarázat a lépéshez.',
-          work: String(step?.next_check_question ?? '').trim() || 'Végezd el a következő részlépést.',
-          why: String(step?.why ?? '').trim() || 'Ez a lépés visz közelebb a megoldáshoz.',
-          result: String(step?.result_hint ?? '').trim() || undefined,
+  const tasks = useMemo(() => {
+    if (!result) return [] as HomeworkTask[]
+    if (Array.isArray(result.tasks) && result.tasks.length > 0) {
+      return result.tasks
+        .map((task) => ({
+          title: String(task?.title ?? '').trim() || 'Task',
+          steps: Array.isArray(task?.steps)
+            ? task.steps
+                .map((step) => ({
+                  explanation: String(step?.explanation ?? '').trim(),
+                  result: String(step?.result ?? '').trim(),
+                }))
+                .filter((step) => step.explanation)
+            : [],
         }))
+        .filter((task) => task.steps.length > 0)
+    }
+
+    const schemaSteps = Array.isArray(result.homework_json?.steps)
+      ? result.homework_json.steps
+          .map((step) => ({
+            explanation: String(step?.explanation_short ?? step?.next_check_question ?? '').trim(),
+            result: String(step?.result_hint ?? '').trim(),
+          }))
+          .filter((step) => step.explanation)
       : []
     if (schemaSteps.length) {
-      return { answer: String(json.answer ?? '').trim(), steps: schemaSteps }
+      return [{ title: 'Task 1', steps: schemaSteps }]
     }
-    const directSteps = normalizeSteps(json.steps)
-    if (directSteps.length) {
-      return { answer: String(json.answer ?? '').trim(), steps: directSteps }
-    }
-    const first = Array.isArray(json.solutions) ? json.solutions[0] : null
-    const legacySteps = Array.isArray(first?.steps)
-      ? first!.steps!.map((step) => ({
-          title: String(step?.title ?? '').trim() || 'Lépés',
-          explanation: String(step?.explanation ?? '').trim() || 'Rövid magyarázat a lépéshez.',
-          work: String(step?.work ?? '').trim(),
-          why: String(step?.why ?? step?.explanation ?? '').trim() || 'Ez a lépés visz közelebb a megoldáshoz.',
-          result: undefined,
-        }))
+
+    const directSteps = Array.isArray(result.steps)
+      ? result.steps
+          .map((step) => ({
+            explanation: String(step?.explanation ?? step?.work ?? '').trim(),
+            result: String(step?.result ?? '').trim(),
+          }))
+          .filter((step) => step.explanation)
       : []
-    const fallbackSteps =
-      Array.isArray(first?.solution_steps)
-        ? first!.solution_steps!.map((s) =>
-            typeof s === 'string'
-              ? { title: 'Lépés', explanation: 'Rövid magyarázat a lépéshez.', work: s, why: 'Ez a lépés visz közelebb a megoldáshoz.', result: undefined }
-              : {
-                  title: 'Lépés',
-                  explanation: 'Rövid magyarázat a lépéshez.',
-                  work: String(s?.step ?? '').trim(),
-                  why: String(s?.why ?? '').trim() || 'Ez a lépés visz közelebb a megoldáshoz.',
-                  result: undefined,
-                }
-          )
-        : []
-    return {
-      answer: String(json.answer ?? first?.final_answer ?? '').trim(),
-      steps: legacySteps.length ? legacySteps : fallbackSteps,
+    if (directSteps.length) {
+      return [{ title: 'Task 1', steps: directSteps }]
     }
-  }
+
+    return [] as HomeworkTask[]
+  }, [result])
 
   async function run() {
     setError(null)
     setResult(null)
-    setCurrentStep(0)
+    setExpandedTask(0)
+    setStepProgress({})
+
     if (prompt.trim().length > MAX_HOMEWORK_PROMPT_CHARS) {
       setError(`Prompt too long (max ${MAX_HOMEWORK_PROMPT_CHARS}).`)
       return
@@ -127,11 +120,13 @@ function Inner() {
       setError(`Max ${MAX_HOMEWORK_IMAGES} images.`)
       return
     }
+
     setLoading(true)
     try {
       const fd = new FormData()
       fd.append('prompt', prompt.trim())
       for (const f of files.slice(0, MAX_HOMEWORK_IMAGES)) fd.append('files', f)
+
       const res = await authedFetch('/api/homework', { method: 'POST', body: fd })
       const json = await res.json().catch(() => ({} as any))
       if (!res.ok) throw new Error(json?.error?.message ?? json?.error ?? 'Request failed')
@@ -153,9 +148,10 @@ function Inner() {
           value={prompt}
           onChange={(e) => setPrompt(e.target.value)}
           maxLength={MAX_HOMEWORK_PROMPT_CHARS}
-          placeholder="Írd be a feladatot (max 500 karakter), vagy tölts fel képet."
+          placeholder="Describe the homework, or upload an image of the sheet."
         />
-        <div className="text-xs text-white/60">{prompt.length}/{MAX_HOMEWORK_PROMPT_CHARS} • max {MAX_HOMEWORK_IMAGES} kép • 1 kredit</div>
+        <div className="text-xs text-white/60">{prompt.length}/{MAX_HOMEWORK_PROMPT_CHARS} • max {MAX_HOMEWORK_IMAGES} image(s) • 1 credit</div>
+
         <input
           type="file"
           accept="image/*"
@@ -170,57 +166,63 @@ function Inner() {
             setError(null)
           }}
         />
-        <Button onClick={run} disabled={loading}>{loading ? 'Dolgozom…' : 'Megoldás készítése'}</Button>
+
+        <Button onClick={run} disabled={loading}>{loading ? 'Generating…' : 'Generate solution'}</Button>
         {error ? <div className="text-sm text-red-400">{error}</div> : null}
       </div>
 
-      {result ? (
+      {tasks.length > 0 ? (
         <div className="space-y-4">
-          {(() => {
-            const data = getDisplayData(result)
-            const steps = data.steps
-            const current = Math.max(0, Math.min(steps.length - 1, currentStep))
-            const step = steps[current]
+          {tasks.map((task, taskIndex) => {
+            const progress = Math.max(0, Math.min(task.steps.length, stepProgress[taskIndex] ?? 1))
+            const visibleSteps = task.steps.slice(0, progress)
+            const isOpen = expandedTask === taskIndex
+
             return (
-              <section className="rounded-3xl border border-white/10 bg-white/[0.02] p-5">
-                <div className="text-sm text-white/60">Lépések</div>
-                {step ? (
-                  <div className="mt-2 rounded-2xl border border-white/10 bg-black/30 p-4 text-white/80">
-                    <div className="text-xs text-white/50">Lépés {current + 1}/{steps.length}</div>
-                    <div className="mt-1 font-semibold text-white/90">{step.title}</div>
-                    <div className="mt-2">{step.work}</div>
-                    {step.explanation ? (
-                      <div className="mt-2 text-sm text-white/65">
-                        <span className="text-white/45">Magyarázat:</span> {step.explanation}
+              <section key={`${task.title}-${taskIndex}`} className="rounded-3xl border border-white/10 bg-white/[0.02] p-5">
+                <button
+                  type="button"
+                  className="w-full text-left"
+                  onClick={() => setExpandedTask(isOpen ? null : taskIndex)}
+                >
+                  <div className="text-xs uppercase tracking-[0.18em] text-white/55">Task {taskIndex + 1}</div>
+                  <h3 className="mt-1 text-lg font-semibold text-white/90">{task.title}</h3>
+                </button>
+
+                {isOpen ? (
+                  <div className="mt-4 space-y-3">
+                    {visibleSteps.map((step, stepIndex) => (
+                      <div key={`${taskIndex}-${stepIndex}`} className="rounded-2xl border border-white/10 bg-black/30 p-4 text-white/85">
+                        <div className="text-xs text-white/50">Step {stepIndex + 1}</div>
+                        <div className="mt-1">{step.explanation}</div>
+                        {step.result ? (
+                          <div className="mt-2 text-sm text-white/65">
+                            <span className="text-white/45">Result:</span> {step.result}
+                          </div>
+                        ) : null}
                       </div>
-                    ) : null}
-                    <div className="mt-2 text-sm text-white/65">
-                      <span className="text-white/45">Miért?</span> {step.why || 'Ez a lépés visz közelebb a végeredményhez.'}
+                    ))}
+
+                    <div className="flex gap-2">
+                      <Button
+                        variant="ghost"
+                        disabled={progress <= 1}
+                        onClick={() => setStepProgress((curr) => ({ ...curr, [taskIndex]: Math.max(1, progress - 1) }))}
+                      >
+                        Previous
+                      </Button>
+                      <Button
+                        disabled={progress >= task.steps.length}
+                        onClick={() => setStepProgress((curr) => ({ ...curr, [taskIndex]: Math.min(task.steps.length, progress + 1) }))}
+                      >
+                        Next step
+                      </Button>
                     </div>
-                    {step.result ? (
-                      <div className="mt-2 text-sm text-white/65">
-                        <span className="text-white/45">Rész-eredmény:</span> {step.result}
-                      </div>
-                    ) : null}
                   </div>
-                ) : null}
-                <div className="mt-3 flex gap-2">
-                  <Button variant="ghost" disabled={current <= 0} onClick={() => setCurrentStep(Math.max(0, current - 1))}>
-                    Back
-                  </Button>
-                  <Button disabled={current >= steps.length - 1} onClick={() => setCurrentStep(Math.min(steps.length - 1, current + 1))}>
-                    Next step →
-                  </Button>
-                </div>
-                {current >= steps.length - 1 && data.answer ? (
-                  <>
-                    <div className="mt-4 text-sm text-white/60">Végeredmény</div>
-                    <div className="mt-1 text-white/90">{data.answer}</div>
-                  </>
                 ) : null}
               </section>
             )
-          })()}
+          })}
         </div>
       ) : null}
     </div>

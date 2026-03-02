@@ -29,7 +29,7 @@ export const dynamic = 'force-dynamic'
 
 const PLAN_MODEL = process.env.OPENAI_PLAN_MODEL || OPENAI_MODEL
 const VISION_MODEL = process.env.OPENAI_VISION_MODEL || OPENAI_MODEL
-const MAX_OUTPUT_TOKENS = 2400
+const MAX_OUTPUT_TOKENS = 1400
 const STEP1_TIMEOUT_MS = 12_000
 const STEP2_TIMEOUT_MS = 14_000
 const OPENAI_ATTEMPTS = 2

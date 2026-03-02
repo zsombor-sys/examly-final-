@@ -10,46 +10,56 @@ export const maxDuration = 60
 export const dynamic = 'force-dynamic'
 
 const COST = CREDITS_PER_GENERATION
+const MAX_TOKENS = 1300
+const TEMP = 0.6
 
 const reqSchema = z.object({
   prompt: z.string().max(MAX_HOMEWORK_PROMPT_CHARS).optional().default(''),
 })
 
+const taskStepSchema = z.object({
+  explanation: z.string(),
+  result: z.string(),
+})
+
+const taskSchema = z.object({
+  title: z.string(),
+  steps: z.array(taskStepSchema).min(1),
+})
+
 const homeworkResponseSchema = z.object({
-  answer: z.string(),
-  steps: z.array(
-    z.object({
-      title: z.string(),
-      explanation: z.string(),
-      why: z.string(),
-      work: z.string(),
-      result: z.string().optional(),
-    })
-  ),
+  tasks: z.array(taskSchema).min(1),
 })
 
 const homeworkSchema = {
   type: 'object',
   additionalProperties: false,
   properties: {
-    answer: { type: 'string' },
-    steps: {
+    tasks: {
       type: 'array',
       items: {
         type: 'object',
         additionalProperties: false,
         properties: {
           title: { type: 'string' },
-          explanation: { type: 'string' },
-          why: { type: 'string' },
-          work: { type: 'string' },
-          result: { type: 'string' },
+          steps: {
+            type: 'array',
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                explanation: { type: 'string' },
+                result: { type: 'string' },
+              },
+              required: ['explanation', 'result'],
+            },
+          },
         },
-        required: ['title', 'explanation', 'why', 'work'],
+        required: ['title', 'steps'],
       },
     },
   },
-  required: ['answer', 'steps'],
+  required: ['tasks'],
 }
 
 function limitExceeded(message: string) {
@@ -58,69 +68,69 @@ function limitExceeded(message: string) {
 
 function fallbackHomework(prompt: string) {
   return {
-    answer: 'A feladat lépésről lépésre megoldható az alábbi menettel. A végén ellenőrizd az eredményt mértékegységgel.',
-    steps: [
+    tasks: [
       {
-        title: 'Adatok kiírása',
-        explanation: 'Gyűjtsd össze az ismert adatokat és a keresett mennyiséget.',
-        work: `Írd fel külön: adott, keresett, képlet. ${prompt ? `Feladat: ${prompt}` : ''}`.trim(),
-        why: 'Ez csökkenti a téves képletválasztás esélyét.',
-        result: undefined,
-      },
-      {
-        title: 'Képlet kiválasztása',
-        explanation: 'Válaszd ki a feladattípushoz tartozó alapképletet.',
-        work: 'Válaszd ki a feladattípushoz tartozó alapképletet, majd helyettesítsd be az adatokat.',
-        why: 'A helyes képletből vezethető le biztosan a jó eredmény.',
-        result: undefined,
-      },
-      {
-        title: 'Számolás és ellenőrzés',
-        explanation: 'Számolj pontosan, majd ellenőrizd az előjeleket és a mértékegységet.',
-        work: 'Számold ki a végeredményt, majd ellenőrizd az előjeleket és a mértékegységet.',
-        why: 'A gyors ellenőrzés kiszűri a tipikus számolási hibákat.',
-        result: undefined,
+        title: prompt ? `Task from prompt: ${prompt.slice(0, 60)}` : 'Task 1',
+        steps: [
+          {
+            explanation: 'List the known values and what must be solved.',
+            result: 'Knowns and unknown are identified.',
+          },
+          {
+            explanation: 'Select the correct formula or method and substitute the known values.',
+            result: 'Equation is prepared for calculation.',
+          },
+          {
+            explanation: 'Compute carefully and verify units/signs.',
+            result: 'Final checked answer is ready.',
+          },
+        ],
       },
     ],
   }
 }
 
-function ensureHomeworkShape(data: z.infer<typeof homeworkResponseSchema>) {
-  const normalizedSteps = (Array.isArray(data.steps) ? data.steps : [])
-    .map((s) => ({
-      title: String(s?.title || '').trim(),
-      explanation: String(s?.explanation || '').trim(),
-      work: String(s?.work || '').trim(),
-      why: String(s?.why || '').trim(),
-      result: String(s?.result || '').trim() || undefined,
+function normalizeTasks(data: z.infer<typeof homeworkResponseSchema>) {
+  const tasks = (Array.isArray(data.tasks) ? data.tasks : [])
+    .map((task) => ({
+      title: String(task?.title || '').trim() || 'Task',
+      steps: (Array.isArray(task?.steps) ? task.steps : [])
+        .map((step) => ({
+          explanation: String(step?.explanation || '').trim(),
+          result: String(step?.result || '').trim(),
+        }))
+        .filter((step) => step.explanation),
     }))
-    .filter((s) => s.title && s.work)
-    .map((step, i) => ({
-      ...step,
-      explanation: step.explanation || 'Rövid magyarázat a lépéshez.',
-      why: step.why || (i < 2 ? 'Ez a lépés szükséges a helyes módszer kiválasztásához.' : 'Ez visz közelebb a megoldáshoz.'),
-    }))
+    .filter((task) => task.steps.length > 0)
 
-  return {
-    answer: String(data.answer || '').trim() || 'Kövesd a lépéseket, majd ellenőrizd a végeredményt.',
-    steps: normalizedSteps.length ? normalizedSteps : fallbackHomework('').steps,
-  }
+  return tasks.length ? tasks : fallbackHomework('').tasks
 }
 
-function toLegacyHomeworkResponse(data: ReturnType<typeof ensureHomeworkShape>) {
+function toLegacyResponse(tasks: Array<{ title: string; steps: Array<{ explanation: string; result: string }> }>) {
+  const first = tasks[0]
+  const steps = (first?.steps || []).map((step, idx) => ({
+    title: `Step ${idx + 1}`,
+    explanation: step.explanation,
+    why: 'This step moves the solution toward a correct final answer.',
+    work: step.explanation,
+    result: step.result,
+  }))
+
   return {
-    language: 'hu' as const,
+    answer: first?.steps?.[first.steps.length - 1]?.result || '',
+    steps,
+    language: 'en' as const,
     solutions: [
       {
-        question: 'Házi feladat',
-        steps: data.steps.map((step) => ({
+        question: first?.title || 'Homework',
+        steps: steps.map((step) => ({
           title: step.title,
           explanation: step.explanation,
           work: step.work,
           why: step.why,
         })),
-        final_answer: data.answer,
-        common_mistakes: ['Előjelhiba', 'Rossz képletválasztás', 'Mértékegység kihagyása'],
+        final_answer: first?.steps?.[first.steps.length - 1]?.result || '',
+        common_mistakes: ['Wrong formula', 'Arithmetic slip', 'Missing unit check'],
       },
     ],
   }
@@ -164,6 +174,7 @@ export async function POST(req: Request) {
     if (!parsed.success) {
       return NextResponse.json(limitExceeded(`Prompt max ${MAX_HOMEWORK_PROMPT_CHARS}`), { status: 400 })
     }
+
     const imageFiles = files.filter((f) => f.type.startsWith('image/'))
     if (imageFiles.length > MAX_HOMEWORK_IMAGES) {
       return NextResponse.json(limitExceeded(`Max ${MAX_HOMEWORK_IMAGES} images`), { status: 400 })
@@ -173,18 +184,29 @@ export async function POST(req: Request) {
     if (!key) return NextResponse.json({ error: { code: 'OPENAI_KEY_MISSING', message: 'Missing OPENAI_API_KEY' } }, { status: 500 })
 
     const client = new OpenAI({ apiKey: key })
-    const content: any[] = [
+
+    const userContent: any[] = [
       {
         type: 'text',
         text:
-          `Feladat: ${parsed.data.prompt || 'Oldd meg a feltoltott feladatot.'}\n` +
-          'Valasz nyelve alapertelmezetten magyar. Adj lepesismeretet: Miert igy?, Ellenorzes, tipikus hibak.',
+          imageFiles.length > 0
+            ? [
+                'Extract all tasks from the image. Solve ALL tasks step by step.',
+                'For each task include:',
+                '- Task title',
+                '- Step 1 explanation',
+                '- Step 2 explanation',
+                '- Final answer',
+                '',
+                `Extra user instruction: ${parsed.data.prompt || 'none'}`,
+              ].join('\n')
+            : `Solve this homework step by step and return structured tasks JSON only. Prompt: ${parsed.data.prompt || ''}`,
       },
     ]
 
     for (const file of imageFiles) {
       const b = Buffer.from(await file.arrayBuffer()).toString('base64')
-      content.push({ type: 'image_url', image_url: { url: `data:${file.type};base64,${b}` } })
+      userContent.push({ type: 'image_url', image_url: { url: `data:${file.type};base64,${b}` } })
     }
 
     const runAttempt = async (repair = false) => {
@@ -193,40 +215,25 @@ export async function POST(req: Request) {
         messages: [
           {
             role: 'system',
-            content:
-              [
-                'Adj reszletes, lepesrol lepesre magyarazatot kozepiskolai szinten.',
-                'Valasz schema: { answer: string, steps: [{ title, explanation, why, work, result? }] }.',
-                'Minden lépésnek legyen címe, rövid "miért" magyarázata és konkrét munkarésze (képlet/számolás).',
-                'Az első 1-2 lépésnél a why legyen különösen egyértelmű és rövid.',
-                'Csak érvényes JSON-t adj vissza.',
-                repair ? 'Return ONLY valid JSON matching schema. No prose, no markdown.' : '',
-              ]
-                .filter(Boolean)
-                .join('\n'),
+            content: [
+              'Return only valid JSON.',
+              'Schema: { tasks: [{ title: string, steps: [{ explanation: string, result: string }] }] }',
+              repair ? 'STRICT JSON ONLY. No markdown.' : '',
+            ]
+              .filter(Boolean)
+              .join('\n'),
           },
-          { role: 'user', content: content as any },
+          { role: 'user', content: userContent as any },
         ],
-        temperature: 0,
-        max_tokens: 1100,
+        temperature: TEMP,
+        max_tokens: MAX_TOKENS,
         response_format: {
           type: 'json_schema',
           json_schema: { name: 'homework_help', schema: homeworkSchema, strict: true },
         },
       })
       const raw = normalizeContent(resp.choices?.[0]?.message?.content)
-      let parsedJson: any
-      try {
-        parsedJson = extractJson(raw)
-      } catch (err: any) {
-        console.error('homework.parse_error', {
-          repair,
-          code: String(err?.message || ''),
-          raw: String(raw || '').slice(0, 1200),
-        })
-        throw err
-      }
-      return homeworkResponseSchema.parse(parsedJson)
+      return homeworkResponseSchema.parse(extractJson(raw))
     }
 
     let parsedJson: z.infer<typeof homeworkResponseSchema>
@@ -243,7 +250,8 @@ export async function POST(req: Request) {
         parsedJson = fallbackHomework(parsed.data.prompt) as z.infer<typeof homeworkResponseSchema>
       }
     }
-    const normalized = ensureHomeworkShape(parsedJson)
+
+    const tasks = normalizeTasks(parsedJson)
 
     const sb = createServerAdminClient()
     const { error: rpcErr } = await sb.rpc('consume_credits', { user_id: user.id, cost: COST })
@@ -255,18 +263,25 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: { code: 'CREDITS_CHARGE_FAILED', message: 'Credits charge failed' } }, { status: 500 })
     }
 
+    const output = tasks
+      .map((task) => [
+        `## ${task.title}`,
+        ...task.steps.map((step, idx) => `${idx + 1}. ${step.explanation}\nResult: ${step.result}`),
+      ].join('\n'))
+      .join('\n\n')
+
     return NextResponse.json({
-      ...toLegacyHomeworkResponse(normalized),
-      answer: normalized.answer,
-      steps: normalized.steps,
+      ...toLegacyResponse(tasks),
+      output,
+      tasks,
       homework_json: {
-        steps: normalized.steps.map((step) => ({
-          title: step.title,
+        steps: tasks[0]?.steps?.map((step, idx) => ({
+          title: `Step ${idx + 1}`,
           explanation_short: step.explanation,
-          why: step.why,
-          result_hint: step.result ?? '',
-          next_check_question: 'Mi a következő szükséges adat vagy átalakítás?',
-        })),
+          why: 'This step is required to reach the final answer.',
+          result_hint: step.result,
+          next_check_question: 'What is the next operation needed?',
+        })) || [],
       },
     })
   } catch (e: any) {

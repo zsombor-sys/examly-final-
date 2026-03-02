@@ -284,13 +284,13 @@ function Inner() {
                           {step.work_latex ? (
                             <div className="mt-2 text-sm text-white/70">
                               <span className="text-white/45">Work:</span>{' '}
-                              <MarkdownMath content={step.work_latex} />
+                              <MarkdownMath content={`\\[${step.work_latex}\\]`} />
                             </div>
                           ) : null}
                           {step.result_latex ? (
                             <div className="mt-2 text-sm text-white/70">
                               <span className="text-white/45">Result:</span>{' '}
-                              <MarkdownMath content={step.result_latex} />
+                              <MarkdownMath content={`\\[${step.result_latex}\\]`} />
                             </div>
                           ) : null}
                         </div>

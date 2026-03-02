@@ -1,13 +1,14 @@
 'use client'
 
 import Link from 'next/link'
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import AuthGate from '@/components/AuthGate'
 import ClientAuthGuard from '@/components/ClientAuthGuard'
 import { authedFetch } from '@/lib/authClient'
 import { supabase } from '@/lib/supabaseClient'
 import { ArrowLeft, Loader2 } from 'lucide-react'
 import MarkdownMath from '@/components/MarkdownMath'
+import { Button, Textarea } from '@/components/ui'
 
 type PlanResult = {
   title?: string | null
@@ -67,12 +68,18 @@ function Inner() {
   const [userId, setUserId] = useState<string | null>(null)
   const [authReady, setAuthReady] = useState(false)
 
-  const notesText = (() => {
+  const [notesPrompt, setNotesPrompt] = useState('')
+  const [genLoading, setGenLoading] = useState(false)
+  const [genError, setGenError] = useState<string | null>(null)
+  const [generatedMarkdown, setGeneratedMarkdown] = useState<string>('')
+  const [generatedWordCount, setGeneratedWordCount] = useState<number | null>(null)
+
+  const notesText = useMemo(() => {
     if (!plan?.notes) return ''
     if (typeof plan.notes === 'string') return plan.notes
     if (typeof plan.notes?.content_markdown === 'string') return plan.notes.content_markdown
     return typeof plan.notes?.content === 'string' ? plan.notes.content : ''
-  })()
+  }, [plan])
 
   useEffect(() => {
     let active = true
@@ -101,11 +108,9 @@ function Inner() {
         if (!userId) {
           throw new Error('Nincs bejelentkezett felhasználó.')
         }
-        // 1) local current id first
-        let id: string | null = null
-        id = getLocalCurrentId(userId)
 
-        // 2) ask server current id
+        let id: string | null = getLocalCurrentId(userId)
+
         try {
           if (!id) {
             const r1 = await authedFetch('/api/plan/current')
@@ -116,7 +121,6 @@ function Inner() {
 
         if (!id) throw new Error('Nincs kiválasztott plan. Menj a Plan oldalra és generálj vagy válassz egyet.')
 
-        // 3) load plan (server)
         try {
           const r2 = await authedFetch(`/api/plan?id=${encodeURIComponent(id)}`)
           const j2 = await r2.json().catch(() => ({} as any))
@@ -129,7 +133,6 @@ function Inner() {
           setLoading(false)
           return
         } catch {
-          // 4) fallback local plan
           const local = loadLocalPlan(userId, id)
           if (!local) throw new Error('Nem találom a plan-t (se szerveren, se lokálisan).')
           setPlan(local)
@@ -141,7 +144,47 @@ function Inner() {
         setLoading(false)
       }
     })()
-  }, [userId])
+  }, [authReady, userId])
+
+  useEffect(() => {
+    const basePrompt = [
+      plan?.title ? `Topic: ${plan.title}` : '',
+      notesText ? `Current short notes:\n${notesText.slice(0, 1500)}` : '',
+      'Create complete long-form learning notes from basics to exam-level understanding.',
+    ]
+      .filter(Boolean)
+      .join('\n\n')
+
+    setNotesPrompt(basePrompt)
+  }, [plan?.title, notesText])
+
+  async function generateLongNotes() {
+    setGenError(null)
+    setGenLoading(true)
+    try {
+      const prompt = notesPrompt.trim() || `Topic: ${plan?.title || 'Study material'}`
+      const res = await authedFetch('/api/notes/generate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ prompt, language: 'en' }),
+      })
+      const json = await res.json().catch(() => ({} as any))
+      if (!res.ok) throw new Error(String(json?.error || 'Failed to generate notes'))
+
+      setGeneratedMarkdown(String(json?.markdown || ''))
+      setGeneratedWordCount(Number(json?.word_count || 0))
+
+      if (!json?.reached_target) {
+        setGenError(`Notes generated but below target (${Number(json?.word_count || 0)} words). Try a more specific prompt.`)
+      }
+    } catch (e: any) {
+      setGenError(String(e?.message || 'Failed to generate notes'))
+    } finally {
+      setGenLoading(false)
+    }
+  }
+
+  const renderedNotes = generatedMarkdown.trim() ? generatedMarkdown : notesText
 
   return (
     <div className="mx-auto max-w-4xl px-4 py-10">
@@ -152,7 +195,7 @@ function Inner() {
         </Link>
       </div>
 
-      <div className="mt-6 rounded-3xl border border-white/10 bg-black/40 p-6">
+      <div className="mt-6 rounded-3xl border border-white/10 bg-black/40 p-6 space-y-4">
         {loading ? (
           <div className="inline-flex items-center gap-2 text-white/70">
             <Loader2 className="animate-spin" size={16} /> Loading…
@@ -162,17 +205,37 @@ function Inner() {
         ) : plan ? (
           <>
             <div className="text-xs uppercase tracking-[0.18em] text-white/55">Notes</div>
-            <h1 className="mt-2 text-2xl font-semibold tracking-tight text-white break-words">
+            <h1 className="mt-1 text-2xl font-semibold tracking-tight text-white break-words">
               {plan.title || 'Notes'}
             </h1>
-            <div className="mt-4 rounded-3xl border border-white/10 bg-white/[0.02] p-5 min-w-0 overflow-hidden">
+
+            <div className="rounded-2xl border border-white/10 bg-black/30 p-4 space-y-3">
+              <div className="text-xs uppercase tracking-[0.16em] text-white/55">Generate deep notes</div>
+              <Textarea
+                value={notesPrompt}
+                onChange={(e) => setNotesPrompt(e.target.value)}
+                className="min-h-[140px]"
+                placeholder="Describe what depth you need for the notes."
+              />
+              <div className="flex items-center gap-3">
+                <Button onClick={generateLongNotes} disabled={genLoading || !notesPrompt.trim()}>
+                  {genLoading ? 'Generating long notes…' : 'Generate long notes'}
+                </Button>
+                {generatedWordCount != null ? (
+                  <div className="text-sm text-white/70">Word count: {generatedWordCount}</div>
+                ) : null}
+              </div>
+              {genError ? <div className="text-sm text-red-400">{genError}</div> : null}
+            </div>
+
+            <div className="mt-2 rounded-3xl border border-white/10 bg-white/[0.02] p-5 min-w-0 overflow-hidden">
               <div className="text-xs uppercase tracking-[0.18em] text-white/55">Study notes</div>
-              {notesText.trim() ? (
+              {renderedNotes.trim() ? (
                 <div className="mt-3 richtext min-w-0 max-w-full overflow-x-auto text-white/80">
-                  <MarkdownMath content={notesText} />
+                  <MarkdownMath content={renderedNotes} />
                 </div>
               ) : (
-                <div className="mt-3 text-sm text-white/70">Nincs jegyzet generálva (hiba). Próbáld újra.</div>
+                <div className="mt-3 text-sm text-white/70">No notes available yet.</div>
               )}
             </div>
           </>

@@ -97,15 +97,24 @@ function Inner() {
         noFinal: 'No final answer provided.',
       }
 
-  function stripTrailingDollarDelimiters(s?: string | null) {
-    if (!s) return s
+  function normalizeHomeworkLatex(s?: string | null) {
+    if (!s) return null
     let t = s.trim()
 
-    // Remove trailing unmatched $$ or $
-    if (t.endsWith('$$')) t = t.slice(0, -2).trim()
-    if (t.endsWith('$')) t = t.slice(0, -1).trim()
+    // remove any trailing $$ or $
+    t = t.replace(/\$\$+$/, '').trim()
+    t = t.replace(/\$$/, '').trim()
 
-    return t
+    // stabilize line breaks for KaTeX
+    t = t.replace(/\\\\/g, '\\newline ')
+
+    return t || null
+  }
+
+  function renderHomeworkMath(latex?: string | null) {
+    const cleaned = normalizeHomeworkLatex(latex)
+    if (!cleaned) return null
+    return <MarkdownMath content={`\\[${cleaned}\\]`} />
   }
 
   async function extractTasks() {
@@ -295,29 +304,13 @@ function Inner() {
                           {step.work_latex ? (
                             <div className="mt-2 text-sm text-white/70">
                               <span className="text-white/45">Work:</span>{' '}
-                              {(() => {
-                                const work = stripTrailingDollarDelimiters(step.work_latex)
-                                if (!work) return null
-                                return (
-                                  <MarkdownMath
-                                    content={work.startsWith('\\[') || work.startsWith('$$') ? work : `\\[${work}\\]`}
-                                  />
-                                )
-                              })()}
+                              {renderHomeworkMath(step.work_latex)}
                             </div>
                           ) : null}
                           {step.result_latex ? (
                             <div className="mt-2 text-sm text-white/70">
                               <span className="text-white/45">Result:</span>{' '}
-                              {(() => {
-                                const result = stripTrailingDollarDelimiters(step.result_latex)
-                                if (!result) return null
-                                return (
-                                  <MarkdownMath
-                                    content={result.startsWith('\\[') || result.startsWith('$$') ? result : `\\[${result}\\]`}
-                                  />
-                                )
-                              })()}
+                              {renderHomeworkMath(step.result_latex)}
                             </div>
                           ) : null}
                         </div>

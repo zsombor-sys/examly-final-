@@ -8,7 +8,9 @@ export const runtime = 'nodejs'
 export const maxDuration = 60
 export const dynamic = 'force-dynamic'
 
-const MAX_TOKENS = 1300
+const MAX_TOKENS_PLAN = 1200
+const MAX_TOKENS_NOTES = 2000
+const MAX_TOKENS_HOMEWORK = 1300
 const TEMP = 0.6
 
 type HomeworkTask = {
@@ -229,12 +231,13 @@ async function runOpenAI(mode: 'plan' | 'notes' | 'homework', prompt: string, im
             properties: {
               sections: {
                 type: 'array',
+                minItems: 8,
                 items: {
                   type: 'object',
                   additionalProperties: false,
                   properties: {
                     heading: { type: 'string' },
-                    bullets: { type: 'array', items: { type: 'string' } },
+                    bullets: { type: 'array', minItems: 4, items: { type: 'string' } },
                   },
                   required: ['heading', 'bullets'],
                 },
@@ -278,7 +281,22 @@ async function runOpenAI(mode: 'plan' | 'notes' | 'homework', prompt: string, im
     mode === 'plan'
       ? 'Generate a compact study plan with practical notes and homework tasks. Return JSON only.'
       : mode === 'notes'
-        ? 'Generate concise study notes. Return JSON only.'
+        ? [
+            'Generate detailed long-form study notes.',
+            'Required length: 1200-2000 words.',
+            'Do not be brief. Do not summarize too early.',
+            'Your sections MUST cover all of these:',
+            '- Definitions',
+            '- Deep explanations',
+            '- Historical/context background',
+            '- Examples',
+            '- Step-by-step breakdowns',
+            '- Practice questions',
+            '- Common mistakes',
+            '- Summary',
+            'Fill sections with substantive bullet points, not placeholders.',
+            'Return JSON only.',
+          ].join(' ')
         :
           [
             'Extract all tasks from the image or prompt.',
@@ -295,7 +313,12 @@ async function runOpenAI(mode: 'plan' | 'notes' | 'homework', prompt: string, im
   const completion = await client.chat.completions.create({
     model: OPENAI_MODEL,
     temperature: TEMP,
-    max_tokens: MAX_TOKENS,
+    max_tokens:
+      mode === 'notes'
+        ? MAX_TOKENS_NOTES
+        : mode === 'plan'
+          ? MAX_TOKENS_PLAN
+          : MAX_TOKENS_HOMEWORK,
     messages: [
       {
         role: 'system',

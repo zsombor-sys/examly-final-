@@ -17,6 +17,7 @@ import { TABLE_PLANS } from '@/lib/dbTables'
 import { throwIfMissingTable } from '@/lib/supabaseErrors'
 import { optimizeImageForVision, type OptimizedVisionImage } from '@/lib/imageOptimize'
 import { extractFromImagesWithVision } from '@/lib/visionExtract'
+import { resolveLanguage } from '@/lib/language'
 import {
   fallbackPlanDocument,
   normalizePlanDocument,
@@ -39,6 +40,7 @@ const MAX_EXTRACT_CHARS = 12_000
 const planRequestSchema = z.object({
   prompt: z.string().max(MAX_PLAN_PROMPT_CHARS).optional().default(''),
   storage_paths: z.array(z.string().min(1)).optional().default([]),
+  images: z.array(z.string().min(1)).optional().default([]),
 })
 
 const planDailyZod = z.object({
@@ -111,9 +113,11 @@ async function parsePlanRequest(req: Request) {
   let raw: any = null
   let files: File[] = []
   let storagePaths: string[] = []
+  let images: string[] = []
 
   if (contentType.includes('application/json')) {
     raw = await req.json().catch(() => null)
+    images = Array.isArray(raw?.images) ? raw.images.map((x: any) => String(x ?? '').trim()).filter(Boolean) : []
   } else {
     const form = await req.formData()
     raw = {
@@ -132,6 +136,7 @@ async function parsePlanRequest(req: Request) {
     storage_paths: Array.isArray(raw?.storage_paths)
       ? raw.storage_paths.map((x: any) => String(x ?? '').trim()).filter(Boolean)
       : storagePaths,
+    images,
   }
 
   if (input.prompt.length > MAX_PLAN_PROMPT_CHARS) {
@@ -143,7 +148,10 @@ async function parsePlanRequest(req: Request) {
     return { ok: false as const, error: parsed.error }
   }
 
-  const totalSelected = files.filter((f) => String(f.type || '').startsWith('image/')).length + input.storage_paths.length
+  const totalSelected =
+    files.filter((f) => String(f.type || '').startsWith('image/')).length +
+    input.storage_paths.length +
+    input.images.length
   if (totalSelected > MAX_PLAN_IMAGES) {
     return { ok: false as const, error: 'TOO_MANY_FILES' as const }
   }
@@ -154,6 +162,7 @@ async function parsePlanRequest(req: Request) {
       prompt: parsed.data.prompt.trim(),
       files,
       storage_paths: parsed.data.storage_paths,
+      images: parsed.data.images,
     },
   }
 }
@@ -166,10 +175,6 @@ function limitExceeded(message: string) {
       message,
     },
   }
-}
-
-function detectHungarian(text: string) {
-  return /\bhu\b|magyar|szia|tetel|t[eé]tel|vizsga|erettsegi|[áéíóöőúüű]/i.test(text)
 }
 
 function parseStructuredMessageContent(content: unknown) {
@@ -226,10 +231,32 @@ type RawImageSource = {
 async function collectRawImages(input: {
   files: File[]
   storagePaths: string[]
+  inlineImages: string[]
   maxImages: number
 }): Promise<RawImageSource[]> {
   const out: RawImageSource[] = []
   const maxImages = Math.max(0, Math.min(MAX_PLAN_IMAGES, input.maxImages))
+
+  for (const encoded of input.inlineImages) {
+    if (out.length >= maxImages) break
+    const raw = String(encoded || '').trim()
+    if (!raw) continue
+    const m = /^data:(.+?);base64,(.+)$/i.exec(raw)
+    const mime = m?.[1] || 'image/png'
+    const b64 = m?.[2] || raw
+    try {
+      const buffer = Buffer.from(b64, 'base64')
+      if (!buffer.length) continue
+      out.push({
+        name: `inline-${out.length + 1}`,
+        mime,
+        buffer,
+        source: 'upload',
+      })
+    } catch {
+      // ignore invalid inline image payloads
+    }
+  }
 
   for (const file of input.files) {
     if (out.length >= maxImages) break
@@ -664,10 +691,14 @@ export async function POST(req: Request) {
     const promptRaw = parsedRequest.value.prompt
     const files = parsedRequest.value.files
     const storagePaths = parsedRequest.value.storage_paths
+    const inlineImages = parsedRequest.value.images
     const planId = crypto.randomUUID()
     const openAiKey = process.env.OPENAI_API_KEY
 
-    const requestedImageCount = files.filter((f) => f.type.startsWith('image/')).length + storagePaths.length
+    const requestedImageCount =
+      files.filter((f) => f.type.startsWith('image/')).length +
+      storagePaths.length +
+      inlineImages.length
     if (requestedImageCount > MAX_PLAN_IMAGES) {
       return NextResponse.json(
         limitExceeded(`Max ${MAX_PLAN_IMAGES} images`),
@@ -679,6 +710,7 @@ export async function POST(req: Request) {
     const rawImages = await collectRawImages({
       files,
       storagePaths,
+      inlineImages,
       maxImages: MAX_PLAN_IMAGES,
     })
     const imagesDownloaded = rawImages.length
@@ -688,7 +720,8 @@ export async function POST(req: Request) {
     const prompt =
       promptRaw.trim() ||
       (imagesDownloaded ? 'Create structured study notes and a study plan based on the uploaded materials.' : '')
-    const isHu = detectHungarian(prompt)
+    const resolvedPromptLanguage = resolveLanguage({ prompt })
+    const isHu = resolvedPromptLanguage === 'hu'
 
     console.log('plan.images', {
       requestId,
@@ -696,6 +729,13 @@ export async function POST(req: Request) {
       imagesDownloaded,
       imagesSentToVision,
     })
+
+    if (imagesSelected > 0 && imagesSentToVision === 0) {
+      return NextResponse.json(
+        { error: 'PLAN_VISION_INPUT_EMPTY' },
+        { status: 400, headers: { 'cache-control': 'no-store' } }
+      )
+    }
 
     cost = CREDITS_PER_GENERATION
 
@@ -789,19 +829,26 @@ export async function POST(req: Request) {
       extractLength,
     })
 
-    const targetLang: 'hu' | 'en' =
-      extracted.language === 'hu' || (extracted.language !== 'en' && isHu) ? 'hu' : 'en'
+    const targetLang = resolveLanguage({
+      extracted: extracted.language,
+      prompt: [prompt, extracted.extracted, extracted.key_topics.join(' ')].join('\n'),
+    })
 
     const systemText = [
       'Return ONLY valid JSON. No markdown. No commentary.',
-      `Language target: ${targetLang === 'hu' ? 'Hungarian' : 'English'}; output language must be "${targetLang}" unless impossible.`,
+      targetLang === 'hu' ? 'Respond in Hungarian.' : 'Respond in English.',
       'Plan summary must be concise: 2-4 lines maximum.',
       'Daily must always include Day 1 with 6-12 time blocks and pomodoro-friendly sequencing (25m study / 5m break pattern with one longer break).',
+      'Read and incorporate ALL information from the images into the plan.',
       'You MUST incorporate extracted facts from uploaded images. Do not output generic content.',
       'If extracted material is empty, still generate a useful plan but explicitly mention this is a fallback context in notes summary.',
       'Notes are the primary value and must be an outline with headings + bullets. Hungarian for Hungarian prompts.',
       'Notes schema uses notes.sections + notes.recap. Start with a short summary section (3-5 bullets), then continue with 6-10 sections total and 5-10 bullets each.',
       'Return 6-10 outline sections. Bullets should be one-line concrete facts/definitions/dates; use LaTeX in bullets for chemistry/math formulas.',
+      'Whenever you write mathematics, you MUST use LaTeX.',
+      'Use ONLY \\( \\) for inline math and \\[ \\] for display math.',
+      'Do NOT use $...$.',
+      'Do NOT write math as plain text.',
       `Notes should target ${NOTES_TARGET_MIN_CHARS}-${NOTES_TARGET_MAX_CHARS} characters total while staying structured.`,
       'If draft notes are shorter than minimum, expand bullets and recap in the same response before returning JSON.',
       'Practice must include at least 8 short exercises with compact answers/explanations.',

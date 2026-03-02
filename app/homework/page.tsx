@@ -19,10 +19,8 @@ type ExtractedTask = {
 
 type SolvedTask = {
   title: string
-  steps: Array<{ label: string; explain: string; work: string; result: string; work_latex?: string; result_latex?: string }>
+  steps: Array<{ label: string; explain: string; work_latex?: string; result_latex?: string }>
   final_answer: string
-  checks: string[]
-  common_mistakes: string[]
 }
 
 export default function HomeworkPage() {
@@ -163,17 +161,11 @@ function Inner() {
           ? json.steps.map((s: any, idx: number) => ({
               label: String(s?.label || `Step ${idx + 1}`),
               explain: String(s?.explain || '').trim(),
-              work: String(s?.work || '').trim(),
-              result: String(s?.result || '').trim(),
               work_latex: String(s?.work_latex || '').trim(),
               result_latex: String(s?.result_latex || '').trim(),
             }))
           : [],
         final_answer: String(json?.final_answer || '').trim(),
-        checks: Array.isArray(json?.checks) ? json.checks.map((x: any) => String(x || '').trim()).filter(Boolean) : [],
-        common_mistakes: Array.isArray(json?.common_mistakes)
-          ? json.common_mistakes.map((x: any) => String(x || '').trim()).filter(Boolean)
-          : [],
       }
 
       if (!solved.steps.length) throw new Error('Solver returned no steps for this task.')
@@ -289,14 +281,18 @@ function Inner() {
                           <div className="mt-1 text-sm text-white/90">
                             <MarkdownMath content={step.explain} />
                           </div>
-                          <div className="mt-2 text-sm text-white/70">
-                            <span className="text-white/45">Work:</span>{' '}
-                            <MarkdownMath content={step.work_latex || step.work} />
-                          </div>
-                          <div className="mt-2 text-sm text-white/70">
-                            <span className="text-white/45">Result:</span>{' '}
-                            <MarkdownMath content={step.result_latex || step.result} />
-                          </div>
+                          {step.work_latex ? (
+                            <div className="mt-2 text-sm text-white/70">
+                              <span className="text-white/45">Work:</span>{' '}
+                              <MarkdownMath content={step.work_latex} />
+                            </div>
+                          ) : null}
+                          {step.result_latex ? (
+                            <div className="mt-2 text-sm text-white/70">
+                              <span className="text-white/45">Result:</span>{' '}
+                              <MarkdownMath content={step.result_latex} />
+                            </div>
+                          ) : null}
                         </div>
                       ))}
 
@@ -320,26 +316,6 @@ function Inner() {
                         <div className="rounded-xl border border-emerald-400/25 bg-emerald-500/10 p-4 text-sm text-emerald-100">
                           <div className="text-xs uppercase tracking-[0.14em] text-emerald-200/80">{ui.finalAnswer}</div>
                           <div className="mt-1"><MarkdownMath content={solved.final_answer || ui.noFinal} /></div>
-
-                          {solved.checks.length > 0 ? (
-                            <div className="mt-3">
-                              <div className="text-xs uppercase tracking-[0.14em] text-emerald-200/80">{ui.checks}</div>
-                              <ul className="mt-1 list-disc pl-5 text-emerald-100/90">
-                                {solved.checks.map((check, i) => <li key={`${task.id}-check-${i}`}>{check}</li>)}
-                              </ul>
-                            </div>
-                          ) : null}
-
-                          {solved.common_mistakes.length > 0 ? (
-                            <div className="mt-3">
-                              <div className="text-xs uppercase tracking-[0.14em] text-emerald-200/80">{ui.mistakes}</div>
-                              <ul className="mt-1 list-disc pl-5 text-emerald-100/90">
-                                {solved.common_mistakes.map((mistake, i) => (
-                                  <li key={`${task.id}-mistake-${i}`}>{mistake}</li>
-                                ))}
-                              </ul>
-                            </div>
-                          ) : null}
                         </div>
                       ) : null}
                     </div>

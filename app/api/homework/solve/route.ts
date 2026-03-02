@@ -3,7 +3,7 @@ import OpenAI from 'openai'
 import { z } from 'zod'
 import { requireUser } from '@/lib/authServer'
 import { OPENAI_MODEL } from '@/lib/limits'
-import { pickLanguage } from '@/lib/language'
+import { resolveLanguage } from '@/lib/language'
 
 export const runtime = 'nodejs'
 export const maxDuration = 60
@@ -29,15 +29,11 @@ const solveOutputSchema = z.object({
     z.object({
       label: z.string(),
       explain: z.string(),
-      work: z.string(),
-      result: z.string(),
       work_latex: z.string().optional(),
       result_latex: z.string().optional(),
     })
   ),
   final_answer: z.string(),
-  checks: z.array(z.string()),
-  common_mistakes: z.array(z.string()),
 })
 
 const solveSchema = {
@@ -53,19 +49,15 @@ const solveSchema = {
         properties: {
           label: { type: 'string' },
           explain: { type: 'string' },
-          work: { type: 'string' },
-          result: { type: 'string' },
           work_latex: { type: 'string' },
           result_latex: { type: 'string' },
         },
-        required: ['label', 'explain', 'work', 'result'],
+        required: ['label', 'explain'],
       },
     },
     final_answer: { type: 'string' },
-    checks: { type: 'array', items: { type: 'string' } },
-    common_mistakes: { type: 'array', items: { type: 'string' } },
   },
-  required: ['title', 'steps', 'final_answer', 'checks', 'common_mistakes'],
+  required: ['title', 'steps', 'final_answer'],
 }
 
 function extractText(content: unknown) {
@@ -110,10 +102,13 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: 'Missing OPENAI_API_KEY' }, { status: 500 })
     }
 
-    const client = new OpenAI({ apiKey: key })
-    const language = parsed.data.language || pickLanguage(`${parsed.data.task.title}\n${parsed.data.task.raw_text}`)
+    const language = resolveLanguage({
+      explicit: parsed.data.language,
+      prompt: `${parsed.data.task.title}\n${parsed.data.task.raw_text}`,
+    })
     const langInstruction = language === 'hu' ? 'Respond in Hungarian.' : 'Respond in English.'
 
+    const client = new OpenAI({ apiKey: key })
     const resp = await client.chat.completions.create({
       model: OPENAI_MODEL,
       temperature: 0.35,
@@ -125,9 +120,10 @@ export async function POST(req: Request) {
             'You are a teaching assistant solving one homework task.',
             'Explain WHY each step is done (teaching mode).',
             'Keep each step reasonably sized for gated step-by-step UI.',
-            'For math expressions, always use LaTeX notation.',
-            'Use inline math as \\( ... \\) and display math as \\[ ... \\].',
-            'If a step contains formulas, fill work_latex and result_latex as valid LaTeX snippets.',
+            'Whenever you write mathematics, you MUST use LaTeX.',
+            'Use ONLY \\( \\) for inline math and \\[ \\] for display math.',
+            'Do NOT use $...$.',
+            'Do NOT write math as plain text.',
             langInstruction,
             'Return JSON only matching schema.',
           ].join('\n'),
@@ -153,24 +149,16 @@ export async function POST(req: Request) {
 
     const normalized = solveOutputSchema.parse(parseJson(resp.choices?.[0]?.message?.content))
 
-    const steps = normalized.steps.map((step, idx) => ({
-      label: String(step.label || `Step ${idx + 1}`),
-      explain: String(step.explain || '').trim(),
-      work: String(step.work || '').trim(),
-      result: String(step.result || '').trim(),
-      work_latex: String(step.work_latex || '').trim(),
-      result_latex: String(step.result_latex || '').trim(),
-    }))
-
     return NextResponse.json({
       language,
       title: String(normalized.title || parsed.data.task.title).trim(),
-      steps,
+      steps: normalized.steps.map((step, idx) => ({
+        label: String(step.label || `Step ${idx + 1}`).trim(),
+        explain: String(step.explain || '').trim(),
+        work_latex: String(step.work_latex || '').trim() || undefined,
+        result_latex: String(step.result_latex || '').trim() || undefined,
+      })),
       final_answer: String(normalized.final_answer || '').trim(),
-      checks: (Array.isArray(normalized.checks) ? normalized.checks : []).map((x) => String(x || '').trim()).filter(Boolean),
-      common_mistakes: (Array.isArray(normalized.common_mistakes) ? normalized.common_mistakes : [])
-        .map((x) => String(x || '').trim())
-        .filter(Boolean),
     })
   } catch (error: any) {
     console.error('homework.solve.error', { message: String(error?.message || 'Unknown error') })

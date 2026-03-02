@@ -299,49 +299,6 @@ function getRequestId(source: any): string | null {
   return typeof maybeId === 'string' && maybeId ? maybeId : null
 }
 
-function toPlanResultFromGenerateApi(payload: any): PlanResult {
-  const structured = payload?.structured ?? {}
-  const blocks = Array.isArray(structured?.plan?.blocks) ? structured.plan.blocks : []
-  const noteSections = Array.isArray(structured?.notes?.sections) ? structured.notes.sections : []
-  const noteRecap = String(structured?.notes?.recap ?? '').trim()
-  const homeworkTasks = Array.isArray(structured?.homework?.tasks) ? structured.homework.tasks : []
-
-  return {
-    title: String(structured?.title ?? 'Study plan'),
-    language: 'en',
-    summary: String(structured?.summary ?? '').trim(),
-    plan: {
-      blocks: blocks.map((b: any) => ({
-        title: String(b?.title ?? '').trim() || 'Study block',
-        description: String(b?.description ?? '').trim(),
-        duration_minutes: Math.max(10, Math.min(180, Number(b?.duration_minutes) || 30)),
-      })),
-    },
-    notes: {
-      sections: noteSections.map((s: any) => ({
-        heading: String(s?.heading ?? '').trim() || 'Notes',
-        bullets: Array.isArray(s?.bullets) ? s.bullets.map((x: any) => String(x ?? '').trim()).filter(Boolean) : [],
-      })),
-      summary: noteRecap,
-    },
-    practice: {
-      questions: homeworkTasks.map((t: any) => ({
-        q: String(t?.title ?? '').trim() || 'Task',
-        choices: [],
-        a: Array.isArray(t?.steps)
-          ? t.steps.map((s: any, idx: number) => `${idx + 1}. ${String(s?.explanation ?? '').trim()}`).join('\n')
-          : '',
-        explanation: Array.isArray(t?.steps)
-          ? t.steps
-              .map((s: any) => String(s?.result ?? '').trim())
-              .filter(Boolean)
-              .join('\n')
-          : '',
-      })),
-    },
-  }
-}
-
 export default function PlanPage() {
   const [entitlement, setEntitlement] = useState<{ credits: number | null; entitlementOk: boolean | null }>({
     credits: null,
@@ -631,22 +588,6 @@ function Inner({ entitlement }: { entitlement: { credits: number | null; entitle
     setLoading(true)
     setIsGenerating(true)
     try {
-      if (files.length === 0) {
-        const promptToSend = prompt.trim() || 'Create a compact study plan with notes and homework tasks.'
-        const res = await authedFetch('/api/generate', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ mode: 'plan', prompt: promptToSend }),
-        })
-        const data = await res.json().catch(() => ({} as any))
-        if (!res.ok) throw new Error(data?.error ?? `Generation failed (${res.status})`)
-        if (data?.error) throw new Error(String(data.error))
-        setResult(toPlanResultFromGenerateApi(data))
-        setSelectedId(null)
-        setTab('plan')
-        return
-      }
-
       await uploadMaterials()
       const form = new FormData()
       const promptToSend =
@@ -757,6 +698,10 @@ function Inner({ entitlement }: { entitlement: { credits: number | null; entitle
   }
 
   const displayTitle = result?.title?.trim() ? result.title : 'Study plan'
+  const uiLang: 'hu' | 'en' = result?.language === 'hu' ? 'hu' : 'en'
+  const uiText = uiLang === 'hu'
+    ? { plan: 'Terv', notes: 'Jegyzet', summary: 'Összegzés', daily: 'Napi ütemezés', answer: 'Válasz' }
+    : { plan: 'Plan', notes: 'Notes', summary: 'Summary', daily: 'Daily schedule', answer: 'Answer' }
   const displayInput = shortPrompt(prompt)
   const creditsOk = entitlementOk != null ? entitlementOk : credits == null ? true : credits >= 1
   const canGenerate =
@@ -954,7 +899,7 @@ function Inner({ entitlement }: { entitlement: { credits: number | null; entitle
               {/* PLAN */}
               {tab === 'plan' && result && (
                 <div className="rounded-3xl border border-white/10 bg-white/[0.02] p-5 min-w-0 overflow-hidden">
-                  <div className="text-xs uppercase tracking-[0.18em] text-white/55">Plan</div>
+                  <div className="text-xs uppercase tracking-[0.18em] text-white/55">{uiText.plan}</div>
                   <div className="mt-3 space-y-3">
                     {getPlanBlocks(result).map((b) => (
                       <div key={`${b.title}-${b.duration_minutes}`} className="rounded-2xl border border-white/10 bg-black/30 px-4 py-3">
@@ -962,13 +907,16 @@ function Inner({ entitlement }: { entitlement: { credits: number | null; entitle
                           <div className="text-white/90">{b.title}</div>
                           <div className="text-white/60">{b.duration_minutes} min</div>
                         </div>
-                        <div className="mt-2 text-white/70">{b.description}</div>
+                        <div className="mt-2 text-white/70">
+                          <MarkdownMath content={b.description} />
+                        </div>
                       </div>
                     ))}
                   </div>
                   {result?.summary ? (
                     <div className="mt-3 text-xs text-white/60">
-                      Summary: {result.summary}
+                      <span className="text-white/40">{uiText.summary}:</span>
+                      <MarkdownMath content={result.summary} />
                     </div>
                   ) : null}
                 </div>
@@ -977,23 +925,23 @@ function Inner({ entitlement }: { entitlement: { credits: number | null; entitle
               {/* NOTES */}
               {tab === 'notes' && result && (
                 <div className="rounded-3xl border border-white/10 bg-white/[0.02] p-5 min-w-0 overflow-hidden">
-                  <div className="text-xs uppercase tracking-[0.18em] text-white/55">Notes</div>
+                  <div className="text-xs uppercase tracking-[0.18em] text-white/55">{uiText.notes}</div>
                   {getNotesModel(result.notes ?? result.notes_json).sections.length > 0 ? (
                     <div className="mt-4 space-y-5 text-sm text-white/85">
                       {getNotesModel(result.notes ?? result.notes_json).sections.map((section, idx) => (
                         <section key={`${section.heading}-${idx}`} className="rounded-2xl border border-white/10 bg-black/30 p-4">
                           <h3 className="text-white/90 font-semibold">{section.heading}</h3>
-                          <ul className="mt-2 list-disc pl-5 space-y-1 text-white/80">
-                            {section.bullets.map((b, bi) => (
-                              <li key={`${idx}-${bi}`}>{b}</li>
-                            ))}
-                          </ul>
+                          <div className="mt-2 text-white/80">
+                            <MarkdownMath content={section.bullets.map((b) => `- ${b}`).join('\n')} />
+                          </div>
                         </section>
                       ))}
                       {getNotesModel(result.notes ?? result.notes_json).summary ? (
                         <section className="rounded-2xl border border-white/10 bg-black/30 p-4">
                           <h3 className="text-white/90 font-semibold">Summary</h3>
-                          <p className="mt-2 text-white/80">{getNotesModel(result.notes ?? result.notes_json).summary}</p>
+                          <div className="mt-2 text-white/80">
+                            <MarkdownMath content={getNotesModel(result.notes ?? result.notes_json).summary} />
+                          </div>
                         </section>
                       ) : null}
                     </div>
@@ -1012,7 +960,7 @@ function Inner({ entitlement }: { entitlement: { credits: number | null; entitle
 
                   <div className="order-2 min-w-0 space-y-6 2xl:order-1">
                     <section className="w-full rounded-3xl border border-white/10 bg-white/[0.02] p-5 min-w-0 overflow-hidden">
-                      <div className="text-xs uppercase tracking-[0.18em] text-white/55">Daily schedule</div>
+                      <div className="text-xs uppercase tracking-[0.18em] text-white/55">{uiText.daily}</div>
                       <div className="mt-3 space-y-4 text-sm text-white/80">
                         {getDailySchedule(result).length > 0 ? (
                           getDailySchedule(result).map((day, i) => (
@@ -1044,18 +992,18 @@ function Inner({ entitlement }: { entitlement: { credits: number | null; entitle
                       className="rounded-3xl border border-white/10 bg-white/[0.02] p-5 min-w-0 overflow-hidden"
                     >
                       <div className="text-sm font-semibold text-white/90 min-w-0 break-words">
-                        {qi + 1}. {q.q}
+                        <MarkdownMath content={`${qi + 1}. ${q.q}`} />
                       </div>
                       {q.choices.length > 0 ? (
-                        <ul className="mt-3 list-disc pl-5 space-y-1 text-sm text-white/75">
-                          {q.choices.map((choice, i) => <li key={`choice-${qi}-${i}`}>{choice}</li>)}
-                        </ul>
+                        <div className="mt-3 text-sm text-white/75">
+                          <MarkdownMath content={q.choices.map((choice) => `- ${choice}`).join('\n')} />
+                        </div>
                       ) : null}
                       {q.a ? (
                         <div className="mt-4 rounded-2xl border border-white/10 bg-black/30 p-4">
-                          <div className="text-xs uppercase tracking-[0.18em] text-white/55">Answer</div>
-                          <div className="mt-2 text-sm text-white/80 break-words">{q.a}</div>
-                          {q.explanation ? <div className="mt-2 text-sm text-white/70 break-words">{q.explanation}</div> : null}
+                          <div className="text-xs uppercase tracking-[0.18em] text-white/55">{uiText.answer}</div>
+                          <div className="mt-2 text-sm text-white/80 break-words"><MarkdownMath content={q.a} /></div>
+                          {q.explanation ? <div className="mt-2 text-sm text-white/70 break-words"><MarkdownMath content={q.explanation} /></div> : null}
                         </div>
                       ) : null}
                     </section>

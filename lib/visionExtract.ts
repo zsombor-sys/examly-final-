@@ -19,13 +19,21 @@ function detectHungarian(text: string) {
   return /\bhu\b|magyar|szia|tetel|t[eé]tel|vizsga|erettsegi|[áéíóöőúüű]/i.test(text)
 }
 
-function parseVisionResponseJson(resp: any): unknown {
-  const maybeParsed = (resp as any)?.output_parsed
-  if (maybeParsed && typeof maybeParsed === 'object') return maybeParsed
-
-  const text = String((resp as any)?.output_text ?? '').trim()
-  if (!text) throw new Error('VISION_EMPTY_RESPONSE')
-  return JSON.parse(text)
+function parseVisionResponseJson(content: unknown): unknown {
+  const text = typeof content === 'string'
+    ? content
+    : Array.isArray(content)
+      ? content
+          .map((part: any) => {
+            if (typeof part === 'string') return part
+            if (typeof part?.text === 'string') return part.text
+            return ''
+          })
+          .join('\n')
+      : ''
+  const raw = String(text || '').trim()
+  if (!raw) throw new Error('VISION_EMPTY_RESPONSE')
+  return JSON.parse(raw)
 }
 
 async function withTimeout<T>(ms: number, fn: (signal: AbortSignal) => Promise<T>) {
@@ -78,41 +86,32 @@ export async function extractFromImagesWithVision(params: {
   for (let attempt = 0; attempt <= retries; attempt += 1) {
     const retryInstruction = attempt > 0 ? 'Return ONLY valid JSON matching the schema. No markdown.' : ''
     try {
+      const userContent: any[] = [{ type: 'text', text: `User prompt:\n${prompt || '(empty)'}` }]
+      for (const img of images) {
+        userContent.push({ type: 'image_url', image_url: { url: `data:${img.mime};base64,${img.b64}` } })
+      }
+
       const resp = await withTimeout(timeoutMs, (signal) =>
-        client.responses.create(
+        client.chat.completions.create(
           {
             model,
-            input: [
+            messages: [
               {
                 role: 'system',
                 content: [
-                  {
-                    type: 'input_text',
-                    text: [
-                      'You extract study material from uploaded images.',
-                      'Return only JSON with factual extracted content seen in the images.',
-                      'Focus on headings, exercises, formulas, questions, and task statements.',
-                      'Use Hungarian if the content appears Hungarian.',
-                      retryInstruction,
-                    ].filter(Boolean).join('\n'),
-                  },
-                ],
+                  'You extract study material from uploaded images.',
+                  'Return only JSON with factual extracted content seen in the images.',
+                  'Focus on headings, exercises, formulas, questions, and task statements.',
+                  'Use Hungarian if the content appears Hungarian.',
+                  retryInstruction,
+                ].filter(Boolean).join('\n'),
               },
               {
                 role: 'user',
-                content: [
-                  {
-                    type: 'input_text',
-                    text: `User prompt:\n${prompt || '(empty)'}`,
-                  },
-                  ...images.map((img) => ({
-                    type: 'input_image' as const,
-                    image_url: `data:${img.mime};base64,${img.b64}`,
-                  })),
-                ],
+                content: userContent as any,
               },
             ],
-            max_output_tokens: 800,
+            max_tokens: 800,
             temperature: 0,
             response_format: {
               type: 'json_schema',
@@ -122,12 +121,12 @@ export async function extractFromImagesWithVision(params: {
                 schema,
               },
             } as any,
-          } as any,
+          },
           { signal }
         )
       )
 
-      const parsed = parseVisionResponseJson(resp)
+      const parsed = parseVisionResponseJson(resp.choices?.[0]?.message?.content)
       const validated = VisionExtractSchema.parse(parsed)
       return {
         extracted: String(validated.extracted || '').trim(),

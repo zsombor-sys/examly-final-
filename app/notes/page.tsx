@@ -13,6 +13,7 @@ import { MAX_IMAGES } from '@/lib/limits'
 
 type PlanResult = {
   title?: string | null
+  language?: 'hu' | 'en' | null
   notes?: string | { content_markdown?: string | null; content?: string | null } | null
   fallback?: boolean
   errorCode?: string | null
@@ -73,7 +74,7 @@ function Inner() {
   const [genLoading, setGenLoading] = useState(false)
   const [genError, setGenError] = useState<string | null>(null)
   const [generatedMarkdown, setGeneratedMarkdown] = useState<string>('')
-  const [generatedWordCount, setGeneratedWordCount] = useState<number | null>(null)
+  const [generatedCharCount, setGeneratedCharCount] = useState<number | null>(null)
   const [generatedLanguage, setGeneratedLanguage] = useState<'hu' | 'en' | null>(null)
   const [files, setFiles] = useState<File[]>([])
 
@@ -174,11 +175,11 @@ function Inner() {
       if (!res.ok) throw new Error(String(json?.error || 'Failed to generate notes'))
 
       setGeneratedMarkdown(String(json?.markdown || ''))
-      setGeneratedWordCount(Number(json?.word_count || 0))
+      setGeneratedCharCount(Number(json?.character_count || 0))
       setGeneratedLanguage(json?.language === 'hu' ? 'hu' : 'en')
 
       if (!json?.reached_target) {
-        setGenError(`Notes generated but below target (${Number(json?.word_count || 0)} words). Try a more specific prompt.`)
+        setGenError(`Notes generated but below target (${Number(json?.character_count || 0)} characters). Try a more specific prompt.`)
       }
     } catch (e: any) {
       setGenError(String(e?.message || 'Failed to generate notes'))
@@ -188,13 +189,33 @@ function Inner() {
   }
 
   const renderedNotes = generatedMarkdown.trim() ? generatedMarkdown : notesText
+  const uiLanguage: 'hu' | 'en' = generatedLanguage || (plan?.language === 'hu' ? 'hu' : 'en')
+  const labels = uiLanguage === 'hu'
+    ? {
+        back: 'Vissza a tervhez',
+        notes: 'Jegyzet',
+        generator: 'Részletes jegyzet generálása',
+        button: 'Hosszú jegyzet generálása',
+        buttonLoading: 'Hosszú jegyzet készül…',
+        study: 'Tanulási jegyzet',
+        noNotes: 'Nincs még jegyzet.',
+      }
+    : {
+        back: 'Back to Plan',
+        notes: 'Notes',
+        generator: 'Generate deep notes',
+        button: 'Generate long notes',
+        buttonLoading: 'Generating long notes…',
+        study: 'Study notes',
+        noNotes: 'No notes available yet.',
+      }
 
   return (
     <div className="mx-auto max-w-4xl px-4 py-10">
       <div className="flex items-center justify-between">
         <Link href="/plan" className="inline-flex items-center gap-2 text-white/70 hover:text-white">
           <ArrowLeft size={18} />
-          Back to Plan
+          {labels.back}
         </Link>
       </div>
 
@@ -207,13 +228,13 @@ function Inner() {
           <div className="text-sm text-red-400">{error}</div>
         ) : plan ? (
           <>
-            <div className="text-xs uppercase tracking-[0.18em] text-white/55">Notes</div>
+            <div className="text-xs uppercase tracking-[0.18em] text-white/55">{labels.notes}</div>
             <h1 className="mt-1 text-2xl font-semibold tracking-tight text-white break-words">
-              {plan.title || 'Notes'}
+              {plan.title || labels.notes}
             </h1>
 
             <div className="rounded-2xl border border-white/10 bg-black/30 p-4 space-y-3">
-              <div className="text-xs uppercase tracking-[0.16em] text-white/55">Generate deep notes</div>
+              <div className="text-xs uppercase tracking-[0.16em] text-white/55">{labels.generator}</div>
               <Textarea
                 value={notesPrompt}
                 onChange={(e) => setNotesPrompt(e.target.value)}
@@ -232,10 +253,10 @@ function Inner() {
               <div className="text-xs text-white/60">{files.length}/{MAX_IMAGES} image(s) selected for notes vision.</div>
               <div className="flex items-center gap-3">
                 <Button onClick={generateLongNotes} disabled={genLoading || !notesPrompt.trim()}>
-                  {genLoading ? 'Generating long notes…' : 'Generate long notes'}
+                  {genLoading ? labels.buttonLoading : labels.button}
                 </Button>
-                {generatedWordCount != null ? (
-                  <div className="text-sm text-white/70">Word count: {generatedWordCount}</div>
+                {generatedCharCount != null ? (
+                  <div className="text-sm text-white/70">Character count: {generatedCharCount}</div>
                 ) : null}
                 {generatedLanguage ? (
                   <div className="text-sm text-white/70">Language: {generatedLanguage.toUpperCase()}</div>
@@ -245,13 +266,13 @@ function Inner() {
             </div>
 
             <div className="mt-2 rounded-3xl border border-white/10 bg-white/[0.02] p-5 min-w-0 overflow-hidden">
-              <div className="text-xs uppercase tracking-[0.18em] text-white/55">Study notes</div>
+              <div className="text-xs uppercase tracking-[0.18em] text-white/55">{labels.study}</div>
               {renderedNotes.trim() ? (
                 <div className="mt-3 richtext min-w-0 max-w-full overflow-x-auto text-white/80">
                   <MarkdownMath content={renderedNotes} />
                 </div>
               ) : (
-                <div className="mt-3 text-sm text-white/70">No notes available yet.</div>
+                <div className="mt-3 text-sm text-white/70">{labels.noNotes}</div>
               )}
             </div>
           </>

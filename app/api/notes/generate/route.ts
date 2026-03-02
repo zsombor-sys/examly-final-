@@ -3,13 +3,15 @@ import OpenAI from 'openai'
 import { z } from 'zod'
 import { requireUser } from '@/lib/authServer'
 import { OPENAI_MODEL } from '@/lib/limits'
-import { pickLanguage, type SupportedLanguage } from '@/lib/language'
+import { resolveLanguage, type SupportedLanguage } from '@/lib/language'
+import { trimMarkdownToVisibleMax, visibleLength, wordCountFromVisible } from '@/lib/textMeasure'
 
 export const runtime = 'nodejs'
 export const maxDuration = 60
 export const dynamic = 'force-dynamic'
 
-const NOTES_MIN_WORDS = 1200
+const NOTES_MIN_CHARS = 2000
+const NOTES_MAX_CHARS = 3000
 const NOTES_MAX_CALLS = 3
 const NOTES_MAX_TOKENS = 2200
 
@@ -37,13 +39,6 @@ const visionExtractResponseSchema = z.object({
   extracted_text: z.string(),
   key_terms: z.array(z.string()),
 })
-
-function wordCount(text: string) {
-  return String(text || '')
-    .trim()
-    .split(/\s+/)
-    .filter(Boolean).length
-}
 
 function extractText(content: unknown) {
   if (typeof content === 'string') return content
@@ -75,7 +70,6 @@ function parseJson(content: unknown) {
 function normalizeBase64Image(input: string): VisionImage {
   const value = String(input || '').trim()
   if (!value) throw new Error('Empty image input')
-
   const dataUrl = /^data:(.+?);base64,(.+)$/i.exec(value)
   if (dataUrl) return { mime: dataUrl[1], b64: dataUrl[2] }
   return { mime: 'image/png', b64: value }
@@ -155,7 +149,7 @@ async function extractFromImages(client: OpenAI, images: VisionImage[]) {
   return {
     detected_language: parsed.detected_language,
     extracted_text: String(parsed.extracted_text || '').trim(),
-    key_terms: (Array.isArray(parsed.key_terms) ? parsed.key_terms : []).map((x) => String(x || '').trim()).filter(Boolean),
+    key_terms: parsed.key_terms.map((x) => String(x || '').trim()).filter(Boolean),
   }
 }
 
@@ -169,30 +163,26 @@ async function generateChunk(params: {
   keyTerms: string[]
 }) {
   const { client, prompt, previous, language, continuation, extractedText, keyTerms } = params
-
-  const languageInstruction = language === 'hu' ? 'Respond in Hungarian.' : 'Respond in English.'
+  const langInstruction = language === 'hu' ? 'Respond in Hungarian.' : 'Respond in English.'
 
   const system = [
-    languageInstruction,
-    language === 'hu' ? 'Írj részletes, hosszú tananyagot markdown formátumban.' : 'Write a detailed, long-form study material in markdown.',
-    language === 'hu' ? 'Célhossz: legalább 1200-2000 szó. Ne légy rövid.' : 'Target length: at least 1200-2000 words. Do not be brief.',
-    language === 'hu'
-      ? 'Kötelező szakaszok: Definíciók, Mély magyarázatok, Történeti/kontextus háttér, Példák, Lépésről lépésre bontás, Gyakorló kérdések, Gyakori hibák, Összegzés.'
-      : 'Required sections: Definitions, Deep explanations, Historical/context background, Examples, Step-by-step breakdowns, Practice questions, Common mistakes, Summary.',
-    language === 'hu'
-      ? 'Írj úgy, mintha ez lenne az egyetlen tananyag, amiből a diák tanul.'
-      : 'Write as if this is the ONLY material the student will use.',
-    'For math, always use LaTeX notation.',
-    'Inline math format: \\( ... \\).',
-    'Display math format: \\[ ... \\].',
-    'Use headings and bullet lists where useful.',
+    langInstruction,
+    'Write detailed study notes in Markdown.',
+    `Target: at least ${NOTES_MIN_CHARS} and at most ${NOTES_MAX_CHARS} visible characters.`,
+    'Include: definitions, deep explanations, examples, practice questions, common mistakes, and summary.',
+    'Write as if this is the only material the student will use.',
+    'Whenever you write mathematics, you MUST use LaTeX.',
+    'Use ONLY \\( \\) for inline math and \\[ \\] for display math.',
+    'Do NOT use $...$.',
+    'Do NOT write math as plain text.',
   ].join('\n')
 
   const user = continuation
     ? [
-        language === 'hu'
-          ? 'Folytasd onnan, ahol abbahagytad. Bővítsd a szakaszokat példákkal, gyakorlókérdésekkel és tipikus hibákkal. Ne ismételj.'
-          : 'Continue from where you left off. Expand sections with examples, practice questions, and common mistakes. Do not repeat text.',
+        'Continue expanding.',
+        'Add more explanations, examples, and practice tasks.',
+        'Do not repeat.',
+        `Stay within ${NOTES_MAX_CHARS} visible characters total.`,
         '',
         language === 'hu' ? 'Eddigi szöveg:' : 'Current text:',
         previous,
@@ -202,9 +192,7 @@ async function generateChunk(params: {
         prompt,
         extractedText ? (language === 'hu' ? 'Kinyert anyag a képekből:' : 'Extracted content from images:') : '',
         extractedText,
-        keyTerms.length
-          ? `${language === 'hu' ? 'Kulcskifejezések' : 'Key terms'}: ${keyTerms.join(', ')}`
-          : '',
+        keyTerms.length ? `${language === 'hu' ? 'Kulcskifejezések' : 'Key terms'}: ${keyTerms.join(', ')}` : '',
       ]
         .filter(Boolean)
         .join('\n\n')
@@ -233,40 +221,38 @@ export async function POST(req: Request) {
 
     const input = await parseInput(req)
     const client = new OpenAI({ apiKey: key })
-
     const extracted = await extractFromImages(client, input.images)
 
-    const language =
-      input.language ||
-      pickLanguage(
-        [input.prompt, extracted.extracted_text, extracted.key_terms.join(' ')].join('\n'),
-        extracted.detected_language
-      )
+    const language = resolveLanguage({
+      explicit: input.language,
+      extracted: extracted.detected_language,
+      prompt: [input.prompt, extracted.extracted_text, extracted.key_terms.join(' ')].join('\n'),
+    })
 
     let markdown = ''
     for (let i = 0; i < NOTES_MAX_CALLS; i += 1) {
-      const continuation = i > 0
       const chunk = await generateChunk({
         client,
         prompt: input.prompt,
         previous: markdown,
         language,
-        continuation,
+        continuation: i > 0,
         extractedText: extracted.extracted_text,
         keyTerms: extracted.key_terms,
       })
       markdown = markdown ? `${markdown}\n\n${chunk}` : chunk
-      if (wordCount(markdown) >= NOTES_MIN_WORDS) break
+      if (visibleLength(markdown) >= NOTES_MIN_CHARS) break
     }
 
-    const finalCount = wordCount(markdown)
+    const finalMarkdown = trimMarkdownToVisibleMax(markdown, NOTES_MAX_CHARS)
+    const characterCount = visibleLength(finalMarkdown)
 
     return NextResponse.json({
-      markdown,
-      word_count: finalCount,
+      markdown: finalMarkdown,
+      character_count: characterCount,
+      word_count: wordCountFromVisible(finalMarkdown),
+      reached_target: characterCount >= NOTES_MIN_CHARS,
       language,
-      reached_target: finalCount >= NOTES_MIN_WORDS,
-      min_target: NOTES_MIN_WORDS,
       vision_used: input.images.length > 0,
     })
   } catch (error: any) {

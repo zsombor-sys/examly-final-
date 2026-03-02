@@ -14,6 +14,30 @@ function safeNext(nextValue: string | null) {
   return raw
 }
 
+function normalizePhone(raw: string) {
+  const digits = String(raw || '').replace(/\D/g, '')
+  if (!digits) return ''
+
+  let local = digits
+  if (local.startsWith('0036')) {
+    local = local.slice(4)
+  } else if (local.startsWith('36')) {
+    local = local.slice(2)
+  } else if (local.startsWith('06')) {
+    local = local.slice(2)
+  } else if (local.startsWith('0')) {
+    local = local.slice(1)
+  } else if (local.length === 9 && /^(20|30|70)/.test(local)) {
+    local = local
+  }
+
+  if (local.startsWith('36')) {
+    local = local.slice(2)
+  }
+  if (!local) return ''
+  return `+36${local}`
+}
+
 function isDuplicateEmailError(message: string) {
   const msg = String(message || '').toLowerCase()
   return (
@@ -25,6 +49,8 @@ function isDuplicateEmailError(message: string) {
 function isDuplicatePhoneError(message: string) {
   const msg = String(message || '').toLowerCase()
   return (
+    msg.includes('phone_normalized') ||
+    msg.includes('profiles_phone_normalized') ||
     msg.includes('profiles_phone_unique_idx') ||
     msg.includes('phone') && (msg.includes('already') || msg.includes('duplicate') || msg.includes('unique'))
   )
@@ -58,6 +84,7 @@ function SignupInner() {
     const full = fullName.trim()
     const emailNorm = email.trim().toLowerCase()
     const phoneRaw = phone.trim()
+    const phoneNorm = normalizePhone(phoneRaw)
     const next = safeNext(sp.get('next'))
 
     if (!full) {
@@ -70,6 +97,10 @@ function SignupInner() {
     }
     if (!phoneRaw) {
       setError('Phone is required.')
+      return
+    }
+    if (!phoneNorm) {
+      setError('Invalid phone number.')
       return
     }
     if (!password) {
@@ -93,7 +124,7 @@ function SignupInner() {
       const { data: phoneRow, error: phoneCheckError } = await supabase
         .from('profiles')
         .select('id')
-        .eq('phone', phoneRaw)
+        .eq('phone_normalized', phoneNorm)
         .maybeSingle()
       if (phoneCheckError) throw new Error(phoneCheckError.message || 'Failed to check phone availability.')
       if (phoneRow) {
@@ -108,6 +139,7 @@ function SignupInner() {
           data: {
             full_name: full,
             phone: phoneRaw,
+            phone_normalized: phoneNorm,
           },
         },
       })
@@ -137,6 +169,7 @@ function SignupInner() {
         id: userId,
         full_name: full,
         phone: phoneRaw,
+        phone_normalized: phoneNorm,
         email: emailNorm,
         credits: 5,
       })

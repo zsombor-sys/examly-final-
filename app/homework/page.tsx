@@ -101,9 +101,10 @@ function Inner() {
     if (!s) return null
     let t = s.trim()
 
-    // remove any trailing $$ or $
-    t = t.replace(/\$\$+$/, '').trim()
-    t = t.replace(/\$$/, '').trim()
+    // remove any dollar-based delimiters from model output
+    t = t.replace(/\$\$/g, '')
+    t = t.replace(/\$/g, '')
+    t = t.trim()
 
     return t || null
   }

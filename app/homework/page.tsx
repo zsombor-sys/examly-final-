@@ -97,6 +97,17 @@ function Inner() {
         noFinal: 'No final answer provided.',
       }
 
+  function stripTrailingDollarDelimiters(s?: string | null) {
+    if (!s) return s
+    let t = s.trim()
+
+    // Remove trailing unmatched $$ or $
+    if (t.endsWith('$$')) t = t.slice(0, -2).trim()
+    if (t.endsWith('$')) t = t.slice(0, -1).trim()
+
+    return t
+  }
+
   async function extractTasks() {
     setError(null)
     setTasks([])
@@ -284,13 +295,29 @@ function Inner() {
                           {step.work_latex ? (
                             <div className="mt-2 text-sm text-white/70">
                               <span className="text-white/45">Work:</span>{' '}
-                              <MarkdownMath content={`\\[${step.work_latex}\\]`} />
+                              {(() => {
+                                const work = stripTrailingDollarDelimiters(step.work_latex)
+                                if (!work) return null
+                                return (
+                                  <MarkdownMath
+                                    content={work.startsWith('\\[') || work.startsWith('$$') ? work : `\\[${work}\\]`}
+                                  />
+                                )
+                              })()}
                             </div>
                           ) : null}
                           {step.result_latex ? (
                             <div className="mt-2 text-sm text-white/70">
                               <span className="text-white/45">Result:</span>{' '}
-                              <MarkdownMath content={`\\[${step.result_latex}\\]`} />
+                              {(() => {
+                                const result = stripTrailingDollarDelimiters(step.result_latex)
+                                if (!result) return null
+                                return (
+                                  <MarkdownMath
+                                    content={result.startsWith('\\[') || result.startsWith('$$') ? result : `\\[${result}\\]`}
+                                  />
+                                )
+                              })()}
                             </div>
                           ) : null}
                         </div>

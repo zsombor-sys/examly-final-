@@ -45,29 +45,32 @@ const QA = [
 import Link from 'next/link'
 import MarkdownMath from '@/components/MarkdownMath'
 import AuthGate from '@/components/AuthGate'
+import ClientAuthGuard from '@/components/ClientAuthGuard'
 
 export default function GuidePage() {
   return (
-    <AuthGate requireEntitlement={false}>
-      <div className="mx-auto max-w-4xl px-4 py-12">
-        <h1 className="text-3xl font-semibold tracking-tight">Guide</h1>
-        <p className="mt-2 text-white/70">Quick Q&amp;A on how to use Umenify.</p>
+    <ClientAuthGuard>
+      <AuthGate requireEntitlement={false}>
+        <div className="mx-auto max-w-4xl px-4 py-12">
+          <h1 className="text-3xl font-semibold tracking-tight">Guide</h1>
+          <p className="mt-2 text-white/70">Quick Q&amp;A on how to use Umenify.</p>
 
-      <div className="mt-8 space-y-4">
-        {QA.map((item) => (
-          <div key={item.q} className="rounded-2xl border border-white/10 bg-white/[0.02] p-5">
-            <div className="text-sm font-semibold">{item.q}</div>
-            <div className="mt-2 text-sm text-white/75">
-              <MarkdownMath content={item.a} />
-            </div>
+          <div className="mt-8 space-y-4">
+            {QA.map((item) => (
+              <div key={item.q} className="rounded-2xl border border-white/10 bg-white/[0.02] p-5">
+                <div className="text-sm font-semibold">{item.q}</div>
+                <div className="mt-2 text-sm text-white/75">
+                  <MarkdownMath content={item.a} />
+                </div>
+              </div>
+            ))}
           </div>
-        ))}
-      </div>
 
-        <div className="mt-10 text-sm text-white/60">
-          Go to <Link className="text-white underline" href="/plan">Plan</Link> to start.
+          <div className="mt-10 text-sm text-white/60">
+            Go to <Link className="text-white underline" href="/plan">Plan</Link> to start.
+          </div>
         </div>
-      </div>
-    </AuthGate>
+      </AuthGate>
+    </ClientAuthGuard>
   )
 }

@@ -3,6 +3,7 @@
 import Link from 'next/link'
 import { useEffect, useState } from 'react'
 import AuthGate from '@/components/AuthGate'
+import ClientAuthGuard from '@/components/ClientAuthGuard'
 import { authedFetch } from '@/lib/authClient'
 import { supabase } from '@/lib/supabaseClient'
 import { ArrowLeft, Loader2 } from 'lucide-react'
@@ -51,9 +52,11 @@ function loadLocalPlan(userId: string | null, id: string): any | null {
 
 export default function NotesPage() {
   return (
-    <AuthGate requireEntitlement={false}>
-      <Inner />
-    </AuthGate>
+    <ClientAuthGuard>
+      <AuthGate requireEntitlement={false}>
+        <Inner />
+      </AuthGate>
+    </ClientAuthGuard>
   )
 }
 

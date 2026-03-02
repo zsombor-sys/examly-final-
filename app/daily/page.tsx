@@ -3,6 +3,7 @@
 import Link from 'next/link'
 import { useEffect, useMemo, useState } from 'react'
 import AuthGate from '@/components/AuthGate'
+import ClientAuthGuard from '@/components/ClientAuthGuard'
 import { authedFetch } from '@/lib/authClient'
 import { supabase } from '@/lib/supabaseClient'
 import { ArrowLeft, Loader2 } from 'lucide-react'
@@ -138,9 +139,11 @@ function getDailySchedule(plan: PlanResult | null): DailyDay[] {
 
 export default function DailyPage() {
   return (
-    <AuthGate requireEntitlement={false}>
-      <Inner />
-    </AuthGate>
+    <ClientAuthGuard>
+      <AuthGate requireEntitlement={false}>
+        <Inner />
+      </AuthGate>
+    </ClientAuthGuard>
   )
 }
 

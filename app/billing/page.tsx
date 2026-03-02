@@ -2,15 +2,18 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import AuthGate from '@/components/AuthGate'
+import ClientAuthGuard from '@/components/ClientAuthGuard'
 import { Button, Card } from '@/components/ui'
 import { Loader2, Lock, Zap } from 'lucide-react'
 import { supabase } from '@/lib/supabaseClient'
 
 export default function BillingPage() {
   return (
-    <AuthGate requireEntitlement={false}>
-      <Inner />
-    </AuthGate>
+    <ClientAuthGuard>
+      <AuthGate requireEntitlement={false}>
+        <Inner />
+      </AuthGate>
+    </ClientAuthGuard>
   )
 }
 

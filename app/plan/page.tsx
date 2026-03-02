@@ -6,6 +6,7 @@ import { Button, Textarea } from '@/components/ui'
 import MarkdownMath from '@/components/MarkdownMath'
 import { FileUp, Loader2, Trash2, ArrowLeft, Send } from 'lucide-react'
 import AuthGate from '@/components/AuthGate'
+import ClientAuthGuard from '@/components/ClientAuthGuard'
 import { authedFetch } from '@/lib/authClient'
 import { supabase } from '@/lib/supabaseClient'
 import HScroll from '@/components/HScroll'
@@ -307,12 +308,14 @@ export default function PlanPage() {
     setEntitlement(state)
   }, [])
   return (
-    <AuthGate
-      requireEntitlement={true}
-      onEntitlement={handleEntitlement}
-    >
-      <Inner entitlement={entitlement} />
-    </AuthGate>
+    <ClientAuthGuard>
+      <AuthGate
+        requireEntitlement={true}
+        onEntitlement={handleEntitlement}
+      >
+        <Inner entitlement={entitlement} />
+      </AuthGate>
+    </ClientAuthGuard>
   )
 }
 

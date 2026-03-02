@@ -5,6 +5,7 @@ import { Button, Card, Textarea, Input } from '@/components/ui'
 import FlipCard from '@/components/FlipCard'
 import { FileUp, Loader2, RotateCcw, ArrowLeftRight } from 'lucide-react'
 import AuthGate from '@/components/AuthGate'
+import ClientAuthGuard from '@/components/ClientAuthGuard'
 import { authedFetch } from '@/lib/authClient'
 import { supabase } from '@/lib/supabaseClient'
 import { uploadFilesToStorage } from '@/lib/uploadClient'
@@ -795,8 +796,10 @@ function VocabPageInner() {
 
 export default function VocabPage() {
   return (
-    <AuthGate>
-      <VocabPageInner />
-    </AuthGate>
+    <ClientAuthGuard>
+      <AuthGate>
+        <VocabPageInner />
+      </AuthGate>
+    </ClientAuthGuard>
   )
 }

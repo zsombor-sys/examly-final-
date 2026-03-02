@@ -5,13 +5,16 @@ import Link from 'next/link'
 import { useSearchParams } from 'next/navigation'
 import { useRouter } from 'next/navigation'
 import AuthGate from '@/components/AuthGate'
+import ClientAuthGuard from '@/components/ClientAuthGuard'
 import { Button, Card } from '@/components/ui'
 
 export default function BillingSuccessPage() {
   return (
-    <AuthGate requireEntitlement={false}>
-      <Inner />
-    </AuthGate>
+    <ClientAuthGuard>
+      <AuthGate requireEntitlement={false}>
+        <Inner />
+      </AuthGate>
+    </ClientAuthGuard>
   )
 }
 

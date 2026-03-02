@@ -3,6 +3,7 @@
 import { useState } from 'react'
 import Link from 'next/link'
 import AuthGate from '@/components/AuthGate'
+import ClientAuthGuard from '@/components/ClientAuthGuard'
 import { Button, Textarea } from '@/components/ui'
 import { authedFetch } from '@/lib/authClient'
 import { MAX_HOMEWORK_IMAGES, MAX_HOMEWORK_PROMPT_CHARS } from '@/lib/limits'
@@ -37,9 +38,11 @@ type HomeworkResult = {
 
 export default function HomeworkPage() {
   return (
-    <AuthGate requireEntitlement={true}>
-      <Inner />
-    </AuthGate>
+    <ClientAuthGuard>
+      <AuthGate requireEntitlement={true}>
+        <Inner />
+      </AuthGate>
+    </ClientAuthGuard>
   )
 }
 

@@ -3,6 +3,7 @@ import OpenAI from 'openai'
 import { z } from 'zod'
 import { requireUser } from '@/lib/authServer'
 import { OPENAI_MODEL } from '@/lib/limits'
+import { pickLanguage } from '@/lib/language'
 
 export const runtime = 'nodejs'
 export const maxDuration = 60
@@ -19,6 +20,7 @@ const taskSchema = z.object({
 const reqSchema = z.object({
   task: taskSchema,
   style: z.enum(['step_by_step']).optional().default('step_by_step'),
+  language: z.enum(['hu', 'en']).optional(),
 })
 
 const solveOutputSchema = z.object({
@@ -29,6 +31,8 @@ const solveOutputSchema = z.object({
       explain: z.string(),
       work: z.string(),
       result: z.string(),
+      work_latex: z.string().optional(),
+      result_latex: z.string().optional(),
     })
   ),
   final_answer: z.string(),
@@ -51,6 +55,8 @@ const solveSchema = {
           explain: { type: 'string' },
           work: { type: 'string' },
           result: { type: 'string' },
+          work_latex: { type: 'string' },
+          result_latex: { type: 'string' },
         },
         required: ['label', 'explain', 'work', 'result'],
       },
@@ -105,6 +111,8 @@ export async function POST(req: Request) {
     }
 
     const client = new OpenAI({ apiKey: key })
+    const language = parsed.data.language || pickLanguage(`${parsed.data.task.title}\n${parsed.data.task.raw_text}`)
+    const langInstruction = language === 'hu' ? 'Respond in Hungarian.' : 'Respond in English.'
 
     const resp = await client.chat.completions.create({
       model: OPENAI_MODEL,
@@ -117,6 +125,10 @@ export async function POST(req: Request) {
             'You are a teaching assistant solving one homework task.',
             'Explain WHY each step is done (teaching mode).',
             'Keep each step reasonably sized for gated step-by-step UI.',
+            'For math expressions, always use LaTeX notation.',
+            'Use inline math as \\( ... \\) and display math as \\[ ... \\].',
+            'If a step contains formulas, fill work_latex and result_latex as valid LaTeX snippets.',
+            langInstruction,
             'Return JSON only matching schema.',
           ].join('\n'),
         },
@@ -146,9 +158,12 @@ export async function POST(req: Request) {
       explain: String(step.explain || '').trim(),
       work: String(step.work || '').trim(),
       result: String(step.result || '').trim(),
+      work_latex: String(step.work_latex || '').trim(),
+      result_latex: String(step.result_latex || '').trim(),
     }))
 
     return NextResponse.json({
+      language,
       title: String(normalized.title || parsed.data.task.title).trim(),
       steps,
       final_answer: String(normalized.final_answer || '').trim(),

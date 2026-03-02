@@ -7,6 +7,7 @@ import ClientAuthGuard from '@/components/ClientAuthGuard'
 import { Button, Textarea } from '@/components/ui'
 import { authedFetch } from '@/lib/authClient'
 import { MAX_HOMEWORK_IMAGES } from '@/lib/limits'
+import MarkdownMath from '@/components/MarkdownMath'
 
 type ExtractedTask = {
   id: string
@@ -18,7 +19,7 @@ type ExtractedTask = {
 
 type SolvedTask = {
   title: string
-  steps: Array<{ label: string; explain: string; work: string; result: string }>
+  steps: Array<{ label: string; explain: string; work: string; result: string; work_latex?: string; result_latex?: string }>
   final_answer: string
   checks: string[]
   common_mistakes: string[]
@@ -46,6 +47,7 @@ function Inner() {
   const [solutions, setSolutions] = useState<Record<string, SolvedTask>>({})
   const [expandedTaskId, setExpandedTaskId] = useState<string | null>(null)
   const [stepProgress, setStepProgress] = useState<Record<string, number>>({})
+  const [uiLanguage, setUiLanguage] = useState<'hu' | 'en'>('en')
 
   const hasFiles = files.length > 0
 
@@ -53,12 +55,57 @@ function Inner() {
     return tasks.filter((task) => !!solutions[task.id]).length
   }, [tasks, solutions])
 
+  const ui = uiLanguage === 'hu'
+    ? {
+        back: 'Vissza a tervhez',
+        title: 'Házi Feladat Vision Kivonatoló',
+        subjectPlaceholder: 'Opcionális tantárgy tipp (pl. 10. osztály algebra, sztöchiometria).',
+        selected: 'kép kiválasztva',
+        extract: 'Feladatok kinyerése',
+        extracting: 'Kinyerés…',
+        solveAll: 'Összes feladat megoldása',
+        solvingAll: 'Összes megoldása…',
+        detected: 'Észlelt feladatok',
+        solved: 'Megoldva',
+        solve: 'Megoldás',
+        resolve: 'Újramegoldás',
+        solving: 'Megoldás…',
+        previous: 'Előző',
+        next: 'Következő lépés',
+        finalAnswer: 'Végső válasz',
+        checks: 'Ellenőrzések',
+        mistakes: 'Gyakori hibák',
+        noFinal: 'Nincs végső válasz.',
+      }
+    : {
+        back: 'Back to Plan',
+        title: 'Homework Vision Extractor',
+        subjectPlaceholder: 'Optional subject hint (e.g. grade 10 algebra, chemistry stoichiometry).',
+        selected: 'image(s) selected',
+        extract: 'Extract tasks',
+        extracting: 'Extracting…',
+        solveAll: 'Solve all tasks',
+        solvingAll: 'Solving all…',
+        detected: 'Detected tasks',
+        solved: 'Solved',
+        solve: 'Solve',
+        resolve: 'Re-solve',
+        solving: 'Solving…',
+        previous: 'Previous',
+        next: 'Next step',
+        finalAnswer: 'Final answer',
+        checks: 'Checks',
+        mistakes: 'Common mistakes',
+        noFinal: 'No final answer provided.',
+      }
+
   async function extractTasks() {
     setError(null)
     setTasks([])
     setSolutions({})
     setStepProgress({})
     setExpandedTaskId(null)
+    setUiLanguage('en')
 
     if (!hasFiles) {
       setError('Upload at least one image before extracting tasks.')
@@ -86,6 +133,9 @@ function Inner() {
         throw new Error('No tasks were extracted from the uploaded image(s).')
       }
 
+      if (json?.detected_language === 'hu' || json?.detected_language === 'en') {
+        setUiLanguage(json.detected_language)
+      }
       setTasks(extracted)
       setExpandedTaskId(extracted[0]?.id ?? null)
     } catch (e: any) {
@@ -102,7 +152,7 @@ function Inner() {
       const res = await authedFetch('/api/homework/solve', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ task, style: 'step_by_step' }),
+        body: JSON.stringify({ task, style: 'step_by_step', language: uiLanguage }),
       })
       const json = await res.json().catch(() => ({} as any))
       if (!res.ok) throw new Error(json?.error ?? 'Failed to solve task')
@@ -115,6 +165,8 @@ function Inner() {
               explain: String(s?.explain || '').trim(),
               work: String(s?.work || '').trim(),
               result: String(s?.result || '').trim(),
+              work_latex: String(s?.work_latex || '').trim(),
+              result_latex: String(s?.result_latex || '').trim(),
             }))
           : [],
         final_answer: String(json?.final_answer || '').trim(),
@@ -125,6 +177,7 @@ function Inner() {
       }
 
       if (!solved.steps.length) throw new Error('Solver returned no steps for this task.')
+      if (json?.language === 'hu' || json?.language === 'en') setUiLanguage(json.language)
 
       setSolutions((curr) => ({ ...curr, [task.id]: solved }))
       setStepProgress((curr) => ({ ...curr, [task.id]: Math.max(curr[task.id] || 1, 1) }))
@@ -151,15 +204,15 @@ function Inner() {
 
   return (
     <div className="mx-auto max-w-5xl px-4 py-10 space-y-6">
-      <Link href="/plan" className="text-sm text-white/70 hover:text-white">Back to Plan</Link>
+      <Link href="/plan" className="text-sm text-white/70 hover:text-white">{ui.back}</Link>
 
       <div className="rounded-3xl border border-white/10 bg-black/40 p-5 space-y-4">
-        <div className="text-xs uppercase tracking-[0.18em] text-white/55">Homework Vision Extractor</div>
+        <div className="text-xs uppercase tracking-[0.18em] text-white/55">{ui.title}</div>
 
         <Textarea
           value={subjectHint}
           onChange={(e) => setSubjectHint(e.target.value)}
-          placeholder="Optional subject hint (e.g. grade 10 algebra, chemistry stoichiometry)."
+          placeholder={ui.subjectPlaceholder}
         />
 
         <input
@@ -178,15 +231,15 @@ function Inner() {
         />
 
         <div className="text-xs text-white/60">
-          {files.length}/{MAX_HOMEWORK_IMAGES} image(s) selected.
+          {files.length}/{MAX_HOMEWORK_IMAGES} {ui.selected}.
         </div>
 
         <div className="flex flex-wrap gap-2">
           <Button onClick={extractTasks} disabled={extractLoading || solveAllLoading || !hasFiles}>
-            {extractLoading ? 'Extracting…' : 'Extract tasks'}
+            {extractLoading ? ui.extracting : ui.extract}
           </Button>
           <Button variant="ghost" onClick={solveAllTasks} disabled={solveAllLoading || extractLoading || tasks.length === 0}>
-            {solveAllLoading ? 'Solving all…' : 'Solve all tasks'}
+            {solveAllLoading ? ui.solvingAll : ui.solveAll}
           </Button>
         </div>
 
@@ -196,8 +249,8 @@ function Inner() {
       {tasks.length > 0 ? (
         <div className="rounded-3xl border border-white/10 bg-black/40 p-5 space-y-4">
           <div className="flex items-center justify-between gap-3">
-            <div className="text-sm text-white/70">Detected tasks: {tasks.length}</div>
-            <div className="text-xs text-white/50">Solved: {solvedCount}/{tasks.length}</div>
+            <div className="text-sm text-white/70">{ui.detected}: {tasks.length}</div>
+            <div className="text-xs text-white/50">{ui.solved}: {solvedCount}/{tasks.length}</div>
           </div>
 
           <div className="space-y-4">
@@ -224,7 +277,7 @@ function Inner() {
                       onClick={() => solveTask(task)}
                       disabled={!!solvingTaskId || solveAllLoading || extractLoading}
                     >
-                      {solvingTaskId === task.id ? 'Solving…' : solved ? 'Re-solve' : 'Solve'}
+                      {solvingTaskId === task.id ? ui.solving : solved ? ui.resolve : ui.solve}
                     </Button>
                   </div>
 
@@ -233,12 +286,16 @@ function Inner() {
                       {solved.steps.slice(0, progress).map((step, stepIndex) => (
                         <div key={`${task.id}-${stepIndex}`} className="rounded-xl border border-white/10 bg-black/30 p-4">
                           <div className="text-xs text-white/50">{step.label}</div>
-                          <div className="mt-1 text-sm text-white/90">{step.explain}</div>
-                          <div className="mt-2 text-sm text-white/70">
-                            <span className="text-white/45">Work:</span> {step.work}
+                          <div className="mt-1 text-sm text-white/90">
+                            <MarkdownMath content={step.explain} />
                           </div>
                           <div className="mt-2 text-sm text-white/70">
-                            <span className="text-white/45">Result:</span> {step.result}
+                            <span className="text-white/45">Work:</span>{' '}
+                            <MarkdownMath content={step.work_latex || step.work} />
+                          </div>
+                          <div className="mt-2 text-sm text-white/70">
+                            <span className="text-white/45">Result:</span>{' '}
+                            <MarkdownMath content={step.result_latex || step.result} />
                           </div>
                         </div>
                       ))}
@@ -249,24 +306,24 @@ function Inner() {
                           disabled={progress <= 1}
                           onClick={() => setStepProgress((curr) => ({ ...curr, [task.id]: Math.max(1, progress - 1) }))}
                         >
-                          Previous
+                          {ui.previous}
                         </Button>
                         <Button
                           disabled={progress >= solved.steps.length}
                           onClick={() => setStepProgress((curr) => ({ ...curr, [task.id]: Math.min(solved.steps.length, progress + 1) }))}
                         >
-                          Next step
+                          {ui.next}
                         </Button>
                       </div>
 
                       {showFinal ? (
                         <div className="rounded-xl border border-emerald-400/25 bg-emerald-500/10 p-4 text-sm text-emerald-100">
-                          <div className="text-xs uppercase tracking-[0.14em] text-emerald-200/80">Final answer</div>
-                          <div className="mt-1">{solved.final_answer || 'No final answer provided.'}</div>
+                          <div className="text-xs uppercase tracking-[0.14em] text-emerald-200/80">{ui.finalAnswer}</div>
+                          <div className="mt-1"><MarkdownMath content={solved.final_answer || ui.noFinal} /></div>
 
                           {solved.checks.length > 0 ? (
                             <div className="mt-3">
-                              <div className="text-xs uppercase tracking-[0.14em] text-emerald-200/80">Checks</div>
+                              <div className="text-xs uppercase tracking-[0.14em] text-emerald-200/80">{ui.checks}</div>
                               <ul className="mt-1 list-disc pl-5 text-emerald-100/90">
                                 {solved.checks.map((check, i) => <li key={`${task.id}-check-${i}`}>{check}</li>)}
                               </ul>
@@ -275,7 +332,7 @@ function Inner() {
 
                           {solved.common_mistakes.length > 0 ? (
                             <div className="mt-3">
-                              <div className="text-xs uppercase tracking-[0.14em] text-emerald-200/80">Common mistakes</div>
+                              <div className="text-xs uppercase tracking-[0.14em] text-emerald-200/80">{ui.mistakes}</div>
                               <ul className="mt-1 list-disc pl-5 text-emerald-100/90">
                                 {solved.common_mistakes.map((mistake, i) => (
                                   <li key={`${task.id}-mistake-${i}`}>{mistake}</li>

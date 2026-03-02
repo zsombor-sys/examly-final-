@@ -3,6 +3,7 @@ import OpenAI from 'openai'
 import { z } from 'zod'
 import { requireUser } from '@/lib/authServer'
 import { OPENAI_MODEL } from '@/lib/limits'
+import { looksHungarianText, pickLanguage, type SupportedLanguage } from '@/lib/language'
 
 export const runtime = 'nodejs'
 export const maxDuration = 60
@@ -16,6 +17,7 @@ const jsonSchema = z.object({
 })
 
 const extractResponseSchema = z.object({
+  detected_language: z.enum(['hu', 'en']),
   tasks: z.array(
     z.object({
       id: z.string(),
@@ -31,6 +33,7 @@ const extractSchema = {
   type: 'object',
   additionalProperties: false,
   properties: {
+    detected_language: { type: 'string', enum: ['hu', 'en'] },
     tasks: {
       type: 'array',
       items: {
@@ -47,7 +50,7 @@ const extractSchema = {
       },
     },
   },
-  required: ['tasks'],
+  required: ['detected_language', 'tasks'],
 }
 
 function extractText(content: unknown) {
@@ -142,6 +145,7 @@ export async function POST(req: Request) {
           'Read ALL tasks visible on the image(s).',
           'Return JSON only, matching schema.',
           'Do not solve yet.',
+          'Also detect the language of the assignment text and return detected_language as "hu" or "en".',
           subject ? `Subject hint: ${subject}` : '',
         ]
           .filter(Boolean)
@@ -187,7 +191,11 @@ export async function POST(req: Request) {
       confidence: Math.max(0, Math.min(1, Number(task.confidence) || 0.5)),
     }))
 
-    return NextResponse.json({ tasks })
+    const anyHungarianTask = tasks.some((t) => looksHungarianText(`${t.title}\n${t.raw_text}`))
+    const imageLang = parsed.detected_language as SupportedLanguage
+    const detected_language = pickLanguage(`${subject}\n${tasks.map((t) => `${t.title} ${t.raw_text}`).join('\n')}`, anyHungarianTask ? 'hu' : imageLang)
+
+    return NextResponse.json({ tasks, detected_language })
   } catch (error: any) {
     console.error('homework.extract.error', { message: String(error?.message || 'Unknown error') })
     return NextResponse.json({ error: String(error?.message || 'Failed to extract tasks') }, { status: 500 })

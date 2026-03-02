@@ -9,6 +9,7 @@ import { supabase } from '@/lib/supabaseClient'
 import { ArrowLeft, Loader2 } from 'lucide-react'
 import MarkdownMath from '@/components/MarkdownMath'
 import { Button, Textarea } from '@/components/ui'
+import { MAX_IMAGES } from '@/lib/limits'
 
 type PlanResult = {
   title?: string | null
@@ -73,6 +74,8 @@ function Inner() {
   const [genError, setGenError] = useState<string | null>(null)
   const [generatedMarkdown, setGeneratedMarkdown] = useState<string>('')
   const [generatedWordCount, setGeneratedWordCount] = useState<number | null>(null)
+  const [generatedLanguage, setGeneratedLanguage] = useState<'hu' | 'en' | null>(null)
+  const [files, setFiles] = useState<File[]>([])
 
   const notesText = useMemo(() => {
     if (!plan?.notes) return ''
@@ -163,16 +166,16 @@ function Inner() {
     setGenLoading(true)
     try {
       const prompt = notesPrompt.trim() || `Topic: ${plan?.title || 'Study material'}`
-      const res = await authedFetch('/api/notes/generate', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ prompt, language: 'en' }),
-      })
+      const fd = new FormData()
+      fd.append('prompt', prompt)
+      for (const file of files.slice(0, MAX_IMAGES)) fd.append('files', file)
+      const res = await authedFetch('/api/notes/generate', { method: 'POST', body: fd })
       const json = await res.json().catch(() => ({} as any))
       if (!res.ok) throw new Error(String(json?.error || 'Failed to generate notes'))
 
       setGeneratedMarkdown(String(json?.markdown || ''))
       setGeneratedWordCount(Number(json?.word_count || 0))
+      setGeneratedLanguage(json?.language === 'hu' ? 'hu' : 'en')
 
       if (!json?.reached_target) {
         setGenError(`Notes generated but below target (${Number(json?.word_count || 0)} words). Try a more specific prompt.`)
@@ -217,12 +220,25 @@ function Inner() {
                 className="min-h-[140px]"
                 placeholder="Describe what depth you need for the notes."
               />
+              <input
+                type="file"
+                accept="image/*"
+                multiple
+                onChange={(e) => {
+                  const next = Array.from(e.target.files ?? [])
+                  setFiles(next.slice(0, MAX_IMAGES))
+                }}
+              />
+              <div className="text-xs text-white/60">{files.length}/{MAX_IMAGES} image(s) selected for notes vision.</div>
               <div className="flex items-center gap-3">
                 <Button onClick={generateLongNotes} disabled={genLoading || !notesPrompt.trim()}>
                   {genLoading ? 'Generating long notes…' : 'Generate long notes'}
                 </Button>
                 {generatedWordCount != null ? (
                   <div className="text-sm text-white/70">Word count: {generatedWordCount}</div>
+                ) : null}
+                {generatedLanguage ? (
+                  <div className="text-sm text-white/70">Language: {generatedLanguage.toUpperCase()}</div>
                 ) : null}
               </div>
               {genError ? <div className="text-sm text-red-400">{genError}</div> : null}

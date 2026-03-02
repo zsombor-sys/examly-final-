@@ -1,102 +1,99 @@
-'use client'
+"use client";
 
-import { Suspense, useEffect, useState } from 'react'
-import { useRouter, useSearchParams } from 'next/navigation'
-import { supabase } from '@/lib/supabaseClient'
+import { useRouter, useSearchParams } from "next/navigation";
+import { Suspense, useState } from "react";
+import { supabase } from "@/lib/supabaseClient";
 
-function safeNext(nextValue: string | null) {
-  const raw = String(nextValue || '').trim()
-  if (!raw.startsWith('/')) return '/plan'
-  if (raw.startsWith('//')) return '/plan'
-  if (raw.startsWith('/login') || raw.startsWith('/signup') || raw.startsWith('/register')) return '/plan'
-  return raw
+function safeNext(next: string | null) {
+  const n = next || "/plan";
+  if (!n.startsWith("/")) return "/plan";
+  if (n.startsWith("//")) return "/plan";
+  if (n.startsWith("/login") || n.startsWith("/signup") || n.startsWith("/register")) return "/plan";
+  return n;
 }
 
 function LoginInner() {
-  const router = useRouter()
-  const searchParams = useSearchParams()
+  const router = useRouter();
+  const sp = useSearchParams();
+  const target = safeNext(sp.get("next"));
 
-  const [email, setEmail] = useState('')
-  const [password, setPassword] = useState('')
-  const [loading, setLoading] = useState(false)
-  const [error, setError] = useState<string | null>(null)
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [status, setStatus] = useState<string>("idle");
+  const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
-    const message = searchParams.get('message')
-    if (message) setError(message)
-  }, [searchParams])
+  const doLogin = async () => {
+    setError(null);
+    setStatus("CLICK_OK");
 
-  async function onSubmit(e: React.FormEvent) {
-    e.preventDefault()
-    setError(null)
-    setLoading(true)
+    const { data: before } = await supabase.auth.getSession();
+    console.log("LOGIN: session BEFORE?", !!before?.session);
 
-    try {
-      const { error: signInError } = await supabase.auth.signInWithPassword({
-        email: email.trim().toLowerCase(),
-        password,
-      })
+    setStatus("SIGNING_IN");
 
-      if (signInError) {
-        setError(signInError.message || 'Login failed')
-        return
-      }
+    const { error: signInError } = await supabase.auth.signInWithPassword({ email, password });
+    console.log("LOGIN: signInError", signInError);
 
-      const target = safeNext(searchParams.get('next')) || '/plan'
-      router.replace(target)
-      router.refresh()
-    } catch (err: any) {
-      setError(String(err?.message || 'Login failed'))
-    } finally {
-      setLoading(false)
+    if (signInError) {
+      setError(signInError.message);
+      setStatus("ERROR");
+      return;
     }
-  }
+
+    const { data: after } = await supabase.auth.getSession();
+    console.log("LOGIN: session AFTER?", !!after?.session);
+
+    setStatus("NAVIGATING");
+    router.replace(target);
+    window.location.assign(target);
+  };
 
   return (
-    <div className="mx-auto max-w-md px-4 py-16">
-      <h1 className="text-2xl font-semibold text-white">Sign in</h1>
-      <p className="mt-2 text-sm text-white/60">Log in to continue to your plan.</p>
-      <form className="mt-6 space-y-3" onSubmit={onSubmit}>
-        <input
-          name="email"
-          className="w-full rounded-xl border border-white/15 bg-black/40 px-3 py-2 text-white outline-none focus:border-white/35"
-          type="email"
-          value={email}
-          onChange={(e) => setEmail(e.target.value)}
-          placeholder="Email"
-          required
-        />
-        <input
-          name="password"
-          className="w-full rounded-xl border border-white/15 bg-black/40 px-3 py-2 text-white outline-none focus:border-white/35"
-          type="password"
-          value={password}
-          onChange={(e) => setPassword(e.target.value)}
-          placeholder="Password"
-          required
-        />
-        <button
-          id="login-submit"
-          type="submit"
-          disabled={loading}
-          className="w-full rounded-xl bg-white px-4 py-2 font-medium text-black disabled:opacity-60"
-        >
-          {loading ? 'Logging in...' : 'Log in'}
-        </button>
-      </form>
-      {error ? (
-        <div className="mt-3 rounded-lg border border-red-400/40 bg-red-500/10 px-3 py-2 text-sm text-red-300">
-          {error}
-        </div>
-      ) : null}
+    <div style={{ padding: 24 }}>
+      <h1>Login (DEBUG)</h1>
+      <p>
+        Status: <b>{status}</b>
+      </p>
+      <p>
+        Target: <b>{target}</b>
+      </p>
+
+      <input
+        name="email"
+        placeholder="Email"
+        value={email}
+        onChange={(e) => setEmail(e.target.value)}
+        style={{ display: "block", marginBottom: 8, width: 320 }}
+      />
+      <input
+        name="password"
+        placeholder="Password"
+        type="password"
+        value={password}
+        onChange={(e) => setPassword(e.target.value)}
+        style={{ display: "block", marginBottom: 8, width: 320 }}
+      />
+
+      <button type="button" onClick={doLogin} style={{ padding: "8px 16px" }}>
+        LOG IN (DEBUG)
+      </button>
+
+      {error && (
+        <p style={{ marginTop: 12 }}>
+          <b>Error:</b> {error}
+        </p>
+      )}
+      <p style={{ marginTop: 12, opacity: 0.8 }}>
+        If Status never changes from idle, the button click is not firing (overlay/pointer-events issue).
+      </p>
     </div>
-  )
+  );
 }
 
 export default function LoginPage() {
   return (
-    <Suspense fallback={<div className="mx-auto max-w-md px-4 py-16 text-sm text-white/70">Loading...</div>}>
+    <Suspense fallback={<div style={{ padding: 24 }}>Loading...</div>}>
       <LoginInner />
     </Suspense>
-  )
+  );
 }

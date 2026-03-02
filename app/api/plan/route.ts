@@ -8,8 +8,6 @@ import {
   CREDITS_PER_GENERATION,
   MAX_PLAN_IMAGES,
   MAX_PLAN_PROMPT_CHARS,
-  NOTES_TARGET_MAX_CHARS,
-  NOTES_TARGET_MIN_CHARS,
   OPENAI_MODEL,
 } from '@/lib/limits'
 import { getCredits, chargeCredits, refundCredits } from '@/lib/credits'
@@ -36,6 +34,17 @@ const STEP2_TIMEOUT_MS = 14_000
 const OPENAI_ATTEMPTS = 2
 const MAX_VISION_BYTES = 8 * 1024 * 1024
 const MAX_EXTRACT_CHARS = 12_000
+const PLAN_NOTES_MIN_CHARS = 800
+const PLAN_NOTES_MAX_CHARS = 1500
+
+const FORBIDDEN_NOTES_PATTERNS: RegExp[] = [
+  /concepts?\s*:\s*short definition/i,
+  /short definition/i,
+  /rövid definíció/i,
+  /mini példa/i,
+  /main goal:\s*focus on key concepts/i,
+  /quick summary/i,
+]
 
 const planRequestSchema = z.object({
   prompt: z.string().max(MAX_PLAN_PROMPT_CHARS).optional().default(''),
@@ -76,26 +85,9 @@ const planDailyZod = z.object({
   }),
 })
 
-const notesPracticeZod = z.object({
-  notes: z.object({
-    sections: z.array(
-      z.object({
-        heading: z.string(),
-        bullets: z.array(z.string()),
-      })
-    ),
-    recap: z.string(),
-  }),
-  practice: z.object({
-    questions: z.array(
-      z.object({
-        q: z.string(),
-        choices: z.array(z.string()).optional(),
-        a: z.string(),
-        explanation: z.string(),
-      })
-    ),
-  }),
+const planEnrichmentZod = z.object({
+  summary_notes_markdown: z.string(),
+  quick_questions: z.array(z.string()).min(5).max(10),
 })
 
 async function withTimeout<T>(ms: number, fn: (signal: AbortSignal) => Promise<T>) {
@@ -344,6 +336,71 @@ function notesOutlineToMarkdown(notes: { outline: Array<{ heading: string; bulle
   return recap ? `${sections}\n\n### Összefoglaló\n${recap}` : sections
 }
 
+function hasForbiddenNotesPlaceholders(text: string) {
+  const value = String(text || '')
+  return FORBIDDEN_NOTES_PATTERNS.some((p) => p.test(value))
+}
+
+function trimAtBoundary(text: string, max: number) {
+  if (text.length <= max) return text
+  const para = text.lastIndexOf('\n\n', max)
+  if (para >= Math.floor(max * 0.6)) return text.slice(0, para).trim()
+  const sentence = text.lastIndexOf('.', max)
+  if (sentence >= Math.floor(max * 0.6)) return text.slice(0, sentence + 1).trim()
+  return text.slice(0, max).trim()
+}
+
+function normalizeCompactNotesMarkdown(text: string) {
+  const value = String(text || '').trim()
+  if (!value) throw new Error('PLAN_NOTES_EMPTY')
+  if (hasForbiddenNotesPlaceholders(value)) throw new Error('PLAN_NOTES_TEMPLATE_PLACEHOLDER')
+  if (!/^##\s+/m.test(value)) throw new Error('PLAN_NOTES_MISSING_HEADINGS')
+  if (value.length < PLAN_NOTES_MIN_CHARS) throw new Error('PLAN_NOTES_TOO_SHORT')
+  return trimAtBoundary(value, PLAN_NOTES_MAX_CHARS)
+}
+
+function markdownToOutline(markdown: string, isHu: boolean) {
+  const lines = String(markdown || '').split('\n')
+  const sections: Array<{ heading: string; bullets: string[] }> = []
+  let currentHeading = isHu ? 'Jegyzet' : 'Notes'
+  let currentParagraphs: string[] = []
+
+  const flush = () => {
+    const cleaned = currentParagraphs
+      .map((p) => p.trim())
+      .filter(Boolean)
+      .slice(0, 8)
+      .map((p) => p.replace(/^[-*]\s+/, '').trim())
+      .filter(Boolean)
+    if (cleaned.length > 0) {
+      sections.push({
+        heading: currentHeading,
+        bullets: cleaned.map((p) => (p.length > 260 ? `${p.slice(0, 260)}…` : p)),
+      })
+    }
+    currentParagraphs = []
+  }
+
+  for (const rawLine of lines) {
+    const line = rawLine.trim()
+    if (!line) {
+      continue
+    }
+    if (line.startsWith('## ')) {
+      flush()
+      currentHeading = line.replace(/^##\s+/, '').trim() || (isHu ? 'Jegyzet' : 'Notes')
+      continue
+    }
+    currentParagraphs.push(line)
+  }
+  flush()
+
+  if (sections.length === 0) {
+    return [{ heading: isHu ? 'Jegyzet' : 'Notes', bullets: [markdown] }]
+  }
+  return sections
+}
+
 async function savePlanToDbBestEffort(row: SavePlanRow) {
   try {
     const sb = createServerAdminClient()
@@ -490,105 +547,15 @@ const planDailySchema = {
   required: ['title', 'language', 'summary', 'plan', 'daily'],
 } as const
 
-const notesPracticeSchema = {
+const planEnrichmentSchema = {
   type: 'object',
   additionalProperties: false,
   properties: {
-    notes: {
-      type: 'object',
-      additionalProperties: false,
-      properties: {
-        sections: {
-          type: 'array',
-          items: {
-            type: 'object',
-            additionalProperties: false,
-            properties: {
-              heading: { type: 'string' },
-              bullets: { type: 'array', items: { type: 'string' } },
-            },
-            required: ['heading', 'bullets'],
-          },
-        },
-        recap: { type: 'string' },
-      },
-      required: ['sections', 'recap'],
-    },
-    practice: {
-      type: 'object',
-      additionalProperties: false,
-      properties: {
-        questions: {
-          type: 'array',
-          items: {
-            type: 'object',
-            additionalProperties: false,
-            properties: {
-              q: { type: 'string' },
-              choices: { type: 'array', items: { type: 'string' } },
-              a: { type: 'string' },
-              explanation: { type: 'string' },
-            },
-            required: ['q', 'a', 'explanation'],
-          },
-        },
-      },
-      required: ['questions'],
-    },
+    summary_notes_markdown: { type: 'string' },
+    quick_questions: { type: 'array', items: { type: 'string' }, minItems: 5, maxItems: 10 },
   },
-  required: ['notes', 'practice'],
+  required: ['summary_notes_markdown', 'quick_questions'],
 } as const
-
-function notesCharCount(notes: { outline: Array<{ heading: string; bullets: string[] }>; summary: string }) {
-  const outlineChars = notes.outline.reduce(
-    (sum, section) =>
-      sum +
-      String(section.heading || '').length +
-      (Array.isArray(section.bullets) ? section.bullets.reduce((s, b) => s + String(b || '').length, 0) : 0),
-    0
-  )
-  return outlineChars + String(notes.summary || '').length
-}
-
-function ensureNotesLength(
-  notes: { outline: Array<{ heading: string; bullets: string[] }>; summary: string },
-  isHu: boolean
-) {
-  const out = {
-    outline: (Array.isArray(notes.outline) ? notes.outline : []).map((section) => ({
-      heading: String(section?.heading || '').trim() || (isHu ? 'Jegyzet' : 'Notes'),
-      bullets: (Array.isArray(section?.bullets) ? section.bullets : [])
-        .map((b) => String(b || '').trim())
-        .filter(Boolean),
-    })),
-    summary: String(notes.summary || '').trim(),
-  }
-  if (!out.outline.length) {
-    out.outline = [{ heading: isHu ? 'Összefoglaló' : 'Summary', bullets: [isHu ? 'Kulcspontok röviden.' : 'Key points briefly.'] }]
-  }
-
-  let total = notesCharCount(out)
-  if (total < NOTES_TARGET_MIN_CHARS) {
-    const pad = isHu
-      ? 'Részletezd: definíció, összefüggés, példa, tipikus hiba, gyors ellenőrzés.'
-      : 'Expand with definition, relation, example, common mistake, and quick check.'
-    let i = 0
-    while (total < NOTES_TARGET_MIN_CHARS && i < 120) {
-      const idx = i % out.outline.length
-      out.outline[idx].bullets.push(pad)
-      total = notesCharCount(out)
-      i += 1
-    }
-  }
-
-  if (total > NOTES_TARGET_MAX_CHARS) {
-    for (const section of out.outline) {
-      section.bullets = section.bullets.map((b) => (b.length > 220 ? `${b.slice(0, 220)}…` : b))
-    }
-    if (out.summary.length > 420) out.summary = `${out.summary.slice(0, 420)}…`
-  }
-  return out
-}
 
 /** GET /api/plan?id=... */
 export async function GET(req: Request) {
@@ -843,16 +810,16 @@ export async function POST(req: Request) {
       'Use the images as the primary source. Reference concrete facts from them explicitly.',
       'You MUST incorporate extracted facts from uploaded images. Do not output generic content.',
       'If extracted material is empty, still generate a useful plan but explicitly mention this is a fallback context in notes summary.',
-      'Notes are the primary value and must be an outline with headings + bullets. Hungarian for Hungarian prompts.',
-      'Notes schema uses notes.sections + notes.recap. Start with a short summary section (3-5 bullets), then continue with 6-10 sections total and 5-10 bullets each.',
-      'Return 6-10 outline sections. Bullets should be one-line concrete facts/definitions/dates; use LaTeX in bullets for chemistry/math formulas.',
+      'Notes inside plan must be compact, structured prose markdown with ## headings and short paragraphs.',
+      `summary_notes_markdown must be ${PLAN_NOTES_MIN_CHARS}-${PLAN_NOTES_MAX_CHARS} characters.`,
+      'Never output template placeholders (e.g. "Concepts: short definition", "mini example").',
+      'If images exist, extracted image text is the primary source of truth for notes.',
+      'Include key facts, relevant dates/formulas when applicable, and real examples from source material.',
       'Whenever you write mathematics, you MUST use LaTeX.',
       'Use ONLY \\( \\) for inline math and \\[ \\] for display math.',
       'Do NOT use $...$.',
       'Do NOT write math as plain text.',
-      `Notes should target ${NOTES_TARGET_MIN_CHARS}-${NOTES_TARGET_MAX_CHARS} characters total while staying structured.`,
-      'If draft notes are shorter than minimum, expand bullets and recap in the same response before returning JSON.',
-      'Practice must include at least 8 short exercises with compact answers/explanations.',
+      'Return 5-10 quick review questions (short, clear, no answers).',
     ].join('\n')
 
     const extractedText = String(extracted.extracted || '').slice(0, MAX_EXTRACT_CHARS)
@@ -940,7 +907,7 @@ export async function POST(req: Request) {
                     plan: base.plan,
                     daily: base.daily,
                   })}\n\n` +
-                  `Generate only notes and practice keys. Notes must follow this exact shape: notes.sections[] and notes.recap. Keep notes in ${NOTES_TARGET_MIN_CHARS}-${NOTES_TARGET_MAX_CHARS} chars.`,
+                  `Generate only summary_notes_markdown and quick_questions. Keep notes in ${PLAN_NOTES_MIN_CHARS}-${PLAN_NOTES_MAX_CHARS} chars.`,
               },
             ],
             temperature: 0,
@@ -948,9 +915,9 @@ export async function POST(req: Request) {
             response_format: {
               type: 'json_schema',
               json_schema: {
-                name: 'notes_practice',
+                name: 'plan_enrichment',
                 strict: true,
-                schema: notesPracticeSchema as any,
+                schema: planEnrichmentSchema as any,
               },
             },
           },
@@ -971,24 +938,27 @@ export async function POST(req: Request) {
         })
         throw err
       }
-      const validated = notesPracticeZod.parse(parsed)
-      const notesPrepared = ensureNotesLength(
-        {
-          outline: validated.notes.sections.map((section) => ({
-            heading: section.heading,
-            bullets: section.bullets,
-          })),
-          summary: validated.notes.recap,
-        },
-        isHu
-      )
+      const validated = planEnrichmentZod.parse(parsed)
+      const compactMarkdown = normalizeCompactNotesMarkdown(validated.summary_notes_markdown)
+      const outline = markdownToOutline(compactMarkdown, isHu)
+      const recap = outline
+        .flatMap((section) => section.bullets)
+        .slice(0, 3)
+        .join(' ')
+        .slice(0, 420)
       const merged = {
         ...base,
         notes: {
-          outline: notesPrepared.outline,
-          summary: notesPrepared.summary,
+          outline,
+          summary: recap || (isHu ? 'Rövid összefoglaló a tananyagból.' : 'Short summary of the material.'),
         },
-        practice: validated.practice,
+        practice: {
+          questions: validated.quick_questions.map((question) => ({
+            q: String(question || '').trim(),
+            a: isHu ? 'Önellenőrző kérdés' : 'Self-check question',
+            explanation: '',
+          })),
+        },
       }
       return normalizePlanDocument(merged, isHu, prompt)
     }
@@ -1159,8 +1129,20 @@ export async function POST(req: Request) {
       retries: retriesUsed,
     })
 
+    const summaryNotesMarkdown = notesOutlineToMarkdown(document.notes)
+    const quickQuestions = Array.isArray(document.practice?.questions)
+      ? document.practice.questions.map((q) => String(q?.q || '').trim()).filter(Boolean).slice(0, 10)
+      : []
+
     return NextResponse.json(
-      { planId, status: finalStatus },
+      {
+        planId,
+        status: finalStatus,
+        title: document.title,
+        plan_blocks: document.plan.blocks,
+        summary_notes_markdown: summaryNotesMarkdown,
+        quick_questions: quickQuestions,
+      },
       { headers: { 'cache-control': 'no-store', 'x-examly-plan': 'ok' } }
     )
   } catch (e: any) {

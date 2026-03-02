@@ -21,6 +21,10 @@ function GuardInner({ children }: { children: React.ReactNode }) {
       setState(ok ? "OK" : "NO_SESSION");
 
       if (!ok) {
+        console.log("PLAN REDIRECT TRIGGER:", "ClientAuthGuard NO_SESSION -> /login", {
+          pathname,
+          current,
+        });
         window.location.assign(`/login?next=${encodeURIComponent(current)}`);
       }
     })();

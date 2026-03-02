@@ -70,6 +70,11 @@ export default function AuthGate({
 
     async function run() {
       setError(null)
+      console.log('AUTHGATE STATE:', {
+        session: !!session,
+        loading: !authReady,
+        entitlement: { requireEntitlement, path: pathname },
+      })
 
       if (guardsDisabled()) {
         onEntitlement?.({ credits: null, entitlementOk: null })
@@ -102,6 +107,12 @@ export default function AuthGate({
 
       const sessionState = await supabase.auth.getSession()
       if (sessionState.error && isInvalidRefreshTokenError(sessionState.error.message)) {
+        console.log('AUTHGATE STATE:', {
+          session: !!session,
+          loading: !authReady,
+          entitlement: { requireEntitlement, path: pathname },
+          wouldRedirect: '/login?message=Session expired',
+        })
         await supabase.auth.signOut({ scope: 'local' })
         clearAuthStorage()
         onEntitlement?.({ credits: null, entitlementOk: null })
@@ -113,6 +124,12 @@ export default function AuthGate({
 
       if (!session) {
         if (DEBUG_AUTH) console.log('AuthGate: no session', { path: pathname })
+        console.log('AUTHGATE STATE:', {
+          session: !!session,
+          loading: !authReady,
+          entitlement: { requireEntitlement, path: pathname },
+          wouldRedirect: '/login?next=<current>',
+        })
         onEntitlement?.({ credits: null, entitlementOk: null })
         if (!alive) return
         setReady(true)

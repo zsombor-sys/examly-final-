@@ -16,12 +16,18 @@ function safeNext(nextValue: string | null) {
 
 function isDuplicateEmailError(message: string) {
   const msg = String(message || '').toLowerCase()
-  return msg.includes('email') && (msg.includes('already') || msg.includes('duplicate') || msg.includes('unique'))
+  return (
+    msg.includes('profiles_email_unique_idx') ||
+    msg.includes('email') && (msg.includes('already') || msg.includes('duplicate') || msg.includes('unique'))
+  )
 }
 
 function isDuplicatePhoneError(message: string) {
   const msg = String(message || '').toLowerCase()
-  return msg.includes('phone') && (msg.includes('already') || msg.includes('duplicate') || msg.includes('unique'))
+  return (
+    msg.includes('profiles_phone_unique_idx') ||
+    msg.includes('phone') && (msg.includes('already') || msg.includes('duplicate') || msg.includes('unique'))
+  )
 }
 
 export default function SignupPage() {
@@ -73,20 +79,24 @@ function SignupInner() {
 
     setLoading(true)
     try {
-      const { data: availabilityData, error: availabilityError } = await supabase.rpc('check_signup_availability', {
-        p_email: emailNorm,
-        p_phone: phoneRaw,
-      })
-      if (availabilityError) throw new Error(availabilityError.message || 'Failed to check signup availability.')
-
-      const row = Array.isArray(availabilityData) ? availabilityData[0] : availabilityData
-      const emailTaken = !!row?.email_taken
-      const phoneTaken = !!row?.phone_taken
-      if (emailTaken) {
+      const { data: emailRow, error: emailCheckError } = await supabase
+        .from('profiles')
+        .select('id')
+        .eq('email', emailNorm)
+        .maybeSingle()
+      if (emailCheckError) throw new Error(emailCheckError.message || 'Failed to check email availability.')
+      if (emailRow) {
         setError('Email already used.')
         return
       }
-      if (phoneTaken) {
+
+      const { data: phoneRow, error: phoneCheckError } = await supabase
+        .from('profiles')
+        .select('id')
+        .eq('phone', phoneRaw)
+        .maybeSingle()
+      if (phoneCheckError) throw new Error(phoneCheckError.message || 'Failed to check phone availability.')
+      if (phoneRow) {
         setError('Phone already used.')
         return
       }
@@ -133,11 +143,11 @@ function SignupInner() {
 
       if (insertError) {
         const msg = insertError.message || ''
-        if (isDuplicateEmailError(msg)) {
+        if (insertError.code === '23505' && isDuplicateEmailError(msg)) {
           setError('Email already used.')
           return
         }
-        if (isDuplicatePhoneError(msg)) {
+        if (insertError.code === '23505' && isDuplicatePhoneError(msg)) {
           setError('Phone already used.')
           return
         }

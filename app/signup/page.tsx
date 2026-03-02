@@ -1,10 +1,10 @@
 'use client'
 
 import Link from 'next/link'
-import { useState } from 'react'
-import { useRouter } from 'next/navigation'
+import { useRouter, useSearchParams } from 'next/navigation'
+import { Suspense, useState } from 'react'
+import { supabase } from '@/lib/supabaseClient'
 import { Button, Card, Input } from '@/components/ui'
-import { signupAndSignInAction } from '@/app/signup/actions'
 
 function safeNext(nextValue: string | null) {
   const raw = String(nextValue || '').trim()
@@ -14,64 +14,148 @@ function safeNext(nextValue: string | null) {
   return raw
 }
 
-const NO_SESSION_MESSAGE =
-  'A fiók létrejött, de az email még nincs megerősítve / auth beállítás miatt nincs session. Állítsd be a Supabase Auth beállításokat (Confirm email OFF vagy SMTP).'
+function isDuplicateEmailError(message: string) {
+  const msg = String(message || '').toLowerCase()
+  return msg.includes('email') && (msg.includes('already') || msg.includes('duplicate') || msg.includes('unique'))
+}
+
+function isDuplicatePhoneError(message: string) {
+  const msg = String(message || '').toLowerCase()
+  return msg.includes('phone') && (msg.includes('already') || msg.includes('duplicate') || msg.includes('unique'))
+}
 
 export default function SignupPage() {
+  return (
+    <Suspense fallback={<div className="mx-auto max-w-md px-4 py-16 text-sm text-white/70">Loading...</div>}>
+      <SignupInner />
+    </Suspense>
+  )
+}
+
+function SignupInner() {
   const router = useRouter()
-  const [email, setEmail] = useState('')
-  const [password, setPassword] = useState('')
+  const sp = useSearchParams()
+
   const [fullName, setFullName] = useState('')
+  const [email, setEmail] = useState('')
   const [phone, setPhone] = useState('')
-  const [error, setError] = useState<string | null>(null)
+  const [password, setPassword] = useState('')
   const [loading, setLoading] = useState(false)
+  const [message, setMessage] = useState<string | null>(null)
+  const [error, setError] = useState<string | null>(null)
 
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault()
     setError(null)
-    const nextSafe = safeNext(
-      typeof window !== 'undefined' ? new URLSearchParams(window.location.search).get('next') : null
-    )
-    const emailNormalized = email.trim().toLowerCase()
-    if (fullName.trim().length < 2) {
-      setError('Full name is required')
+    setMessage(null)
+
+    const full = fullName.trim()
+    const emailNorm = email.trim().toLowerCase()
+    const phoneRaw = phone.trim()
+    const next = safeNext(sp.get('next'))
+
+    if (!full) {
+      setError('Full name is required.')
       return
     }
-    if (phone.trim().length < 6) {
-      setError('Phone number is required')
+    if (!emailNorm) {
+      setError('Email is required.')
+      return
+    }
+    if (!phoneRaw) {
+      setError('Phone is required.')
+      return
+    }
+    if (!password) {
+      setError('Password is required.')
       return
     }
 
     setLoading(true)
     try {
-      const formData = new FormData()
-      formData.set('email', emailNormalized)
-      formData.set('password', password)
-      formData.set('fullName', fullName.trim())
-      formData.set('phone', phone.trim())
+      const { data: availabilityData, error: availabilityError } = await supabase.rpc('check_signup_availability', {
+        p_email: emailNorm,
+        p_phone: phoneRaw,
+      })
+      if (availabilityError) throw new Error(availabilityError.message || 'Failed to check signup availability.')
 
-      const result = await signupAndSignInAction(formData)
-      if (!result.ok) {
-        setError(result.message || 'Signup failed')
+      const row = Array.isArray(availabilityData) ? availabilityData[0] : availabilityData
+      const emailTaken = !!row?.email_taken
+      const phoneTaken = !!row?.phone_taken
+      if (emailTaken) {
+        setError('Email already used.')
         return
       }
-      if (result.needsEmailVerification) {
-        setError(NO_SESSION_MESSAGE)
+      if (phoneTaken) {
+        setError('Phone already used.')
         return
       }
 
-      const target = nextSafe || '/plan'
-      router.replace(target)
-      router.refresh()
-      window.setTimeout(() => {
-        if (typeof window !== 'undefined' && window.location.pathname !== target) {
-          window.location.assign(target)
+      const signUp = await supabase.auth.signUp({
+        email: emailNorm,
+        password,
+        options: {
+          data: {
+            full_name: full,
+            phone: phoneRaw,
+          },
+        },
+      })
+      if (signUp.error) {
+        const msg = signUp.error.message || 'Signup failed.'
+        if (isDuplicateEmailError(msg)) {
+          setError('Email already used.')
+          return
         }
-      }, 800)
-      return
-    } catch (e: any) {
-      console.error('AUTH_ERROR', e)
-      setError(e?.message ?? 'Error')
+        if (isDuplicatePhoneError(msg)) {
+          setError('Phone already used.')
+          return
+        }
+        setError(msg)
+        return
+      }
+
+      const userId = signUp.data.user?.id || null
+      const hasSession = !!signUp.data.session
+
+      if (!userId) {
+        setMessage('Check your email to verify your account.')
+        return
+      }
+
+      const { error: insertError } = await supabase.from('profiles').insert({
+        id: userId,
+        full_name: full,
+        phone: phoneRaw,
+        email: emailNorm,
+        credits: 5,
+      })
+
+      if (insertError) {
+        const msg = insertError.message || ''
+        if (isDuplicateEmailError(msg)) {
+          setError('Email already used.')
+          return
+        }
+        if (isDuplicatePhoneError(msg)) {
+          setError('Phone already used.')
+          return
+        }
+        // If profile already exists for this id, continue gracefully.
+        if (!msg.toLowerCase().includes('duplicate key')) {
+          setError(insertError.message || 'Failed to create profile.')
+          return
+        }
+      }
+
+      if (hasSession) {
+        router.replace(next)
+        return
+      }
+
+      setMessage('Check your email to verify your account.')
+    } catch (err: any) {
+      setError(String(err?.message || 'Signup failed.'))
     } finally {
       setLoading(false)
     }
@@ -88,12 +172,20 @@ export default function SignupPage() {
           <Input value={email} onChange={(e) => setEmail(e.target.value)} placeholder="Email" type="email" />
           <Input value={phone} onChange={(e) => setPhone(e.target.value)} placeholder="Phone number" />
           <Input value={password} onChange={(e) => setPassword(e.target.value)} placeholder="Password" type="password" />
-          {error && <p className="text-sm text-red-400">{error}</p>}
-          <Button type="submit" disabled={loading} className="w-full">{loading ? 'Continuing…' : 'Continue'}</Button>
+
+          {error ? <p className="text-sm text-red-400">{error}</p> : null}
+          {message ? <p className="text-sm text-amber-200">{message}</p> : null}
+
+          <Button type="submit" disabled={loading} className="w-full">
+            {loading ? 'Creating account…' : 'Continue'}
+          </Button>
         </form>
 
         <p className="mt-6 text-sm text-dim">
-          Already have an account? <Link className="text-white underline underline-offset-4" href="/login">Log in</Link>
+          Already have an account?{' '}
+          <Link className="text-white underline underline-offset-4" href="/login">
+            Log in
+          </Link>
         </p>
       </Card>
     </div>

@@ -3,6 +3,7 @@
 import { useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useState } from "react";
 import { supabase } from "@/lib/supabaseClient";
+import Link from 'next/link'
 
 function safeNext(next: string | null) {
   const n = next || "/plan";
@@ -83,6 +84,12 @@ function LoginInner() {
           <b>Error:</b> {error}
         </p>
       )}
+      <p style={{ marginTop: 12 }}>
+        New here?{" "}
+        <Link href="/signup">
+          Sign up
+        </Link>
+      </p>
       <p style={{ marginTop: 12, opacity: 0.8 }}>
         If Status never changes from idle, the button click is not firing (overlay/pointer-events issue).
       </p>

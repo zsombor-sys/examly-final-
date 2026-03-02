@@ -19,7 +19,7 @@ type ExtractedTask = {
 
 type SolvedTask = {
   title: string
-  steps: Array<{ label: string; explain: string; work_latex?: string; result_latex?: string }>
+  steps: Array<{ label: string; explain: string; work_latex: string | null; result_latex: string | null }>
   final_answer: string
 }
 
@@ -161,8 +161,8 @@ function Inner() {
           ? json.steps.map((s: any, idx: number) => ({
               label: String(s?.label || `Step ${idx + 1}`),
               explain: String(s?.explain || '').trim(),
-              work_latex: String(s?.work_latex || '').trim(),
-              result_latex: String(s?.result_latex || '').trim(),
+              work_latex: typeof s?.work_latex === 'string' && s.work_latex.trim() ? s.work_latex.trim() : null,
+              result_latex: typeof s?.result_latex === 'string' && s.result_latex.trim() ? s.result_latex.trim() : null,
             }))
           : [],
         final_answer: String(json?.final_answer || '').trim(),

@@ -1,39 +1,39 @@
 "use server";
 
-import { cookies } from 'next/headers'
-import { createServerClient, type CookieOptions } from '@supabase/ssr'
+import { cookies } from "next/headers";
+import { createServerClient } from "@supabase/ssr";
 
-type SignInResult = { ok: true } | { ok: false; message: string }
+export async function signInWithPasswordAction(formData: FormData) {
+  const email = String(formData.get("email") || "");
+  const password = String(formData.get("password") || "");
 
-export async function signInWithPasswordAction(formData: FormData): Promise<SignInResult> {
-  const email = String(formData.get('email') || '').trim().toLowerCase()
-  const password = String(formData.get('password') || '')
+  const cookieStore = cookies(); // ❗ nincs await
 
-  if (!email || !password) {
-    return { ok: false, message: 'Email and password are required.' }
+  const supabase = createServerClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
+    {
+      cookies: {
+        getAll() {
+          return cookieStore.getAll();
+        },
+        setAll(cookiesToSet) {
+          cookiesToSet.forEach(({ name, value, options }) => {
+            cookieStore.set(name, value, options);
+          });
+        },
+      },
+    }
+  );
+
+  const { error } = await supabase.auth.signInWithPassword({
+    email,
+    password,
+  });
+
+  if (error) {
+    return { ok: false, message: error.message };
   }
 
-  const url = process.env.NEXT_PUBLIC_SUPABASE_URL
-  const anon = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
-  if (!url || !anon) {
-    return { ok: false, message: 'Auth misconfigured: missing Supabase public environment variables.' }
-  }
-
-  const cookieStore = await cookies()
-  const supabase = createServerClient(url, anon, {
-    cookies: {
-      getAll() {
-        return cookieStore.getAll().map((c) => ({ name: c.name, value: c.value }))
-      },
-      setAll(cookiesToSet: { name: string; value: string; options?: CookieOptions }[]) {
-        cookiesToSet.forEach(({ name, value, options }) => {
-          cookieStore.set(name, value, options)
-        })
-      },
-    },
-  })
-
-  const { error } = await supabase.auth.signInWithPassword({ email, password })
-  if (error) return { ok: false, message: error.message || 'Login failed.' }
-  return { ok: true }
+  return { ok: true };
 }

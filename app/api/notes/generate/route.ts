@@ -167,9 +167,16 @@ async function generateChunk(params: {
 
   const system = [
     langInstruction,
-    'Write detailed study notes in Markdown.',
+    'Write detailed study notes in Markdown as continuous, readable learning material.',
     `Target: at least ${NOTES_MIN_CHARS} and at most ${NOTES_MAX_CHARS} visible characters.`,
-    'Include: definitions, deep explanations, examples, practice questions, common mistakes, and summary.',
+    'Required structure:',
+    '- Title',
+    '- Short intro paragraph (2-4 sentences)',
+    '- Sections with REAL content: Definitions, Deep explanation, Worked examples, Typical tasks and solving approach, Common mistakes, Short summary',
+    '- Include at least 2 worked mini examples',
+    '- Include a practice questions section',
+    'Never write placeholder text like "rövid definíció" or "mini példa".',
+    'If details are missing, infer likely educational content from the topic and explain it concretely.',
     'Write as if this is the only material the student will use.',
     'Whenever you write mathematics, you MUST use LaTeX.',
     'Use ONLY \\( \\) for inline math and \\[ \\] for display math.',
@@ -222,6 +229,12 @@ export async function POST(req: Request) {
     const input = await parseInput(req)
     const client = new OpenAI({ apiKey: key })
     const extracted = await extractFromImages(client, input.images)
+    if (input.images.length > 0 && !extracted.extracted_text.trim()) {
+      return NextResponse.json(
+        { error: 'NOTES_VISION_EMPTY_EXTRACT' },
+        { status: 400 }
+      )
+    }
 
     const language = resolveLanguage({
       explicit: input.language,

@@ -695,17 +695,17 @@ export async function POST(req: Request) {
     const planId = crypto.randomUUID()
     const openAiKey = process.env.OPENAI_API_KEY
 
-    const requestedImageCount =
+    const imagesReceivedCount =
       files.filter((f) => f.type.startsWith('image/')).length +
       storagePaths.length +
       inlineImages.length
-    if (requestedImageCount > MAX_PLAN_IMAGES) {
+    if (imagesReceivedCount > MAX_PLAN_IMAGES) {
       return NextResponse.json(
         limitExceeded(`Max ${MAX_PLAN_IMAGES} images`),
         { status: 400, headers: { 'cache-control': 'no-store' } }
       )
     }
-    const imagesSelected = Math.min(MAX_PLAN_IMAGES, requestedImageCount)
+    const imagesSelected = Math.min(MAX_PLAN_IMAGES, imagesReceivedCount)
 
     const rawImages = await collectRawImages({
       files,
@@ -723,11 +723,11 @@ export async function POST(req: Request) {
     const resolvedPromptLanguage = resolveLanguage({ prompt })
     const isHu = resolvedPromptLanguage === 'hu'
 
-    console.log('plan.images', {
+    console.log('plan.vision.counts', {
       requestId,
-      imagesSelected,
-      imagesDownloaded,
-      imagesSentToVision,
+      images_received_count: imagesSelected,
+      images_decoded_count: imagesDownloaded,
+      images_attached_to_model_count: imagesSentToVision,
     })
 
     if (imagesSelected > 0 && imagesSentToVision === 0) {
@@ -840,6 +840,7 @@ export async function POST(req: Request) {
       'Plan summary must be concise: 2-4 lines maximum.',
       'Daily must always include Day 1 with 6-12 time blocks and pomodoro-friendly sequencing (25m study / 5m break pattern with one longer break).',
       'Read and incorporate ALL information from the images into the plan.',
+      'Use the images as the primary source. Reference concrete facts from them explicitly.',
       'You MUST incorporate extracted facts from uploaded images. Do not output generic content.',
       'If extracted material is empty, still generate a useful plan but explicitly mention this is a fallback context in notes summary.',
       'Notes are the primary value and must be an outline with headings + bullets. Hungarian for Hungarian prompts.',

@@ -67,6 +67,37 @@ function Inner() {
         }
   }, [language, notesPrompt])
 
+  async function compressImage(file: File) {
+    if (typeof window === 'undefined') return file
+    if (!file.type.startsWith('image/')) return file
+
+    const img = new Image()
+    const url = URL.createObjectURL(file)
+    await new Promise((resolve, reject) => {
+      img.onload = resolve
+      img.onerror = reject
+      img.src = url
+    })
+    const maxW = 1280
+    const scale = img.width > maxW ? maxW / img.width : 1
+    const w = Math.round(img.width * scale)
+    const h = Math.round(img.height * scale)
+    const canvas = document.createElement('canvas')
+    canvas.width = w
+    canvas.height = h
+    const ctx = canvas.getContext('2d')
+    if (!ctx) {
+      URL.revokeObjectURL(url)
+      return file
+    }
+    ctx.drawImage(img, 0, 0, w, h)
+    const blob: Blob = await new Promise((resolve) =>
+      canvas.toBlob((b) => resolve(b || file), 'image/jpeg', 0.75)
+    )
+    URL.revokeObjectURL(url)
+    return new File([blob], file.name.replace(/\.\w+$/, '.jpg'), { type: 'image/jpeg' })
+  }
+
   async function generate() {
     setError(null)
     setLoading(true)
@@ -82,7 +113,8 @@ function Inner() {
       const fd = new FormData()
       fd.append('prompt', trimmed)
       for (const file of files.slice(0, MAX_IMAGES)) {
-        fd.append('files', file)
+        const compressed = file.type.startsWith('image/') ? await compressImage(file) : file
+        fd.append('files', compressed)
       }
 
       const res = await authedFetch('/api/notes/generate', { method: 'POST', body: fd })

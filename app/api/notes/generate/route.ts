@@ -8,6 +8,7 @@ import { resolveLanguage, type SupportedLanguage } from '@/lib/language'
 import { trimMarkdownToVisibleMax, visibleLength, wordCountFromVisible } from '@/lib/textMeasure'
 import { extractFromImagesWithVision } from '@/lib/visionExtract'
 import { normalizeBase64VisionImage, type VisionImage } from '@/lib/vision'
+import { optimizeImageForVision } from '@/lib/imageOptimize'
 
 export const runtime = 'nodejs'
 export const maxDuration = 60
@@ -18,6 +19,7 @@ const NOTES_MAX_CHARS = 3000
 const NOTES_MAX_CALLS = 3
 const NOTES_MAX_TOKENS = 2200
 const VISION_MODEL = process.env.OPENAI_VISION_MODEL || OPENAI_MODEL
+const MAX_VISION_BYTES = 8 * 1024 * 1024
 
 const FORBIDDEN_TEMPLATE_PATTERNS: RegExp[] = [
   /rövid definíció/i,
@@ -40,21 +42,28 @@ function hasForbiddenTemplateText(text: string) {
   return FORBIDDEN_TEMPLATE_PATTERNS.some((pattern) => pattern.test(normalized))
 }
 
-async function parseInput(req: Request): Promise<{ prompt: string; language?: SupportedLanguage; images: VisionImage[] }> {
+async function parseInput(req: Request): Promise<{
+  prompt: string
+  language?: SupportedLanguage
+  images: VisionImage[]
+  requestedImagesCount: number
+}> {
   const contentType = req.headers.get('content-type') || ''
 
   if (contentType.includes('application/json')) {
     const body = await req.json().catch(() => null)
     const parsed = reqSchema.safeParse(body)
     if (!parsed.success) throw new Error('Invalid notes payload')
-    const images = parsed.data.images
+    const baseImages = parsed.data.images
       .map((encoded) => normalizeBase64VisionImage(encoded))
       .filter((image): image is VisionImage => Boolean(image))
       .slice(0, MAX_IMAGES)
+    const images = await preprocessVisionImages(baseImages)
     return {
       prompt: String(parsed.data.prompt || '').trim(),
       language: parsed.data.language,
       images,
+      requestedImagesCount: baseImages.length,
     }
   }
 
@@ -71,14 +80,39 @@ async function parseInput(req: Request): Promise<{ prompt: string; language?: Su
     .filter((image): image is VisionImage => Boolean(image))
 
   const files = form.getAll('files').filter((f): f is File => f instanceof File)
-  const fileImages: VisionImage[] = []
+  const fileImagesRaw: VisionImage[] = []
   for (const file of files) {
     if (!String(file.type || '').startsWith('image/')) continue
     const b64 = Buffer.from(await file.arrayBuffer()).toString('base64')
-    fileImages.push({ mime: String(file.type || 'image/png'), b64 })
+    fileImagesRaw.push({ mime: String(file.type || 'image/png'), b64 })
   }
+  const images = await preprocessVisionImages([...inlineImages, ...fileImagesRaw].slice(0, MAX_IMAGES))
+  return {
+    prompt,
+    language,
+    images,
+    requestedImagesCount: Math.min(MAX_IMAGES, inlineImages.length + fileImagesRaw.length),
+  }
+}
 
-  return { prompt, language, images: [...inlineImages, ...fileImages].slice(0, MAX_IMAGES) }
+async function preprocessVisionImages(images: VisionImage[]) {
+  const out: VisionImage[] = []
+  let totalBytes = 0
+
+  for (const image of images) {
+    try {
+      const input = Buffer.from(image.b64, 'base64')
+      if (!input.length) continue
+      const optimized = await optimizeImageForVision(input, image.mime, { longEdge: 1024, quality: 72 })
+      if (!optimized) continue
+      if (totalBytes + optimized.bytes > MAX_VISION_BYTES) continue
+      out.push({ mime: optimized.mime, b64: optimized.b64 })
+      totalBytes += optimized.bytes
+    } catch {
+      // ignore invalid image payload
+    }
+  }
+  return out
 }
 
 async function generateChunk(params: {
@@ -177,14 +211,14 @@ export async function POST(req: Request) {
     const client = new OpenAI({ apiKey: key })
     const requestId = crypto.randomUUID()
 
-    const imagesRequestedCount = input.images.length
-    const imagesDecodedCount = input.images.filter((img) => Boolean(img?.b64)).length
-    const imagesAttachedToModelCount = imagesDecodedCount
+    const imagesRequestedCount = input.requestedImagesCount
+    const imagesPreprocessedCount = input.images.length
+    const imagesAttachedToModelCount = input.images.filter((img) => Boolean(img?.b64)).length
 
     console.log('notes.vision.counts', {
       requestId,
       images_requested_count: imagesRequestedCount,
-      images_decoded_count: imagesDecodedCount,
+      images_preprocessed_count: imagesPreprocessedCount,
       images_attached_to_model_count: imagesAttachedToModelCount,
     })
 

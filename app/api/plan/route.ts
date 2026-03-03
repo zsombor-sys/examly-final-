@@ -21,6 +21,7 @@ import {
   normalizePlanDocument,
   type PlanDocument,
 } from '@/lib/planDocument'
+import { trimMarkdownToVisibleMax, visibleLength } from '@/lib/textMeasure'
 
 export const runtime = 'nodejs'
 export const maxDuration = 60
@@ -86,8 +87,12 @@ const planDailyZod = z.object({
 })
 
 const planEnrichmentZod = z.object({
-  summary_notes_markdown: z.string(),
-  quick_questions: z.array(z.string()).min(5).max(10),
+  notes_markdown: z.string(),
+  practice_questions: z.array(z.object({
+    q: z.string(),
+    a: z.string(),
+    explanation: z.string().optional().default(''),
+  })).min(5).max(10),
 })
 
 async function withTimeout<T>(ms: number, fn: (signal: AbortSignal) => Promise<T>) {
@@ -320,6 +325,7 @@ type SavePlanRow = {
   generationId?: string | null
   materials?: string[] | null
   error?: string | null
+  notesMarkdown?: string | null
 }
 
 function notesOutlineToMarkdown(notes: { outline: Array<{ heading: string; bullets: string[] }>; summary: string }) {
@@ -355,8 +361,8 @@ function normalizeCompactNotesMarkdown(text: string) {
   if (!value) throw new Error('PLAN_NOTES_EMPTY')
   if (hasForbiddenNotesPlaceholders(value)) throw new Error('PLAN_NOTES_TEMPLATE_PLACEHOLDER')
   if (!/^##\s+/m.test(value)) throw new Error('PLAN_NOTES_MISSING_HEADINGS')
-  if (value.length < PLAN_NOTES_MIN_CHARS) throw new Error('PLAN_NOTES_TOO_SHORT')
-  return trimAtBoundary(value, PLAN_NOTES_MAX_CHARS)
+  if (visibleLength(value) < PLAN_NOTES_MIN_CHARS) throw new Error('PLAN_NOTES_TOO_SHORT')
+  return trimMarkdownToVisibleMax(trimAtBoundary(value, PLAN_NOTES_MAX_CHARS), PLAN_NOTES_MAX_CHARS)
 }
 
 function markdownToOutline(markdown: string, isHu: boolean) {
@@ -432,7 +438,7 @@ async function savePlanToDbBestEffort(row: SavePlanRow) {
       daily_json: safeDaily,
       practice_json: safePractice,
       plan: safePlan,
-      notes: safeNotesMarkdown,
+      notes: row.notesMarkdown ?? safeNotesMarkdown,
       daily: safeDaily,
       practice: safePractice,
     }
@@ -551,10 +557,24 @@ const planEnrichmentSchema = {
   type: 'object',
   additionalProperties: false,
   properties: {
-    summary_notes_markdown: { type: 'string' },
-    quick_questions: { type: 'array', items: { type: 'string' }, minItems: 5, maxItems: 10 },
+    notes_markdown: { type: 'string' },
+    practice_questions: {
+      type: 'array',
+      minItems: 5,
+      maxItems: 10,
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          q: { type: 'string' },
+          a: { type: 'string' },
+          explanation: { type: 'string' },
+        },
+        required: ['q', 'a', 'explanation'],
+      },
+    },
   },
-  required: ['summary_notes_markdown', 'quick_questions'],
+  required: ['notes_markdown', 'practice_questions'],
 } as const
 
 /** GET /api/plan?id=... */
@@ -733,6 +753,7 @@ export async function POST(req: Request) {
     }
 
     const processingDoc = fallbackPlanDocument(isHu, prompt)
+
     await savePlanToDbBestEffort({
       id: planId,
       userId: user.id,
@@ -815,11 +836,13 @@ export async function POST(req: Request) {
       'Never output template placeholders (e.g. "Concepts: short definition", "mini example").',
       'If images exist, extracted image text is the primary source of truth for notes.',
       'Include key facts, relevant dates/formulas when applicable, and real examples from source material.',
+      'Generate a complete student-friendly note, not an outline skeleton.',
+      'Notes should include: short overview, key concepts with examples, chronology or logical sections, causal links, typical questions, common mistakes, and mini self-check.',
       'Whenever you write mathematics, you MUST use LaTeX.',
       'Use ONLY \\( \\) for inline math and \\[ \\] for display math.',
       'Do NOT use $...$.',
       'Do NOT write math as plain text.',
-      'Return 5-10 quick review questions (short, clear, no answers).',
+      'Return 5-10 quick practice questions with short answers and one-line explanation.',
     ].join('\n')
 
     const extractedText = String(extracted.extracted || '').slice(0, MAX_EXTRACT_CHARS)
@@ -892,59 +915,76 @@ export async function POST(req: Request) {
 
     const runNotesPracticeAttempt = async (base: PlanDocument, attempt: number): Promise<PlanDocument> => {
       const extra = attempt > 0 ? 'Repair JSON: return ONLY valid JSON matching schema exactly. No prose.' : ''
-      const completion = await withTimeout(STEP2_TIMEOUT_MS, (signal) =>
-        client.chat.completions.create(
-          {
-            model: PLAN_MODEL,
-            messages: [
-              { role: 'system', content: [systemText, extra].filter(Boolean).join('\n') },
-              {
-                role: 'user',
-                content:
-                  `${userText}\n\n` +
-                  `Existing compact plan:\n${JSON.stringify({
-                    title: base.title,
-                    language: base.language,
-                    summary: base.summary,
-                    plan: base.plan,
-                    daily: base.daily,
-                  })}\n\n` +
-                  `Generate only summary_notes_markdown and quick_questions. Keep notes in ${PLAN_NOTES_MIN_CHARS}-${PLAN_NOTES_MAX_CHARS} chars.`,
-              },
-            ],
-            temperature: 0,
-            max_tokens: MAX_OUTPUT_TOKENS,
-            response_format: {
-              type: 'json_schema',
-              json_schema: {
-                name: 'plan_enrichment',
-                strict: true,
-                schema: planEnrichmentSchema as any,
+      let validated: z.infer<typeof planEnrichmentZod> | null = null
+      let compactMarkdown = ''
+      for (let pass = 0; pass < 3; pass += 1) {
+        const continuationInstruction =
+          pass === 0
+            ? ''
+            : `Continuation pass ${pass}: expand notes_markdown to reach at least ${PLAN_NOTES_MIN_CHARS} visible characters, no repetition.`
+        const completion = await withTimeout(STEP2_TIMEOUT_MS, (signal) =>
+          client.chat.completions.create(
+            {
+              model: PLAN_MODEL,
+              messages: [
+                { role: 'system', content: [systemText, extra, continuationInstruction].filter(Boolean).join('\n') },
+                {
+                  role: 'user',
+                  content:
+                    `${userText}\n\n` +
+                    `Existing compact plan:\n${JSON.stringify({
+                      title: base.title,
+                      language: base.language,
+                      summary: base.summary,
+                      plan: base.plan,
+                      daily: base.daily,
+                    })}\n\n` +
+                    `Generate only notes_markdown and practice_questions. Keep notes in ${PLAN_NOTES_MIN_CHARS}-${PLAN_NOTES_MAX_CHARS} visible chars.` +
+                    (pass > 0 ? `\n\nCurrent notes draft:\n${compactMarkdown}` : ''),
+                },
+              ],
+              temperature: 0.4,
+              max_tokens: MAX_OUTPUT_TOKENS,
+              response_format: {
+                type: 'json_schema',
+                json_schema: {
+                  name: 'plan_enrichment',
+                  strict: true,
+                  schema: planEnrichmentSchema as any,
+                },
               },
             },
-          },
-          { signal }
+            { signal }
+          )
         )
-      )
 
-      const rawContent = completion.choices?.[0]?.message?.content
-      let parsed: any
-      try {
-        parsed = parseStructuredMessageContent(rawContent)
-      } catch (err: any) {
-        console.error('plan.generate.parse_error.step2', {
-          requestId,
-          attempt,
-          code: String(err?.code || ''),
-          raw: String(messageContentToText(rawContent) || '').slice(0, 1200),
-        })
-        throw err
+        const rawContent = completion.choices?.[0]?.message?.content
+        let parsed: any
+        try {
+          parsed = parseStructuredMessageContent(rawContent)
+        } catch (err: any) {
+          console.error('plan.generate.parse_error.step2', {
+            requestId,
+            attempt,
+            pass,
+            code: String(err?.code || ''),
+            raw: String(messageContentToText(rawContent) || '').slice(0, 1200),
+          })
+          throw err
+        }
+        validated = planEnrichmentZod.parse(parsed)
+        compactMarkdown = normalizeCompactNotesMarkdown(validated.notes_markdown)
+        if (visibleLength(compactMarkdown) >= PLAN_NOTES_MIN_CHARS) {
+          break
+        }
       }
-      const validated = planEnrichmentZod.parse(parsed)
-      const compactMarkdown = normalizeCompactNotesMarkdown(validated.summary_notes_markdown)
+
+      if (!validated) throw new Error('PLAN_NOTES_INVALID')
+      if (visibleLength(compactMarkdown) < PLAN_NOTES_MIN_CHARS) throw new Error('PLAN_NOTES_TOO_SHORT')
+
       generatedPlanNotesMarkdown = compactMarkdown
-      generatedQuickQuestions = validated.quick_questions
-        .map((q) => String(q || '').trim())
+      generatedQuickQuestions = validated.practice_questions
+        .map((item) => String(item.q || '').trim())
         .filter(Boolean)
         .slice(0, 10)
       const outline = markdownToOutline(compactMarkdown, isHu)
@@ -960,10 +1000,10 @@ export async function POST(req: Request) {
           summary: recap || (isHu ? 'Rövid összefoglaló a tananyagból.' : 'Short summary of the material.'),
         },
         practice: {
-          questions: validated.quick_questions.map((question) => ({
-            q: String(question || '').trim(),
-            a: isHu ? 'Önellenőrző kérdés' : 'Self-check question',
-            explanation: '',
+          questions: validated.practice_questions.map((item) => ({
+            q: String(item.q || '').trim(),
+            a: String(item.a || '').trim(),
+            explanation: String(item.explanation || '').trim(),
           })),
         },
       }
@@ -1088,6 +1128,7 @@ export async function POST(req: Request) {
     }
 
     const outputChars = JSON.stringify(document).length
+    const summaryNotesMarkdown = notesOutlineToMarkdown(document.notes)
 
     await savePlanToDbBestEffort({
       id: planId,
@@ -1110,6 +1151,7 @@ export async function POST(req: Request) {
           : finalStatus === 'partial'
             ? 'NOTES_PRACTICE_PARTIAL'
             : null,
+      notesMarkdown: generatedPlanNotesMarkdown || summaryNotesMarkdown,
     })
 
     upsertPlanInMemory({
@@ -1136,7 +1178,6 @@ export async function POST(req: Request) {
       retries: retriesUsed,
     })
 
-    const summaryNotesMarkdown = notesOutlineToMarkdown(document.notes)
     const quickQuestions = generatedQuickQuestions.length > 0
       ? generatedQuickQuestions
       : Array.isArray(document.practice?.questions)

@@ -45,6 +45,8 @@ type PlanResult = {
   title?: string | null
   language?: 'hu' | 'en' | null
   summary?: string | null
+  notes_markdown?: string | null
+  practice_questions?: string[] | null
   plan?: { blocks?: PlanBlock[] } | null
   notes?: NotesValue
   daily?: { schedule?: DailyDay[]; days?: DailyTimedDay[] } | null
@@ -178,6 +180,12 @@ function extractNotesText(notes: NotesValue): string {
   if (typeof notes?.content_markdown === 'string') return notes.content_markdown
   if (typeof notes?.content === 'string') return notes.content
   return ''
+}
+
+function extractPlanNotesText(result: PlanResult | null): string {
+  const markdown = String(result?.notes_markdown || '').trim()
+  if (markdown) return markdown
+  return extractNotesText(result?.notes ?? result?.notes_json)
 }
 
 function parseHm(value: string) {
@@ -465,7 +473,10 @@ function Inner({ entitlement }: { entitlement: { credits: number | null; entitle
       const plan = json?.plan as PlanRow | undefined
       if (normalized) {
         setSelectedId(id)
-        setResult(normalized)
+        setResult({
+          ...normalized,
+          notes_markdown: typeof plan?.notes === 'string' ? plan.notes : normalized.notes_markdown ?? null,
+        })
       } else if (plan) {
         setSelectedId(id)
         setResult({
@@ -479,6 +490,7 @@ function Inner({ entitlement }: { entitlement: { credits: number | null; entitle
           daily_json: plan.daily_json ?? null,
           practice: plan.practice ?? null,
           practice_json: plan.practice_json ?? null,
+          notes_markdown: typeof plan.notes === 'string' ? plan.notes : null,
           fallback: plan.status === 'fallback',
           errorCode: plan.error ?? null,
         })
@@ -628,6 +640,24 @@ function Inner({ entitlement }: { entitlement: { credits: number | null; entitle
       const serverId = typeof json?.planId === 'string' ? (json.planId as string) : null
       if (!serverId) throw new Error('Server returned no plan id')
 
+      if (json?.title || json?.plan_blocks || json?.notes_markdown) {
+        setResult({
+          title: typeof json?.title === 'string' ? json.title : null,
+          language: json?.language === 'hu' ? 'hu' : json?.language === 'en' ? 'en' : null,
+          plan: Array.isArray(json?.plan_blocks) ? { blocks: json.plan_blocks } : null,
+          notes_markdown: typeof json?.notes_markdown === 'string' ? json.notes_markdown : null,
+          practice: Array.isArray(json?.practice_questions)
+            ? {
+                questions: json.practice_questions.map((q: any) => ({
+                  q: typeof q === 'string' ? q : String(q?.q ?? ''),
+                  a: typeof q === 'string' ? '' : String(q?.a ?? ''),
+                  explanation: typeof q === 'string' ? '' : String(q?.explanation ?? ''),
+                })),
+              }
+            : null,
+        })
+      }
+
       if (json?.fallback) {
         const rid = getRequestId(json) ?? serverId
         const msg = typeof json?.errorMessage === 'string' && json.errorMessage.trim()
@@ -715,7 +745,7 @@ function Inner({ entitlement }: { entitlement: { credits: number | null; entitle
     prompt.trim().length <= MAX_PLAN_PROMPT_CHARS &&
     files.length <= MAX_PLAN_IMAGES &&
     (prompt.trim().length >= 6 || files.length > 0)
-  const summaryText = getNotesModel(result?.notes ?? result?.notes_json).summary || extractNotesText(result?.notes ?? result?.notes_json).trim()
+  const summaryText = getNotesModel(result?.notes ?? result?.notes_json).summary || extractPlanNotesText(result).trim()
   const costEstimate = CREDITS_PER_GENERATION
   const pomodoroPlan = useMemo<DayPlan[]>(() => {
     if (!result) return []
@@ -930,7 +960,11 @@ function Inner({ entitlement }: { entitlement: { credits: number | null; entitle
               {tab === 'notes' && result && (
                 <div className="rounded-3xl border border-white/10 bg-white/[0.02] p-5 min-w-0 overflow-hidden">
                   <div className="text-xs uppercase tracking-[0.18em] text-white/55">{uiText.notes}</div>
-                  {getNotesModel(result.notes ?? result.notes_json).sections.length > 0 ? (
+                  {extractPlanNotesText(result).trim() ? (
+                    <div className="mt-4 text-sm text-white/85">
+                      <MarkdownMath content={extractPlanNotesText(result)} />
+                    </div>
+                  ) : getNotesModel(result.notes ?? result.notes_json).sections.length > 0 ? (
                     <div className="mt-4 space-y-5 text-sm text-white/85">
                       {getNotesModel(result.notes ?? result.notes_json).sections.map((section, idx) => (
                         <section key={`${section.heading}-${idx}`} className="rounded-2xl border border-white/10 bg-black/30 p-4">

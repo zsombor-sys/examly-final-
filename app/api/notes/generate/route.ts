@@ -2,9 +2,12 @@ import { NextResponse } from 'next/server'
 import OpenAI from 'openai'
 import { z } from 'zod'
 import { requireUser } from '@/lib/authServer'
-import { OPENAI_MODEL } from '@/lib/limits'
+import { chargeCredits, getCredits } from '@/lib/credits'
+import { CREDITS_PER_GENERATION, MAX_IMAGES, MAX_PLAN_PROMPT_CHARS, OPENAI_MODEL } from '@/lib/limits'
 import { resolveLanguage, type SupportedLanguage } from '@/lib/language'
 import { trimMarkdownToVisibleMax, visibleLength, wordCountFromVisible } from '@/lib/textMeasure'
+import { extractFromImagesWithVision } from '@/lib/visionExtract'
+import { normalizeBase64VisionImage, type VisionImage } from '@/lib/vision'
 
 export const runtime = 'nodejs'
 export const maxDuration = 60
@@ -14,6 +17,8 @@ const NOTES_MIN_CHARS = 2000
 const NOTES_MAX_CHARS = 3000
 const NOTES_MAX_CALLS = 3
 const NOTES_MAX_TOKENS = 2200
+const VISION_MODEL = process.env.OPENAI_VISION_MODEL || OPENAI_MODEL
+
 const FORBIDDEN_TEMPLATE_PATTERNS: RegExp[] = [
   /rövid definíció/i,
   /mini példa/i,
@@ -24,65 +29,11 @@ const FORBIDDEN_TEMPLATE_PATTERNS: RegExp[] = [
   /template/i,
 ]
 
-type VisionImage = { mime: string; b64: string }
-
 const reqSchema = z.object({
-  prompt: z.string().min(10).max(12000),
+  prompt: z.string().max(MAX_PLAN_PROMPT_CHARS).optional().default(''),
   language: z.enum(['hu', 'en']).optional(),
   images: z.array(z.string().min(1)).optional().default([]),
 })
-
-const visionExtractSchema = {
-  type: 'object',
-  additionalProperties: false,
-  properties: {
-    detected_language: { type: 'string', enum: ['hu', 'en'] },
-    extracted_text: { type: 'string' },
-    key_terms: { type: 'array', items: { type: 'string' } },
-  },
-  required: ['detected_language', 'extracted_text', 'key_terms'],
-} as const
-
-const visionExtractResponseSchema = z.object({
-  detected_language: z.enum(['hu', 'en']),
-  extracted_text: z.string(),
-  key_terms: z.array(z.string()),
-})
-
-function extractText(content: unknown) {
-  if (typeof content === 'string') return content
-  if (Array.isArray(content)) {
-    return content
-      .map((part: any) => {
-        if (typeof part === 'string') return part
-        if (typeof part?.text === 'string') return part.text
-        return ''
-      })
-      .join('\n')
-  }
-  return ''
-}
-
-function parseJson(content: unknown) {
-  const raw = extractText(content).trim()
-  if (!raw) throw new Error('Empty model output')
-  try {
-    return JSON.parse(raw)
-  } catch {
-    const s = raw.indexOf('{')
-    const e = raw.lastIndexOf('}')
-    if (s < 0 || e <= s) throw new Error('Model output was not valid JSON')
-    return JSON.parse(raw.slice(s, e + 1))
-  }
-}
-
-function normalizeBase64Image(input: string): VisionImage {
-  const value = String(input || '').trim()
-  if (!value) throw new Error('Empty image input')
-  const dataUrl = /^data:(.+?);base64,(.+)$/i.exec(value)
-  if (dataUrl) return { mime: dataUrl[1], b64: dataUrl[2] }
-  return { mime: 'image/png', b64: value }
-}
 
 function hasForbiddenTemplateText(text: string) {
   const normalized = String(text || '')
@@ -96,10 +47,14 @@ async function parseInput(req: Request): Promise<{ prompt: string; language?: Su
     const body = await req.json().catch(() => null)
     const parsed = reqSchema.safeParse(body)
     if (!parsed.success) throw new Error('Invalid notes payload')
+    const images = parsed.data.images
+      .map((encoded) => normalizeBase64VisionImage(encoded))
+      .filter((image): image is VisionImage => Boolean(image))
+      .slice(0, MAX_IMAGES)
     return {
-      prompt: parsed.data.prompt,
+      prompt: String(parsed.data.prompt || '').trim(),
       language: parsed.data.language,
-      images: parsed.data.images.map(normalizeBase64Image),
+      images,
     }
   }
 
@@ -108,63 +63,22 @@ async function parseInput(req: Request): Promise<{ prompt: string; language?: Su
   const languageRaw = String(form.get('language') || '').trim().toLowerCase()
   const language = languageRaw === 'hu' || languageRaw === 'en' ? (languageRaw as SupportedLanguage) : undefined
 
+  const inlineImages = form
+    .getAll('images')
+    .map((x) => String(x || '').trim())
+    .filter(Boolean)
+    .map((encoded) => normalizeBase64VisionImage(encoded))
+    .filter((image): image is VisionImage => Boolean(image))
+
   const files = form.getAll('files').filter((f): f is File => f instanceof File)
-  const images: VisionImage[] = []
+  const fileImages: VisionImage[] = []
   for (const file of files) {
     if (!String(file.type || '').startsWith('image/')) continue
     const b64 = Buffer.from(await file.arrayBuffer()).toString('base64')
-    images.push({ mime: String(file.type || 'image/png'), b64 })
+    fileImages.push({ mime: String(file.type || 'image/png'), b64 })
   }
 
-  if (!prompt) throw new Error('Prompt is required')
-  return { prompt, language, images }
-}
-
-async function extractFromImages(client: OpenAI, images: VisionImage[]) {
-  if (!images.length) {
-    return {
-      detected_language: null as SupportedLanguage | null,
-      extracted_text: '',
-      key_terms: [] as string[],
-    }
-  }
-
-  const userContent: any[] = [
-    {
-      type: 'text',
-      text: [
-        'Read the uploaded study material images carefully.',
-        'Extract all useful educational content.',
-        'Detect the language as "hu" or "en".',
-        'Return strict JSON only.',
-      ].join('\n'),
-    },
-  ]
-
-  for (const image of images) {
-    userContent.push({ type: 'image_url', image_url: { url: `data:${image.mime};base64,${image.b64}` } })
-  }
-
-  const resp = await client.chat.completions.create({
-    model: OPENAI_MODEL,
-    temperature: 0.2,
-    max_tokens: 1400,
-    messages: [
-      { role: 'system', content: 'Extract educational text from images. Return JSON only.' },
-      { role: 'user', content: userContent as any },
-    ],
-    response_format: {
-      type: 'json_schema',
-      json_schema: { name: 'notes_vision_extract', schema: visionExtractSchema, strict: true },
-    },
-  })
-
-  const parsed = visionExtractResponseSchema.parse(parseJson(resp.choices?.[0]?.message?.content))
-  return {
-    detected_language: parsed.detected_language,
-    extracted_text: String(parsed.extracted_text || '').trim(),
-    key_terms: parsed.key_terms.map((x) => String(x || '').trim()).filter(Boolean),
-  }
+  return { prompt, language, images: [...inlineImages, ...fileImages].slice(0, MAX_IMAGES) }
 }
 
 async function generateChunk(params: {
@@ -184,30 +98,19 @@ async function generateChunk(params: {
     langInstruction,
     'Write detailed study notes in Markdown as continuous, readable learning material.',
     'Use clear section headings in Markdown format (## Heading).',
-    'Write mostly short, coherent paragraphs with logical flow.',
-    'Do not output template bullets or placeholder skeletons.',
+    'Write coherent short paragraphs with logical flow.',
     `Target: at least ${NOTES_MIN_CHARS} and at most ${NOTES_MAX_CHARS} visible characters.`,
-    'Required structure:',
-    '- Title',
-    '- Short intro paragraph (2-4 sentences)',
-    '- Sections with REAL content: Definitions, Deep explanation, Worked examples, Typical tasks and solving approach, Common mistakes, Short summary',
-    '- Include at least 2 worked mini examples when possible',
-    '- Include a practice questions section',
-    'Never write placeholder text like "rövid definíció" or "mini példa".',
-    'Never output labels without content.',
-    'Forbidden examples: "short definition", "mini example", "main goal: focus on key concepts".',
-    'If details are missing, infer likely educational content from the topic and explain it concretely.',
+    'Required sections: Definitions, Deep explanation, Worked examples, Typical tasks and solving approach, Common mistakes, Mini practice, Short summary.',
+    'Never write placeholder text like "rövid definíció", "mini példa", "short definition", or template labels without content.',
+    'Never output generic filler.',
+    hasImages
+      ? 'Images were uploaded. Treat extracted image material as the primary source of truth for every section.'
+      : 'No images were uploaded. Build complete notes from the topic prompt only.',
     'Write as if this is the only material the student will use.',
     'Whenever you write mathematics, you MUST use LaTeX.',
     'Use ONLY \\( \\) for inline math and \\[ \\] for display math.',
     'Do NOT use $...$.',
     'Do NOT write math as plain text.',
-    hasImages
-      ? 'Images were uploaded: use the extracted image material as the primary source of truth for every section.'
-      : 'No images were uploaded: build complete notes from the topic prompt.',
-    hasImages
-      ? 'Do not drift into generic filler; anchor each section to the extracted material.'
-      : 'Do not produce generic filler.',
   ].join('\n')
 
   const user = continuation
@@ -222,22 +125,17 @@ async function generateChunk(params: {
       ].join('\n')
     : [
         language === 'hu' ? 'Felhasználói kérés:' : 'User request:',
-        prompt,
+        prompt || (language === 'hu' ? 'Készíts részletes tanulási jegyzetet a feltöltött anyag alapján.' : 'Create detailed study notes from the uploaded material.'),
         extractedText ? (language === 'hu' ? 'Kinyert anyag a képekből (elsődleges forrás):' : 'Extracted content from images (primary source):') : '',
         extractedText,
         keyTerms.length ? `${language === 'hu' ? 'Kulcskifejezések' : 'Key terms'}: ${keyTerms.join(', ')}` : '',
-        hasImages
-          ? language === 'hu'
-            ? 'Kizárólag a fenti kinyert tartalomra építs; ne használj sablonszöveget.'
-            : 'Base the note on the extracted content above; do not use template wording.'
-          : '',
       ]
         .filter(Boolean)
         .join('\n\n')
 
   const resp = await client.chat.completions.create({
     model: OPENAI_MODEL,
-    temperature: 0.6,
+    temperature: 0.55,
     max_tokens: NOTES_MAX_TOKENS,
     messages: [
       { role: 'system', content: system },
@@ -245,32 +143,80 @@ async function generateChunk(params: {
     ],
   })
 
-  const chunk = extractText(resp.choices?.[0]?.message?.content).trim()
+  const chunk = String(resp.choices?.[0]?.message?.content || '').trim()
   if (!chunk) throw new Error('Notes generation returned empty output')
   return chunk
 }
 
 export async function POST(req: Request) {
   try {
-    await requireUser(req)
+    const user = await requireUser(req)
 
     const key = process.env.OPENAI_API_KEY
     if (!key) return NextResponse.json({ error: 'Missing OPENAI_API_KEY' }, { status: 500 })
 
     const input = await parseInput(req)
+    if (input.prompt.length > MAX_PLAN_PROMPT_CHARS) {
+      return NextResponse.json({ error: `Prompt max ${MAX_PLAN_PROMPT_CHARS} chars` }, { status: 400 })
+    }
+    if (input.images.length > MAX_IMAGES) {
+      return NextResponse.json({ error: `Max ${MAX_IMAGES} images` }, { status: 400 })
+    }
+    if (!input.prompt && input.images.length === 0) {
+      return NextResponse.json({ error: 'Provide prompt or at least one image.' }, { status: 400 })
+    }
+
+    const cost = CREDITS_PER_GENERATION
+    if (cost > 0) {
+      const creditsAvailable = await getCredits(user.id)
+      if (creditsAvailable < cost) {
+        return NextResponse.json({ error: 'INSUFFICIENT_CREDITS' }, { status: 402 })
+      }
+    }
+
     const client = new OpenAI({ apiKey: key })
-    const extracted = await extractFromImages(client, input.images)
-    if (input.images.length > 0 && !extracted.extracted_text.trim()) {
-      return NextResponse.json(
-        { error: 'NOTES_VISION_EMPTY_EXTRACT' },
-        { status: 400 }
-      )
+    const requestId = crypto.randomUUID()
+
+    const imagesRequestedCount = input.images.length
+    const imagesDecodedCount = input.images.filter((img) => Boolean(img?.b64)).length
+    const imagesAttachedToModelCount = imagesDecodedCount
+
+    console.log('notes.vision.counts', {
+      requestId,
+      images_requested_count: imagesRequestedCount,
+      images_decoded_count: imagesDecodedCount,
+      images_attached_to_model_count: imagesAttachedToModelCount,
+    })
+
+    if (imagesRequestedCount > 0 && imagesAttachedToModelCount === 0) {
+      return NextResponse.json({ error: 'VISION_INPUT_EMPTY' }, { status: 400 })
+    }
+
+    const extracted = input.images.length
+      ? await extractFromImagesWithVision({
+          client,
+          model: VISION_MODEL,
+          prompt: input.prompt || 'Generate structured learning notes from these images.',
+          images: input.images,
+          requestId,
+          retries: 2,
+          timeoutMs: 12_000,
+        })
+      : {
+          extracted: '',
+          key_topics: [] as string[],
+          tasks_found: [] as string[],
+          language: null as SupportedLanguage | null,
+        }
+
+    if (input.images.length > 0 && !String(extracted.extracted || '').trim()) {
+      return NextResponse.json({ error: 'VISION_INPUT_EMPTY' }, { status: 400 })
     }
 
     const language = resolveLanguage({
       explicit: input.language,
-      extracted: extracted.detected_language,
-      prompt: [input.prompt, extracted.extracted_text, extracted.key_terms.join(' ')].join('\n'),
+      extracted: extracted.language,
+      prompt: [input.prompt, extracted.extracted, extracted.key_topics.join(' ')].join('\n'),
     })
 
     let markdown = ''
@@ -283,21 +229,13 @@ export async function POST(req: Request) {
         language,
         continuation: markdown.length > 0,
         hasImages: input.images.length > 0,
-        extractedText: extracted.extracted_text,
-        keyTerms: extracted.key_terms,
+        extractedText: String(extracted.extracted || '').trim(),
+        keyTerms: extracted.key_topics || [],
       })
       calls += 1
-
-      // Discard templated chunks to prevent placeholder content from entering final notes.
-      if (hasForbiddenTemplateText(chunk)) {
-        continue
-      }
-
+      if (hasForbiddenTemplateText(chunk)) continue
       markdown = markdown ? `${markdown}\n\n${chunk}` : chunk
-
-      if (visibleLength(markdown) >= NOTES_MIN_CHARS) {
-        break
-      }
+      if (visibleLength(markdown) >= NOTES_MIN_CHARS) break
     }
 
     if (!markdown) {
@@ -306,6 +244,10 @@ export async function POST(req: Request) {
 
     const finalMarkdown = trimMarkdownToVisibleMax(markdown, NOTES_MAX_CHARS)
     const characterCount = visibleLength(finalMarkdown)
+
+    if (cost > 0) {
+      await chargeCredits(user.id, cost)
+    }
 
     return NextResponse.json({
       markdown: finalMarkdown,
@@ -316,7 +258,14 @@ export async function POST(req: Request) {
       vision_used: input.images.length > 0,
     })
   } catch (error: any) {
-    console.error('notes.generate.error', { message: String(error?.message || 'Unknown error') })
-    return NextResponse.json({ error: String(error?.message || 'Failed to generate notes') }, { status: 500 })
+    const msg = String(error?.message || 'Failed to generate notes')
+    if (msg.includes('INSUFFICIENT_CREDITS')) {
+      return NextResponse.json({ error: 'INSUFFICIENT_CREDITS' }, { status: 402 })
+    }
+    if (msg.includes('SERVER_MISCONFIGURED')) {
+      return NextResponse.json({ error: msg }, { status: 500 })
+    }
+    console.error('notes.generate.error', { message: msg })
+    return NextResponse.json({ error: msg }, { status: 500 })
   }
 }

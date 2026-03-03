@@ -9,7 +9,7 @@ import { supabase } from '@/lib/supabaseClient'
 import { ArrowLeft, Loader2 } from 'lucide-react'
 import MarkdownMath from '@/components/MarkdownMath'
 import { Button, Textarea } from '@/components/ui'
-import { MAX_IMAGES } from '@/lib/limits'
+import { CREDITS_PER_GENERATION, MAX_IMAGES, MAX_PLAN_PROMPT_CHARS } from '@/lib/limits'
 
 type PlanResult = {
   title?: string | null
@@ -123,7 +123,11 @@ function Inner() {
           }
         } catch {}
 
-        if (!id) throw new Error('Nincs kiválasztott plan. Menj a Plan oldalra és generálj vagy válassz egyet.')
+        if (!id) {
+          setPlan(null)
+          setLoading(false)
+          return
+        }
 
         try {
           const r2 = await authedFetch(`/api/plan?id=${encodeURIComponent(id)}`)
@@ -144,7 +148,7 @@ function Inner() {
           return
         }
       } catch (e: any) {
-        setError(e?.message ?? 'Error')
+        setError(e?.message ?? null)
         setLoading(false)
       }
     })()
@@ -159,14 +163,20 @@ function Inner() {
       .filter(Boolean)
       .join('\n\n')
 
-    setNotesPrompt(basePrompt)
+    setNotesPrompt(basePrompt.slice(0, MAX_PLAN_PROMPT_CHARS))
   }, [plan?.title, notesText])
 
   async function generateLongNotes() {
     setGenError(null)
     setGenLoading(true)
     try {
-      const prompt = notesPrompt.trim() || `Topic: ${plan?.title || 'Study material'}`
+      const prompt = notesPrompt.trim()
+      if (prompt.length > MAX_PLAN_PROMPT_CHARS) {
+        throw new Error(`Prompt too long (max ${MAX_PLAN_PROMPT_CHARS} chars).`)
+      }
+      if (!prompt && files.length === 0) {
+        throw new Error('Add a short topic or upload at least one image.')
+      }
       const fd = new FormData()
       fd.append('prompt', prompt)
       for (const file of files.slice(0, MAX_IMAGES)) fd.append('files', file)
@@ -224,13 +234,12 @@ function Inner() {
           <div className="inline-flex items-center gap-2 text-white/70">
             <Loader2 className="animate-spin" size={16} /> Loading…
           </div>
-        ) : error ? (
-          <div className="text-sm text-red-400">{error}</div>
-        ) : plan ? (
+        ) : (
           <>
+            {error ? <div className="text-sm text-red-400">{error}</div> : null}
             <div className="text-xs uppercase tracking-[0.18em] text-white/55">{labels.notes}</div>
             <h1 className="mt-1 text-2xl font-semibold tracking-tight text-white break-words">
-              {plan.title || labels.notes}
+              {plan?.title || labels.notes}
             </h1>
 
             <div className="rounded-2xl border border-white/10 bg-black/30 p-4 space-y-3">
@@ -240,6 +249,7 @@ function Inner() {
                 onChange={(e) => setNotesPrompt(e.target.value)}
                 className="min-h-[140px]"
                 placeholder="Describe what depth you need for the notes."
+                maxLength={MAX_PLAN_PROMPT_CHARS}
               />
               <input
                 type="file"
@@ -251,8 +261,9 @@ function Inner() {
                 }}
               />
               <div className="text-xs text-white/60">{files.length}/{MAX_IMAGES} image(s) selected for notes vision.</div>
+              <div className="text-xs text-white/60">Cost: {CREDITS_PER_GENERATION} credit / generation</div>
               <div className="flex items-center gap-3">
-                <Button onClick={generateLongNotes} disabled={genLoading || !notesPrompt.trim()}>
+                <Button onClick={generateLongNotes} disabled={genLoading || (!notesPrompt.trim() && files.length === 0)}>
                   {genLoading ? labels.buttonLoading : labels.button}
                 </Button>
                 {generatedCharCount != null ? (
@@ -276,7 +287,7 @@ function Inner() {
               )}
             </div>
           </>
-        ) : null}
+        )}
       </div>
     </div>
   )

@@ -1,5 +1,6 @@
 import OpenAI from 'openai'
 import { z } from 'zod'
+import { buildVisionBlocks } from '@/lib/vision'
 
 export const VisionExtractSchema = z.object({
   extracted: z.string(),
@@ -87,9 +88,7 @@ export async function extractFromImagesWithVision(params: {
     const retryInstruction = attempt > 0 ? 'Return ONLY valid JSON matching the schema. No markdown.' : ''
     try {
       const userContent: any[] = [{ type: 'text', text: `User prompt:\n${prompt || '(empty)'}` }]
-      for (const img of images) {
-        userContent.push({ type: 'image_url', image_url: { url: `data:${img.mime};base64,${img.b64}` } })
-      }
+      userContent.push(...buildVisionBlocks(images))
 
       const resp = await withTimeout(timeoutMs, (signal) =>
         client.chat.completions.create(

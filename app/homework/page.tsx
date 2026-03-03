@@ -104,6 +104,7 @@ function Inner() {
     // remove any dollar-based delimiters from model output
     t = t.replace(/\$\$/g, '')
     t = t.replace(/\$/g, '')
+    t = t.replace(/\\newline\b/g, ' ')
     t = t.trim()
 
     return t || null

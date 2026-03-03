@@ -699,7 +699,7 @@ export async function POST(req: Request) {
 
     if (imagesSelected > 0 && imagesSentToVision === 0) {
       return NextResponse.json(
-        { error: 'PLAN_VISION_INPUT_EMPTY' },
+        { error: 'VISION_INPUT_EMPTY' },
         { status: 400, headers: { 'cache-control': 'no-store' } }
       )
     }
@@ -829,6 +829,8 @@ export async function POST(req: Request) {
       `Key topics:\n${extracted.key_topics.join(', ') || '(none)'}`,
       `Tasks found:\n${extracted.tasks_found.join(' | ') || '(none)'}`,
     ].join('\n\n')
+    let generatedPlanNotesMarkdown = ''
+    let generatedQuickQuestions: string[] = []
 
     const runPlanDailyAttempt = async (attempt: number): Promise<PlanDocument> => {
       const extra = attempt > 0 ? 'Repair JSON: return ONLY valid JSON matching schema exactly. No prose.' : ''
@@ -940,6 +942,11 @@ export async function POST(req: Request) {
       }
       const validated = planEnrichmentZod.parse(parsed)
       const compactMarkdown = normalizeCompactNotesMarkdown(validated.summary_notes_markdown)
+      generatedPlanNotesMarkdown = compactMarkdown
+      generatedQuickQuestions = validated.quick_questions
+        .map((q) => String(q || '').trim())
+        .filter(Boolean)
+        .slice(0, 10)
       const outline = markdownToOutline(compactMarkdown, isHu)
       const recap = outline
         .flatMap((section) => section.bullets)
@@ -1130,7 +1137,9 @@ export async function POST(req: Request) {
     })
 
     const summaryNotesMarkdown = notesOutlineToMarkdown(document.notes)
-    const quickQuestions = Array.isArray(document.practice?.questions)
+    const quickQuestions = generatedQuickQuestions.length > 0
+      ? generatedQuickQuestions
+      : Array.isArray(document.practice?.questions)
       ? document.practice.questions.map((q) => String(q?.q || '').trim()).filter(Boolean).slice(0, 10)
       : []
 
@@ -1140,7 +1149,7 @@ export async function POST(req: Request) {
         status: finalStatus,
         title: document.title,
         plan_blocks: document.plan.blocks,
-        summary_notes_markdown: summaryNotesMarkdown,
+        summary_notes_markdown: generatedPlanNotesMarkdown || summaryNotesMarkdown,
         quick_questions: quickQuestions,
       },
       { headers: { 'cache-control': 'no-store', 'x-examly-plan': 'ok' } }

@@ -21,6 +21,8 @@ const NOTES_MAX_CALLS = 3
 const NOTES_MAX_TOKENS = 2200
 const VISION_MODEL = process.env.OPENAI_VISION_MODEL || OPENAI_MODEL
 const MAX_VISION_BYTES = 8 * 1024 * 1024
+const OPENAI_TIMEOUT_MS = 60_000
+const OPENAI_MAX_RETRIES = 2
 
 const FORBIDDEN_TEMPLATE_PATTERNS: RegExp[] = [
   /rövid definíció/i,
@@ -42,6 +44,96 @@ const reqSchema = z.object({
 function hasForbiddenTemplateText(text: string) {
   const normalized = String(text || '')
   return FORBIDDEN_TEMPLATE_PATTERNS.some((pattern) => pattern.test(normalized))
+}
+
+function isTimeoutLikeError(error: any) {
+  const message = String(error?.message || '').toLowerCase()
+  return (
+    error?.name === 'AbortError' ||
+    message.includes('timeout') ||
+    message.includes('timed out') ||
+    message.includes('aborted')
+  )
+}
+
+function isTransientOpenAiError(error: any) {
+  const status = Number(error?.status ?? error?.response?.status ?? 0)
+  const message = String(error?.message || '').toLowerCase()
+  return (
+    isTimeoutLikeError(error) ||
+    status === 429 ||
+    status === 408 ||
+    status === 500 ||
+    status === 502 ||
+    status === 503 ||
+    status === 504 ||
+    message.includes('econnreset') ||
+    message.includes('network')
+  )
+}
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+async function createChatCompletionWithTimeoutRetry(
+  client: OpenAI,
+  request: OpenAI.Chat.Completions.ChatCompletionCreateParamsNonStreaming,
+  logTag: string
+) {
+  let lastError: any = null
+
+  for (let attempt = 0; attempt <= OPENAI_MAX_RETRIES; attempt += 1) {
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), OPENAI_TIMEOUT_MS)
+    try {
+      const response = await client.chat.completions.create(request, { signal: controller.signal })
+      clearTimeout(timer)
+      console.log('notes_generate_success', { tag: logTag, attempt: attempt + 1 })
+      return response
+    } catch (error: any) {
+      clearTimeout(timer)
+      lastError = error
+      const timeoutLike = isTimeoutLikeError(error)
+      const transient = isTransientOpenAiError(error)
+
+      if (attempt < OPENAI_MAX_RETRIES && transient) {
+        console.warn('notes_generate_timeout_retry', {
+          tag: logTag,
+          attempt: attempt + 1,
+          timeout: timeoutLike,
+          message: String(error?.message || 'unknown'),
+        })
+        await sleep(400 * 2 ** attempt)
+        continue
+      }
+
+      if (timeoutLike) {
+        console.error('notes_generate_timeout_final', {
+          tag: logTag,
+          attempt: attempt + 1,
+          message: String(error?.message || 'timeout'),
+        })
+        const timeoutError = new Error('NOTES_TIMEOUT')
+        ;(timeoutError as any).status = 504
+        throw timeoutError
+      }
+
+      throw error
+    }
+  }
+
+  if (isTimeoutLikeError(lastError)) {
+    console.error('notes_generate_timeout_final', {
+      tag: logTag,
+      message: String(lastError?.message || 'timeout'),
+    })
+    const timeoutError = new Error('NOTES_TIMEOUT')
+    ;(timeoutError as any).status = 504
+    throw timeoutError
+  }
+
+  throw lastError || new Error('Notes generation failed')
 }
 
 async function parseInput(req: Request): Promise<{
@@ -199,15 +291,19 @@ async function generateChunk(params: {
         .filter(Boolean)
         .join('\n\n')
 
-  const resp = await client.chat.completions.create({
-    model: OPENAI_MODEL,
-    temperature: 0.55,
-    max_tokens: NOTES_MAX_TOKENS,
-    messages: [
-      { role: 'system', content: system },
-      { role: 'user', content: user },
-    ],
-  })
+  const resp = await createChatCompletionWithTimeoutRetry(
+    client,
+    {
+      model: OPENAI_MODEL,
+      temperature: 0.55,
+      max_tokens: NOTES_MAX_TOKENS,
+      messages: [
+        { role: 'system', content: system },
+        { role: 'user', content: user },
+      ],
+    },
+    continuation ? 'notes_chunk_continuation' : 'notes_chunk_initial'
+  )
 
   const chunk = String(resp.choices?.[0]?.message?.content || '').trim()
   if (!chunk) throw new Error('Notes generation returned empty output')
@@ -330,6 +426,9 @@ export async function POST(req: Request) {
     })
   } catch (error: any) {
     const msg = String(error?.message || 'Failed to generate notes')
+    if (msg.includes('NOTES_TIMEOUT')) {
+      return NextResponse.json({ error: 'NOTES_TIMEOUT' }, { status: 504 })
+    }
     if (msg.includes('INSUFFICIENT_CREDITS')) {
       return NextResponse.json({ error: 'INSUFFICIENT_CREDITS' }, { status: 402 })
     }

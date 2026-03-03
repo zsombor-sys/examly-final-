@@ -124,6 +124,7 @@ function Inner() {
         if (code === 'INSUFFICIENT_CREDITS') throw new Error(ui.creditsError)
         if (code === 'VISION_INPUT_EMPTY') throw new Error(ui.visionError)
         if (code === 'MAX_IMAGES_EXCEEDED') throw new Error(language === 'hu' ? 'Legfeljebb 7 képet tölthetsz fel.' : 'You can upload at most 7 images.')
+        if (code === 'NOTES_TIMEOUT') throw new Error(language === 'hu' ? 'A jegyzetgenerálás időtúllépés miatt megszakadt. Próbáld újra kevesebb képpel.' : 'Notes generation timed out. Try again with fewer images.')
         throw new Error(code || 'Failed to generate notes')
       }
 

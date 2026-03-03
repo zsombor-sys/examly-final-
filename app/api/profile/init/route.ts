@@ -4,6 +4,16 @@ import { supabaseAdmin } from '@/lib/supabaseServer'
 
 export const runtime = 'nodejs'
 
+function isConflictError(err: any) {
+  const msg = String(err?.message || '').toLowerCase()
+  return (
+    Number(err?.status) === 409 ||
+    String(err?.code || '') === '23505' ||
+    msg.includes('duplicate key') ||
+    msg.includes('conflict')
+  )
+}
+
 export async function POST(req: Request) {
   try {
     const user = await requireUser(req)
@@ -17,38 +27,46 @@ export async function POST(req: Request) {
     const sb = supabaseAdmin()
     const { data: existing, error: selErr } = await sb
       .from('profiles')
-      .select('*')
+      .select('id, credits, email, full_name, phone')
       .eq('id', user.id)
       .maybeSingle()
     if (selErr) throw selErr
 
-    if (!existing) {
-      const { data: inserted, error: insErr } = await sb
-        .from('profiles')
-        .insert({
-          id: user.id,
-          email: email || null,
-          full_name: fullName || null,
-          phone: phone || null,
-          credits: 5,
-        })
-        .select('credits')
-        .single()
-      if (insErr) throw insErr
-      return NextResponse.json({ ok: true, credits: Number(inserted?.credits ?? 5) })
+    const upsertPayload = {
+      id: user.id,
+      email: existing?.email ?? (email || null),
+      full_name: existing?.full_name ?? (fullName || null),
+      phone: existing?.phone ?? (phone || null),
+      credits: typeof existing?.credits === 'number' ? existing.credits : 5,
+      updated_at: new Date().toISOString(),
     }
 
-    const { error: updErr } = await sb
+    const { error: upsertErr } = await sb
       .from('profiles')
-      .update({
-        email: existing.email ?? (email || null),
-        full_name: existing.full_name ?? (fullName || null),
-        phone: existing.phone ?? (phone || null),
-      })
-      .eq('id', user.id)
-    if (updErr) throw updErr
+      .upsert(upsertPayload, { onConflict: 'id' })
 
-    return NextResponse.json({ ok: true, credits: Number(existing?.credits ?? 0) })
+    if (upsertErr) {
+      if (isConflictError(upsertErr)) {
+        const { data: afterConflict } = await sb
+          .from('profiles')
+          .select('id, credits')
+          .eq('id', user.id)
+          .maybeSingle()
+        if (afterConflict?.id) {
+          console.log('profile_upsert_409_ignored', { user_id: user.id })
+          return NextResponse.json({ ok: true, credits: Number(afterConflict?.credits ?? 0) })
+        }
+      }
+      throw upsertErr
+    }
+
+    const { data: finalRow } = await sb
+      .from('profiles')
+      .select('id, credits')
+      .eq('id', user.id)
+      .maybeSingle()
+    console.log('profile_upsert_ok', { user_id: user.id })
+    return NextResponse.json({ ok: true, credits: Number(finalRow?.credits ?? upsertPayload.credits ?? 0) })
   } catch (e: any) {
     return NextResponse.json({ error: e?.message ?? 'Server error' }, { status: e?.status ?? 500 })
   }

@@ -189,7 +189,7 @@ export async function POST(req: Request) {
     })
 
     if (imagesRequestedCount > 0 && imagesAttachedToModelCount === 0) {
-      return NextResponse.json({ error: 'VISION_INPUT_EMPTY' }, { status: 400 })
+      return NextResponse.json({ error: 'NOTES_VISION_INPUT_EMPTY' }, { status: 400 })
     }
 
     const extracted = input.images.length
@@ -210,7 +210,7 @@ export async function POST(req: Request) {
         }
 
     if (input.images.length > 0 && !String(extracted.extracted || '').trim()) {
-      return NextResponse.json({ error: 'VISION_INPUT_EMPTY' }, { status: 400 })
+      return NextResponse.json({ error: 'NOTES_VISION_INPUT_EMPTY' }, { status: 400 })
     }
 
     const language = resolveLanguage({

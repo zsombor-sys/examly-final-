@@ -1,57 +1,15 @@
 'use client'
 
 import Link from 'next/link'
-import { useEffect, useMemo, useState } from 'react'
+import { useMemo, useState } from 'react'
+import { ArrowLeft, Loader2 } from 'lucide-react'
 import AuthGate from '@/components/AuthGate'
 import ClientAuthGuard from '@/components/ClientAuthGuard'
-import { authedFetch } from '@/lib/authClient'
-import { supabase } from '@/lib/supabaseClient'
-import { ArrowLeft, Loader2 } from 'lucide-react'
 import MarkdownMath from '@/components/MarkdownMath'
 import { Button, Textarea } from '@/components/ui'
+import { authedFetch } from '@/lib/authClient'
 import { CREDITS_PER_GENERATION, MAX_IMAGES, MAX_PLAN_PROMPT_CHARS } from '@/lib/limits'
-
-type PlanResult = {
-  title?: string | null
-  language?: 'hu' | 'en' | null
-  notes?: string | { content_markdown?: string | null; content?: string | null } | null
-  fallback?: boolean
-  errorCode?: string | null
-  requestId?: string | null
-}
-
-function historyKeyForUser(userId: string | null) {
-  return userId ? `examly_plans_v1:${userId}` : null
-}
-
-function currentPlanKeyForUser(userId: string | null) {
-  return userId ? `examly_current_plan_id_v1:${userId}` : null
-}
-
-function getLocalCurrentId(userId: string | null): string | null {
-  try {
-    const key = currentPlanKeyForUser(userId)
-    if (!key) return null
-    return window.localStorage.getItem(key)
-  } catch {
-    return null
-  }
-}
-
-function loadLocalPlan(userId: string | null, id: string): any | null {
-  try {
-    const key = historyKeyForUser(userId)
-    if (!key) return null
-    const raw = window.localStorage.getItem(key)
-    if (!raw) return null
-    const arr = JSON.parse(raw)
-    if (!Array.isArray(arr)) return null
-    const found = arr.find((x: any) => String(x?.id) === id)
-    return found?.result ?? null
-  } catch {
-    return null
-  }
-}
+import { looksHungarian } from '@/lib/language'
 
 export default function NotesPage() {
   return (
@@ -64,230 +22,150 @@ export default function NotesPage() {
 }
 
 function Inner() {
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState<string | null>(null)
-  const [plan, setPlan] = useState<PlanResult | null>(null)
-  const [userId, setUserId] = useState<string | null>(null)
-  const [authReady, setAuthReady] = useState(false)
-
   const [notesPrompt, setNotesPrompt] = useState('')
-  const [genLoading, setGenLoading] = useState(false)
-  const [genError, setGenError] = useState<string | null>(null)
-  const [generatedMarkdown, setGeneratedMarkdown] = useState<string>('')
-  const [generatedCharCount, setGeneratedCharCount] = useState<number | null>(null)
-  const [generatedLanguage, setGeneratedLanguage] = useState<'hu' | 'en' | null>(null)
   const [files, setFiles] = useState<File[]>([])
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [markdown, setMarkdown] = useState('')
+  const [characterCount, setCharacterCount] = useState<number | null>(null)
+  const [language, setLanguage] = useState<'hu' | 'en'>('en')
 
-  const notesText = useMemo(() => {
-    if (!plan?.notes) return ''
-    if (typeof plan.notes === 'string') return plan.notes
-    if (typeof plan.notes?.content_markdown === 'string') return plan.notes.content_markdown
-    return typeof plan.notes?.content === 'string' ? plan.notes.content : ''
-  }, [plan])
-
-  useEffect(() => {
-    let active = true
-    supabase.auth.getUser().then((res) => {
-      if (!active) return
-      setUserId(res?.data?.user?.id ?? null)
-      setAuthReady(true)
-    })
-    const { data } = supabase.auth.onAuthStateChange((_event, session) => {
-      if (!active) return
-      setUserId(session?.user?.id ?? null)
-      setAuthReady(true)
-    })
-    return () => {
-      active = false
-      data.subscription.unsubscribe()
-    }
-  }, [])
-
-  useEffect(() => {
-    ;(async () => {
-      if (!authReady) return
-      setLoading(true)
-      setError(null)
-      try {
-        if (!userId) {
-          throw new Error('Nincs bejelentkezett felhasználó.')
+  const ui = useMemo(() => {
+    const hu = language === 'hu' || looksHungarian(notesPrompt)
+    return hu
+      ? {
+          back: 'Vissza a tervhez',
+          title: 'Jegyzetek',
+          subtitle: 'Generálj részletes tanulási jegyzetet képekből vagy rövid témamegadásból.',
+          promptLabel: 'Téma (max 150 karakter)',
+          promptPlaceholder: 'Pl.: Másodfokú egyenletek, diszkrimináns, zérushelyek',
+          upload: 'Képek',
+          selected: 'kiválasztva',
+          cost: `Költség: ${CREDITS_PER_GENERATION} kredit / generálás`,
+          generate: 'Jegyzet generálása',
+          generating: 'Generálás…',
+          count: 'Karakterszám',
+          noNotes: 'Még nincs generált jegyzet.',
+          creditsError: 'Nincs elég kredited ehhez a generáláshoz.',
+          visionError: 'A feltöltött képek nem jutottak el a modellhez.',
         }
-
-        let id: string | null = getLocalCurrentId(userId)
-
-        try {
-          if (!id) {
-            const r1 = await authedFetch('/api/plan/current')
-            const j1 = await r1.json().catch(() => ({} as any))
-            if (r1.ok && typeof j1?.id === 'string') id = j1.id
-          }
-        } catch {}
-
-        if (!id) {
-          setPlan(null)
-          setLoading(false)
-          return
+      : {
+          back: 'Back to Plan',
+          title: 'Notes',
+          subtitle: 'Generate detailed study notes from images or a short topic prompt.',
+          promptLabel: 'Topic (max 150 chars)',
+          promptPlaceholder: 'e.g. Quadratic equations: discriminant and roots',
+          upload: 'Images',
+          selected: 'selected',
+          cost: `Cost: ${CREDITS_PER_GENERATION} credit / generation`,
+          generate: 'Generate notes',
+          generating: 'Generating…',
+          count: 'Character count',
+          noNotes: 'No generated notes yet.',
+          creditsError: "You don't have enough credits to generate this.",
+          visionError: 'Uploaded images were not attached to the model input.',
         }
+  }, [language, notesPrompt])
 
-        try {
-          const r2 = await authedFetch(`/api/plan?id=${encodeURIComponent(id)}`)
-          const j2 = await r2.json().catch(() => ({} as any))
-          if (!r2.ok) throw new Error(j2?.error ?? 'Failed to load')
-          setPlan(j2?.result ?? null)
-          if (j2?.result?.fallback) {
-            const rid = typeof j2?.result?.requestId === 'string' ? j2.result.requestId : id
-            setError(`Generation failed. Request ID: ${rid}`)
-          }
-          setLoading(false)
-          return
-        } catch {
-          const local = loadLocalPlan(userId, id)
-          if (!local) throw new Error('Nem találom a plan-t (se szerveren, se lokálisan).')
-          setPlan(local)
-          setLoading(false)
-          return
-        }
-      } catch (e: any) {
-        setError(e?.message ?? null)
-        setLoading(false)
-      }
-    })()
-  }, [authReady, userId])
-
-  useEffect(() => {
-    const basePrompt = [
-      plan?.title ? `Topic: ${plan.title}` : '',
-      notesText ? `Current short notes:\n${notesText.slice(0, 1500)}` : '',
-      'Create complete long-form learning notes from basics to exam-level understanding.',
-    ]
-      .filter(Boolean)
-      .join('\n\n')
-
-    setNotesPrompt(basePrompt.slice(0, MAX_PLAN_PROMPT_CHARS))
-  }, [plan?.title, notesText])
-
-  async function generateLongNotes() {
-    setGenError(null)
-    setGenLoading(true)
+  async function generate() {
+    setError(null)
+    setLoading(true)
     try {
-      const prompt = notesPrompt.trim()
-      if (prompt.length > MAX_PLAN_PROMPT_CHARS) {
+      const trimmed = notesPrompt.trim()
+      if (trimmed.length > MAX_PLAN_PROMPT_CHARS) {
         throw new Error(`Prompt too long (max ${MAX_PLAN_PROMPT_CHARS} chars).`)
       }
-      if (!prompt && files.length === 0) {
-        throw new Error('Add a short topic or upload at least one image.')
+      if (!trimmed && files.length === 0) {
+        throw new Error(language === 'hu' ? 'Adj meg témát vagy tölts fel legalább egy képet.' : 'Provide a topic or upload at least one image.')
       }
+
       const fd = new FormData()
-      fd.append('prompt', prompt)
-      for (const file of files.slice(0, MAX_IMAGES)) fd.append('files', file)
+      fd.append('prompt', trimmed)
+      for (const file of files.slice(0, MAX_IMAGES)) {
+        fd.append('files', file)
+      }
+
       const res = await authedFetch('/api/notes/generate', { method: 'POST', body: fd })
       const json = await res.json().catch(() => ({} as any))
-      if (!res.ok) throw new Error(String(json?.error || 'Failed to generate notes'))
-
-      setGeneratedMarkdown(String(json?.markdown || ''))
-      setGeneratedCharCount(Number(json?.character_count || 0))
-      setGeneratedLanguage(json?.language === 'hu' ? 'hu' : 'en')
-
-      if (!json?.reached_target) {
-        setGenError(`Notes generated but below target (${Number(json?.character_count || 0)} characters). Try a more specific prompt.`)
+      if (!res.ok) {
+        const code = String(json?.error || '')
+        if (code === 'INSUFFICIENT_CREDITS') throw new Error(ui.creditsError)
+        if (code === 'NOTES_VISION_INPUT_EMPTY') throw new Error(ui.visionError)
+        throw new Error(code || 'Failed to generate notes')
       }
+
+      const nextLanguage: 'hu' | 'en' = json?.language === 'hu' ? 'hu' : 'en'
+      setLanguage(nextLanguage)
+      setMarkdown(String(json?.markdown || ''))
+      setCharacterCount(Number(json?.character_count || 0))
     } catch (e: any) {
-      setGenError(String(e?.message || 'Failed to generate notes'))
+      setError(String(e?.message || 'Failed to generate notes'))
     } finally {
-      setGenLoading(false)
+      setLoading(false)
     }
   }
-
-  const renderedNotes = generatedMarkdown.trim() ? generatedMarkdown : notesText
-  const uiLanguage: 'hu' | 'en' = generatedLanguage || (plan?.language === 'hu' ? 'hu' : 'en')
-  const labels = uiLanguage === 'hu'
-    ? {
-        back: 'Vissza a tervhez',
-        notes: 'Jegyzet',
-        generator: 'Részletes jegyzet generálása',
-        button: 'Hosszú jegyzet generálása',
-        buttonLoading: 'Hosszú jegyzet készül…',
-        study: 'Tanulási jegyzet',
-        noNotes: 'Nincs még jegyzet.',
-      }
-    : {
-        back: 'Back to Plan',
-        notes: 'Notes',
-        generator: 'Generate deep notes',
-        button: 'Generate long notes',
-        buttonLoading: 'Generating long notes…',
-        study: 'Study notes',
-        noNotes: 'No notes available yet.',
-      }
 
   return (
     <div className="mx-auto max-w-4xl px-4 py-10">
       <div className="flex items-center justify-between">
         <Link href="/plan" className="inline-flex items-center gap-2 text-white/70 hover:text-white">
           <ArrowLeft size={18} />
-          {labels.back}
+          {ui.back}
         </Link>
       </div>
 
       <div className="mt-6 rounded-3xl border border-white/10 bg-black/40 p-6 space-y-4">
-        {loading ? (
-          <div className="inline-flex items-center gap-2 text-white/70">
-            <Loader2 className="animate-spin" size={16} /> Loading…
-          </div>
-        ) : (
-          <>
-            {error ? <div className="text-sm text-red-400">{error}</div> : null}
-            <div className="text-xs uppercase tracking-[0.18em] text-white/55">{labels.notes}</div>
-            <h1 className="mt-1 text-2xl font-semibold tracking-tight text-white break-words">
-              {plan?.title || labels.notes}
-            </h1>
+        <div className="text-xs uppercase tracking-[0.18em] text-white/55">{ui.title}</div>
+        <h1 className="text-2xl font-semibold tracking-tight text-white">{ui.title}</h1>
+        <p className="text-sm text-white/70">{ui.subtitle}</p>
 
-            <div className="rounded-2xl border border-white/10 bg-black/30 p-4 space-y-3">
-              <div className="text-xs uppercase tracking-[0.16em] text-white/55">{labels.generator}</div>
-              <Textarea
-                value={notesPrompt}
-                onChange={(e) => setNotesPrompt(e.target.value)}
-                className="min-h-[140px]"
-                placeholder="Describe what depth you need for the notes."
-                maxLength={MAX_PLAN_PROMPT_CHARS}
-              />
-              <input
-                type="file"
-                accept="image/*"
-                multiple
-                onChange={(e) => {
-                  const next = Array.from(e.target.files ?? [])
-                  setFiles(next.slice(0, MAX_IMAGES))
-                }}
-              />
-              <div className="text-xs text-white/60">{files.length}/{MAX_IMAGES} image(s) selected for notes vision.</div>
-              <div className="text-xs text-white/60">Cost: {CREDITS_PER_GENERATION} credit / generation</div>
-              <div className="flex items-center gap-3">
-                <Button onClick={generateLongNotes} disabled={genLoading || (!notesPrompt.trim() && files.length === 0)}>
-                  {genLoading ? labels.buttonLoading : labels.button}
-                </Button>
-                {generatedCharCount != null ? (
-                  <div className="text-sm text-white/70">Character count: {generatedCharCount}</div>
-                ) : null}
-                {generatedLanguage ? (
-                  <div className="text-sm text-white/70">Language: {generatedLanguage.toUpperCase()}</div>
-                ) : null}
-              </div>
-              {genError ? <div className="text-sm text-red-400">{genError}</div> : null}
-            </div>
+        <div className="space-y-2">
+          <div className="text-sm text-white/70">{ui.promptLabel}</div>
+          <Textarea
+            value={notesPrompt}
+            onChange={(e) => setNotesPrompt(e.target.value.slice(0, MAX_PLAN_PROMPT_CHARS))}
+            placeholder={ui.promptPlaceholder}
+            className="min-h-[96px]"
+          />
+          <div className="text-xs text-white/55">{notesPrompt.length}/{MAX_PLAN_PROMPT_CHARS}</div>
+        </div>
 
-            <div className="mt-2 rounded-3xl border border-white/10 bg-white/[0.02] p-5 min-w-0 overflow-hidden">
-              <div className="text-xs uppercase tracking-[0.18em] text-white/55">{labels.study}</div>
-              {renderedNotes.trim() ? (
-                <div className="mt-3 richtext min-w-0 max-w-full overflow-x-auto text-white/80">
-                  <MarkdownMath content={renderedNotes} />
-                </div>
-              ) : (
-                <div className="mt-3 text-sm text-white/70">{labels.noNotes}</div>
-              )}
+        <div className="space-y-2">
+          <div className="text-sm text-white/70">{ui.upload}</div>
+          <input
+            type="file"
+            accept="image/*"
+            multiple
+            onChange={(e) => setFiles(Array.from(e.target.files ?? []).slice(0, MAX_IMAGES))}
+          />
+          <div className="text-xs text-white/60">{files.length}/{MAX_IMAGES} {ui.selected}</div>
+        </div>
+
+        <div className="text-xs text-white/60">{ui.cost}</div>
+
+        <Button onClick={generate} disabled={loading || (!notesPrompt.trim() && files.length === 0)}>
+          {loading ? (
+            <span className="inline-flex items-center gap-2">
+              <Loader2 className="animate-spin" size={16} />
+              {ui.generating}
+            </span>
+          ) : (
+            ui.generate
+          )}
+        </Button>
+
+        {error ? <div className="text-sm text-red-400">{error}</div> : null}
+        {characterCount != null ? <div className="text-sm text-white/70">{ui.count}: {characterCount}</div> : null}
+
+        <div className="mt-2 rounded-3xl border border-white/10 bg-white/[0.02] p-5 min-w-0 overflow-hidden">
+          {markdown.trim() ? (
+            <div className="richtext min-w-0 max-w-full overflow-x-auto text-white/80">
+              <MarkdownMath content={markdown} />
             </div>
-          </>
-        )}
+          ) : (
+            <div className="text-sm text-white/70">{ui.noNotes}</div>
+          )}
+        </div>
       </div>
     </div>
   )

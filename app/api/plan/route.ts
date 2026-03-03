@@ -34,8 +34,8 @@ const STEP2_TIMEOUT_MS = 14_000
 const OPENAI_ATTEMPTS = 2
 const MAX_VISION_BYTES = 8 * 1024 * 1024
 const MAX_EXTRACT_CHARS = 12_000
-const PLAN_NOTES_MIN_CHARS = 800
-const PLAN_NOTES_MAX_CHARS = 1500
+const PLAN_NOTES_MIN_CHARS = 2000
+const PLAN_NOTES_MAX_CHARS = 3000
 
 const FORBIDDEN_NOTES_PATTERNS: RegExp[] = [
   /concepts?\s*:\s*short definition/i,
@@ -699,7 +699,7 @@ export async function POST(req: Request) {
 
     if (imagesSelected > 0 && imagesSentToVision === 0) {
       return NextResponse.json(
-        { error: 'VISION_INPUT_EMPTY' },
+        { error: 'PLAN_VISION_INPUT_EMPTY' },
         { status: 400, headers: { 'cache-control': 'no-store' } }
       )
     }
@@ -1148,9 +1148,14 @@ export async function POST(req: Request) {
         planId,
         status: finalStatus,
         title: document.title,
+        plan: document.plan,
         plan_blocks: document.plan.blocks,
         summary_notes_markdown: generatedPlanNotesMarkdown || summaryNotesMarkdown,
+        notes_markdown: generatedPlanNotesMarkdown || summaryNotesMarkdown,
+        practice_questions: quickQuestions,
         quick_questions: quickQuestions,
+        language: document.language,
+        vision_used: imagesSentToVision > 0,
       },
       { headers: { 'cache-control': 'no-store', 'x-examly-plan': 'ok' } }
     )

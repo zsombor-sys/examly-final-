@@ -320,8 +320,8 @@ function normalizeOutline(rawOutline: unknown, isHu: boolean) {
       heading,
       bullets: [
         isHu
-          ? `${heading}: rovid definicio es alkalmazasi szabaly.`
-          : `${heading}: short definition and application hint.`,
+          ? `${heading}: röviden foglald össze a legfontosabb összefüggéseket és egy konkrét alkalmazási példát.`
+          : `${heading}: summarize the key relationship and one concrete application example.`,
       ],
     })
   }
@@ -593,8 +593,8 @@ export function fallbackPlanDocument(isHu: boolean, prompt = ''): PlanDocument {
   const outline = defaultHeadings(isHu).slice(0, 6).map((heading) => ({
     heading,
     bullets: [
-      isHu ? `${heading}: rovid definicio.` : `${heading}: short definition.`,
-      isHu ? `${heading}: mini pelda.` : `${heading}: mini example.`,
+      isHu ? `${heading}: emeld ki a tananyag kulcspontját egy mondatban.` : `${heading}: highlight the key idea in one sentence.`,
+      isHu ? `${heading}: adj egy rövid, valós példát a használatra.` : `${heading}: give one short real usage example.`,
     ],
   }))
 

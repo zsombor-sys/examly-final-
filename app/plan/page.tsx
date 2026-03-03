@@ -9,6 +9,7 @@ import AuthGate from '@/components/AuthGate'
 import ClientAuthGuard from '@/components/ClientAuthGuard'
 import { authedFetch } from '@/lib/authClient'
 import { supabase } from '@/lib/supabaseClient'
+import { looksHungarian } from '@/lib/language'
 import HScroll from '@/components/HScroll'
 import Pomodoro from '@/components/Pomodoro'
 import { MAX_PLAN_IMAGES, MAX_PLAN_PROMPT_CHARS, CREDITS_PER_GENERATION } from '@/lib/limits'
@@ -605,12 +606,15 @@ function Inner({ entitlement }: { entitlement: { credits: number | null; entitle
       if (!res.ok) {
         const code = json?.error?.code ?? json?.code ?? json?.error
         let message = json?.error?.message ?? json?.details ?? json?.message ?? json?.error
+        const prefersHu = looksHungarian(promptToSend)
         if (code === 'SERVER_CANT_READ_CREDITS') {
           message = "Server can't read credits (env/RLS)."
         } else if (code === 'PLANS_SCHEMA_MISMATCH') {
           message = 'Server plans table schema mismatch. Run latest migrations.'
         } else if (code === 'INSUFFICIENT_CREDITS') {
-          message = 'Not enough credits.'
+          message = prefersHu ? 'Nincs elég kredited ehhez a generáláshoz.' : "You don't have enough credits to generate this."
+        } else if (code === 'PLAN_VISION_INPUT_EMPTY') {
+          message = prefersHu ? 'A feltöltött képek nem jutottak el a modellhez.' : 'Uploaded images were not attached to the model input.'
         } else if (code === 'UNAUTHENTICATED') {
           message = 'Please log in again.'
         }

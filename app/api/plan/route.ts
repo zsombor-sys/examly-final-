@@ -309,6 +309,29 @@ async function optimizeVisionImages(rawImages: RawImageSource[]): Promise<Optimi
   return optimized
 }
 
+async function uploadOptimizedAndSign(params: {
+  sb: ReturnType<typeof createServerAdminClient>
+  requestId: string
+  images: OptimizedVisionImage[]
+}) {
+  const urls: string[] = []
+  for (let i = 0; i < params.images.length; i += 1) {
+    const img = params.images[i]
+    const path = `vision/tmp/${params.requestId}/${i + 1}.jpg`
+    const payload = Buffer.from(img.b64, 'base64')
+    const { error: upErr } = await params.sb.storage.from('uploads').upload(path, payload, {
+      upsert: true,
+      contentType: 'image/jpeg',
+      cacheControl: '600',
+    })
+    if (upErr) continue
+    const { data: signed, error: signErr } = await params.sb.storage.from('uploads').createSignedUrl(path, 600)
+    if (signErr || !signed?.signedUrl) continue
+    urls.push(String(signed.signedUrl))
+  }
+  return urls
+}
+
 type SavePlanRow = {
   id: string
   userId: string
@@ -694,6 +717,7 @@ export async function POST(req: Request) {
     }
     const imagesSelected = Math.min(MAX_PLAN_IMAGES, imagesReceivedCount)
 
+    const sb = createServerAdminClient()
     const rawImages = await collectRawImages({
       files,
       storagePaths,
@@ -702,7 +726,8 @@ export async function POST(req: Request) {
     })
     const imagesDownloaded = rawImages.length
     const optimizedImages = await optimizeVisionImages(rawImages)
-    const imagesSentToVision = optimizedImages.length
+    const signedVisionUrls = await uploadOptimizedAndSign({ sb, requestId, images: optimizedImages })
+    const imagesSentToVision = signedVisionUrls.length
 
     const prompt =
       promptRaw.trim() ||
@@ -721,7 +746,7 @@ export async function POST(req: Request) {
 
     if (imagesSelected > 0 && imagesSentToVision === 0) {
       return NextResponse.json(
-        { error: 'VISION_INPUT_EMPTY' },
+        { error: 'PLAN_VISION_INPUT_EMPTY' },
         { status: 400, headers: { 'cache-control': 'no-store' } }
       )
     }
@@ -804,13 +829,19 @@ export async function POST(req: Request) {
       client,
       model: VISION_MODEL,
       prompt,
-      images: optimizedImages,
+      images: signedVisionUrls.map((url) => ({ url })),
       requestId,
       retries: 2,
       timeoutMs: STEP1_TIMEOUT_MS,
     })
 
-    const extractLength = String(extracted.extracted || '').length
+    const extractLength = String(extracted.extracted_text || '').length
+    if (imagesSentToVision > 0 && extractLength < 50) {
+      return NextResponse.json(
+        { error: 'VISION_EXTRACTION_EMPTY' },
+        { status: 400, headers: { 'cache-control': 'no-store' } }
+      )
+    }
     console.log('plan.vision', {
       requestId,
       imagesSelected,
@@ -820,8 +851,8 @@ export async function POST(req: Request) {
     })
 
     const targetLang = resolveLanguage({
-      extracted: extracted.language,
-      prompt: [prompt, extracted.extracted, extracted.key_topics.join(' ')].join('\n'),
+      extracted: extracted.detected_language,
+      prompt: [prompt, extracted.extracted_text, extracted.key_points.join(' ')].join('\n'),
     })
 
     const systemText = [
@@ -833,6 +864,7 @@ export async function POST(req: Request) {
       'Read and incorporate ALL information from the images into the plan.',
       'Use the images as the primary source. Reference concrete facts from them explicitly.',
       'You MUST incorporate extracted facts from uploaded images. Do not output generic content.',
+      'Use ONLY the extracted text for factual content. Do NOT invent topics.',
       'If extracted material is empty, still generate a useful plan but explicitly mention this is a fallback context in notes summary.',
       'Notes inside plan must be compact, structured prose markdown with ## headings and short paragraphs.',
       `summary_notes_markdown must be ${PLAN_NOTES_MIN_CHARS}-${PLAN_NOTES_MAX_CHARS} characters.`,
@@ -848,12 +880,12 @@ export async function POST(req: Request) {
       'Return 5-10 quick practice questions with short answers and one-line explanation.',
     ].join('\n')
 
-    const extractedText = String(extracted.extracted || '').slice(0, MAX_EXTRACT_CHARS)
+    const extractedText = String(extracted.extracted_text || '').slice(0, MAX_EXTRACT_CHARS)
     const userText = [
       `Prompt:\n${prompt || '(empty)'}`,
+      `Detected topic title:\n${extracted.topic_title || '(none)'}`,
       `Extracted material from images:\n${extractedText || '(none)'}`,
-      `Key topics:\n${extracted.key_topics.join(', ') || '(none)'}`,
-      `Tasks found:\n${extracted.tasks_found.join(' | ') || '(none)'}`,
+      `Key points:\n${extracted.key_points.join(', ') || '(none)'}`,
     ].join('\n\n')
     let generatedPlanNotesMarkdown = ''
     let generatedQuickQuestions: string[] = []

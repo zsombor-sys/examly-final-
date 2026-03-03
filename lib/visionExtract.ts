@@ -3,18 +3,15 @@ import { z } from 'zod'
 import { buildVisionBlocks } from '@/lib/vision'
 
 export const VisionExtractSchema = z.object({
-  extracted: z.string(),
-  key_topics: z.array(z.string()),
-  tasks_found: z.array(z.string()),
-  language: z.enum(['hu', 'en']),
+  detected_language: z.enum(['hu', 'en']),
+  topic_title: z.string(),
+  extracted_text: z.string(),
+  key_points: z.array(z.string()),
 })
 
 export type VisionExtract = z.infer<typeof VisionExtractSchema>
 
-export type VisionInputImage = {
-  mime: string
-  b64: string
-}
+export type VisionInputImage = { url: string }
 
 function detectHungarian(text: string) {
   return /\bhu\b|magyar|szia|tetel|t[eé]tel|vizsga|erettsegi|[áéíóöőúüű]/i.test(text)
@@ -63,10 +60,10 @@ export async function extractFromImagesWithVision(params: {
 
   if (!images.length) {
     return {
-      extracted: prompt.trim(),
-      key_topics: [],
-      tasks_found: [],
-      language: defaultLanguage,
+      detected_language: defaultLanguage,
+      topic_title: prompt.trim() || (defaultLanguage === 'hu' ? 'Kinyert tananyag' : 'Extracted material'),
+      extracted_text: prompt.trim(),
+      key_points: [],
     }
   }
 
@@ -74,12 +71,12 @@ export async function extractFromImagesWithVision(params: {
     type: 'object',
     additionalProperties: false,
     properties: {
-      extracted: { type: 'string' },
-      key_topics: { type: 'array', items: { type: 'string' } },
-      tasks_found: { type: 'array', items: { type: 'string' } },
-      language: { type: 'string', enum: ['hu', 'en'] },
+      detected_language: { type: 'string', enum: ['hu', 'en'] },
+      topic_title: { type: 'string' },
+      extracted_text: { type: 'string' },
+      key_points: { type: 'array', items: { type: 'string' } },
     },
-    required: ['extracted', 'key_topics', 'tasks_found', 'language'],
+    required: ['detected_language', 'topic_title', 'extracted_text', 'key_points'],
   } as const
 
   async function runSingleBatch(batchImages: VisionInputImage[], batchIndex: number) {
@@ -98,12 +95,13 @@ export async function extractFromImagesWithVision(params: {
                 {
                   role: 'system',
                   content: [
-                    'You extract study material from uploaded images.',
-                    'Return only JSON with factual extracted content seen in the images.',
-                    'Focus on headings, exercises, formulas, questions, and task statements.',
-                    'Use Hungarian if the content appears Hungarian.',
-                    retryInstruction,
-                  ].filter(Boolean).join('\n'),
+                  'You extract study material from uploaded images.',
+                  'Return only JSON with factual extracted content seen in the images.',
+                  'Focus on headings, exercises, formulas, questions, and task statements.',
+                  'Return fields: detected_language, topic_title, extracted_text, key_points.',
+                  'Use Hungarian if the content appears Hungarian.',
+                  retryInstruction,
+                ].filter(Boolean).join('\n'),
                 },
                 {
                   role: 'user',
@@ -150,23 +148,23 @@ export async function extractFromImagesWithVision(params: {
     for (let i = 0; i < batches.length; i += 1) {
       const parsed = await runSingleBatch(batches[i], i)
       batchResults.push({
-        extracted: String(parsed.extracted || '').trim(),
-        key_topics: parsed.key_topics.map((x) => String(x || '').trim()).filter(Boolean).slice(0, 20),
-        tasks_found: parsed.tasks_found.map((x) => String(x || '').trim()).filter(Boolean).slice(0, 20),
-        language: parsed.language,
+        detected_language: parsed.detected_language,
+        topic_title: String(parsed.topic_title || '').trim(),
+        extracted_text: String(parsed.extracted_text || '').trim(),
+        key_points: parsed.key_points.map((x) => String(x || '').trim()).filter(Boolean).slice(0, 30),
       })
     }
 
-    const mergedExtract = batchResults.map((x) => x.extracted).filter(Boolean).join('\n\n')
-    const mergedTopics = Array.from(new Set(batchResults.flatMap((x) => x.key_topics))).slice(0, 20)
-    const mergedTasks = Array.from(new Set(batchResults.flatMap((x) => x.tasks_found))).slice(0, 20)
-    const mergedLanguage = batchResults.some((x) => x.language === 'hu') ? 'hu' : defaultLanguage
+    const mergedExtract = batchResults.map((x) => x.extracted_text).filter(Boolean).join('\n\n')
+    const mergedPoints = Array.from(new Set(batchResults.flatMap((x) => x.key_points))).slice(0, 30)
+    const mergedTopic = batchResults.map((x) => x.topic_title).find(Boolean) || (defaultLanguage === 'hu' ? 'Kinyert tananyag' : 'Extracted material')
+    const mergedLanguage = batchResults.some((x) => x.detected_language === 'hu') ? 'hu' : defaultLanguage
 
     return {
-      extracted: mergedExtract,
-      key_topics: mergedTopics,
-      tasks_found: mergedTasks,
-      language: mergedLanguage,
+      detected_language: mergedLanguage,
+      topic_title: mergedTopic,
+      extracted_text: mergedExtract,
+      key_points: mergedPoints,
     }
   } catch (err) {
     const lastErr = err
@@ -176,10 +174,10 @@ export async function extractFromImagesWithVision(params: {
     })
 
     return {
-      extracted: prompt.trim(),
-      key_topics: [],
-      tasks_found: [],
-      language: defaultLanguage,
+      detected_language: defaultLanguage,
+      topic_title: prompt.trim() || (defaultLanguage === 'hu' ? 'Kinyert tananyag' : 'Extracted material'),
+      extracted_text: prompt.trim(),
+      key_points: [],
     }
   }
 }

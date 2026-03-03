@@ -10,6 +10,7 @@ import { Button, Textarea } from '@/components/ui'
 import { authedFetch } from '@/lib/authClient'
 import { CREDITS_PER_GENERATION, MAX_IMAGES, MAX_PLAN_PROMPT_CHARS } from '@/lib/limits'
 import { looksHungarian } from '@/lib/language'
+import { uploadFilesToStorage } from '@/lib/uploadClient'
 
 export default function NotesPage() {
   return (
@@ -92,7 +93,7 @@ function Inner() {
     }
     ctx.drawImage(img, 0, 0, w, h)
     const blob: Blob = await new Promise((resolve) =>
-      canvas.toBlob((b) => resolve(b || file), 'image/jpeg', 0.75)
+      canvas.toBlob((b) => resolve(b || file), 'image/jpeg', 0.7)
     )
     URL.revokeObjectURL(url)
     return new File([blob], file.name.replace(/\.\w+$/, '.jpg'), { type: 'image/jpeg' })
@@ -112,9 +113,16 @@ function Inner() {
 
       const fd = new FormData()
       fd.append('prompt', trimmed)
+      const prepared: File[] = []
       for (const file of files.slice(0, MAX_IMAGES)) {
         const compressed = file.type.startsWith('image/') ? await compressImage(file) : file
-        fd.append('files', compressed)
+        prepared.push(compressed)
+      }
+      if (prepared.length > 0) {
+        const storagePaths = await uploadFilesToStorage({ files: prepared, folder: 'plan', maxFiles: MAX_IMAGES })
+        for (const path of storagePaths) {
+          fd.append('storage_paths', path)
+        }
       }
 
       const res = await authedFetch('/api/notes/generate', { method: 'POST', body: fd })
@@ -122,7 +130,8 @@ function Inner() {
       if (!res.ok) {
         const code = String(json?.error || '')
         if (code === 'INSUFFICIENT_CREDITS') throw new Error(ui.creditsError)
-        if (code === 'VISION_INPUT_EMPTY') throw new Error(ui.visionError)
+        if (code === 'VISION_INPUT_EMPTY' || code === 'NOTES_VISION_INPUT_EMPTY') throw new Error(ui.visionError)
+        if (code === 'VISION_EXTRACTION_EMPTY') throw new Error(language === 'hu' ? 'A képekből nem sikerült elegendő szöveget kinyerni.' : 'Could not extract enough text from the uploaded images.')
         if (code === 'MAX_IMAGES_EXCEEDED') throw new Error(language === 'hu' ? 'Legfeljebb 7 képet tölthetsz fel.' : 'You can upload at most 7 images.')
         if (code === 'NOTES_TIMEOUT') throw new Error(language === 'hu' ? 'A jegyzetgenerálás időtúllépés miatt megszakadt. Próbáld újra kevesebb képpel.' : 'Notes generation timed out. Try again with fewer images.')
         throw new Error(code || 'Failed to generate notes')

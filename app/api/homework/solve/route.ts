@@ -29,8 +29,8 @@ const solveOutputSchema = z.object({
     z.object({
       label: z.string(),
       explain: z.string(),
-      work_latex: z.string().nullable(),
-      result_latex: z.string().nullable(),
+      work_latex: z.string().nullable().optional(),
+      result_latex: z.string().nullable().optional(),
     })
   ),
   final_answer: z.string(),
@@ -52,7 +52,7 @@ const solveSchema = {
           work_latex: { type: ['string', 'null'] },
           result_latex: { type: ['string', 'null'] },
         },
-        required: ['label', 'explain', 'work_latex', 'result_latex'],
+        required: ['label', 'explain'],
       },
     },
     final_answer: { type: 'string' },

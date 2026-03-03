@@ -197,6 +197,30 @@ async function parseInput(req: Request): Promise<{
   }
 }
 
+async function uploadProcessedAndSign(images: VisionImage[], requestId: string) {
+  const sb = createServerAdminClient()
+  const urls: string[] = []
+  for (let i = 0; i < images.length; i += 1) {
+    const img = images[i]
+    try {
+      const path = `vision/tmp/${requestId}/notes-${i + 1}.jpg`
+      const payload = Buffer.from(img.b64, 'base64')
+      const { error: upErr } = await sb.storage.from('uploads').upload(path, payload, {
+        upsert: true,
+        contentType: 'image/jpeg',
+        cacheControl: '600',
+      })
+      if (upErr) continue
+      const { data, error: signErr } = await sb.storage.from('uploads').createSignedUrl(path, 600)
+      if (signErr || !data?.signedUrl) continue
+      urls.push(String(data.signedUrl))
+    } catch {
+      // ignore per-file failures
+    }
+  }
+  return urls
+}
+
 async function downloadStorageImages(storagePaths: string[]) {
   if (!storagePaths.length) return [] as VisionImage[]
   const sb = createServerAdminClient()
@@ -264,6 +288,7 @@ async function generateChunk(params: {
     hasImages
       ? 'Images were uploaded. Treat extracted image material as the primary source of truth for every section.'
       : 'No images were uploaded. Build complete notes from the topic prompt only.',
+    'Use ONLY the extracted text for factual content. Do NOT invent topics.',
     'Write as if this is the only material the student will use.',
     'Whenever you write mathematics, you MUST use LaTeX.',
     'Use ONLY \\( \\) for inline math and \\[ \\] for display math.',
@@ -342,9 +367,12 @@ export async function POST(req: Request) {
     const client = new OpenAI({ apiKey: key })
     const requestId = crypto.randomUUID()
 
+    const signedFromProcessed = await uploadProcessedAndSign(input.images, requestId)
+    const signedVisionUrls = signedFromProcessed.slice(0, MAX_IMAGES)
+
     const imagesRequestedCount = input.requestedImagesCount
     const imagesPreprocessedCount = input.images.length
-    const imagesAttachedToModelCount = input.images.filter((img) => Boolean(img?.b64)).length
+    const imagesAttachedToModelCount = signedVisionUrls.length
 
     console.log('notes.vision.counts', {
       requestId,
@@ -356,34 +384,34 @@ export async function POST(req: Request) {
     })
 
     if (imagesRequestedCount > 0 && imagesAttachedToModelCount === 0) {
-      return NextResponse.json({ error: 'VISION_INPUT_EMPTY' }, { status: 400 })
+      return NextResponse.json({ error: 'NOTES_VISION_INPUT_EMPTY' }, { status: 400 })
     }
 
-    const extracted = input.images.length
+    const extracted = signedVisionUrls.length
       ? await extractFromImagesWithVision({
           client,
           model: VISION_MODEL,
           prompt: input.prompt || 'Generate structured learning notes from these images.',
-          images: input.images,
+          images: signedVisionUrls.map((url) => ({ url })),
           requestId,
           retries: 2,
           timeoutMs: 12_000,
         })
       : {
-          extracted: '',
-          key_topics: [] as string[],
-          tasks_found: [] as string[],
-          language: null as SupportedLanguage | null,
+          detected_language: null as SupportedLanguage | null,
+          topic_title: '',
+          extracted_text: '',
+          key_points: [] as string[],
         }
 
-    if (input.images.length > 0 && !String(extracted.extracted || '').trim()) {
-      return NextResponse.json({ error: 'VISION_INPUT_EMPTY' }, { status: 400 })
+    if (signedVisionUrls.length > 0 && String(extracted.extracted_text || '').trim().length < 50) {
+      return NextResponse.json({ error: 'VISION_EXTRACTION_EMPTY' }, { status: 400 })
     }
 
     const language = resolveLanguage({
       explicit: input.language,
-      extracted: extracted.language,
-      prompt: [input.prompt, extracted.extracted, extracted.key_topics.join(' ')].join('\n'),
+      extracted: extracted.detected_language,
+      prompt: [input.prompt, extracted.extracted_text, extracted.key_points.join(' ')].join('\n'),
     })
 
     let markdown = ''
@@ -395,9 +423,9 @@ export async function POST(req: Request) {
         previous: markdown,
         language,
         continuation: markdown.length > 0,
-        hasImages: input.images.length > 0,
-        extractedText: String(extracted.extracted || '').trim(),
-        keyTerms: extracted.key_topics || [],
+        hasImages: signedVisionUrls.length > 0,
+        extractedText: String(extracted.extracted_text || '').trim(),
+        keyTerms: extracted.key_points || [],
       })
       calls += 1
       if (hasForbiddenTemplateText(chunk)) continue
@@ -422,7 +450,7 @@ export async function POST(req: Request) {
       word_count: wordCountFromVisible(finalMarkdown),
       reached_target: characterCount >= NOTES_MIN_CHARS,
       language,
-      vision_used: input.images.length > 0,
+      vision_used: signedVisionUrls.length > 0,
     })
   } catch (error: any) {
     const msg = String(error?.message || 'Failed to generate notes')

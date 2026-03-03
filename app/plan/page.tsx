@@ -10,6 +10,7 @@ import ClientAuthGuard from '@/components/ClientAuthGuard'
 import { authedFetch } from '@/lib/authClient'
 import { supabase } from '@/lib/supabaseClient'
 import { looksHungarian } from '@/lib/language'
+import { uploadFilesToStorage } from '@/lib/uploadClient'
 import HScroll from '@/components/HScroll'
 import Pomodoro from '@/components/Pomodoro'
 import { MAX_PLAN_IMAGES, MAX_PLAN_PROMPT_CHARS, CREDITS_PER_GENERATION } from '@/lib/limits'
@@ -550,7 +551,7 @@ function Inner({ entitlement }: { entitlement: { credits: number | null; entitle
       img.onerror = reject
       img.src = url
     })
-    const maxW = 1600
+    const maxW = 1280
     const scale = img.width > maxW ? maxW / img.width : 1
     const w = Math.round(img.width * scale)
     const h = Math.round(img.height * scale)
@@ -564,7 +565,7 @@ function Inner({ entitlement }: { entitlement: { credits: number | null; entitle
     }
     ctx.drawImage(img, 0, 0, w, h)
     const blob: Blob = await new Promise((resolve) =>
-      canvas.toBlob((b) => resolve(b || file), 'image/jpeg', 0.8)
+      canvas.toBlob((b) => resolve(b || file), 'image/jpeg', 0.7)
     )
     URL.revokeObjectURL(url)
     return new File([blob], file.name.replace(/\.\w+$/, '.jpg'), { type: 'image/jpeg' })
@@ -608,9 +609,16 @@ function Inner({ entitlement }: { entitlement: { credits: number | null; entitle
         (files.length > 0 ? 'Create structured study notes and a study plan based on the uploaded materials.' : '')
       form.append('prompt', promptToSend)
       form.append('required_credits', String(cost))
+      const prepared: File[] = []
       for (const f of files.slice(0, MAX_PLAN_IMAGES)) {
         const file = f.type.startsWith('image/') ? await compressImage(f) : f
-        form.append('files', file)
+        prepared.push(file)
+      }
+      if (prepared.length > 0) {
+        const storagePaths = await uploadFilesToStorage({ files: prepared, folder: 'plan', maxFiles: MAX_PLAN_IMAGES })
+        for (const path of storagePaths) {
+          form.append('storage_paths', path)
+        }
       }
 
       const res = await authedFetch('/api/plan', { method: 'POST', body: form })
@@ -625,8 +633,12 @@ function Inner({ entitlement }: { entitlement: { credits: number | null; entitle
           message = 'Server plans table schema mismatch. Run latest migrations.'
         } else if (code === 'INSUFFICIENT_CREDITS') {
           message = prefersHu ? 'Nincs elég kredited ehhez a generáláshoz.' : "You don't have enough credits to generate this."
-        } else if (code === 'VISION_INPUT_EMPTY') {
+        } else if (code === 'PLAN_VISION_INPUT_EMPTY' || code === 'VISION_INPUT_EMPTY') {
           message = prefersHu ? 'A feltöltött képek nem jutottak el a modellhez.' : 'Uploaded images were not attached to the model input.'
+        } else if (code === 'VISION_EXTRACTION_EMPTY') {
+          message = prefersHu ? 'A képekből nem sikerült elég szöveget kinyerni a generáláshoz.' : 'Could not extract enough text from the uploaded images for generation.'
+        } else if (code === 'MAX_IMAGES_EXCEEDED') {
+          message = prefersHu ? `Legfeljebb ${MAX_PLAN_IMAGES} képet tölthetsz fel.` : `You can upload up to ${MAX_PLAN_IMAGES} images.`
         } else if (code === 'UNAUTHENTICATED') {
           message = 'Please log in again.'
         }

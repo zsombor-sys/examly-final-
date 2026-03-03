@@ -165,14 +165,15 @@ function SignupInner() {
         return
       }
 
-      const { error: insertError } = await supabase.from('profiles').insert({
+      const { error: insertError } = await supabase.from('profiles').upsert({
         id: userId,
         full_name: full,
         phone: phoneRaw,
         phone_normalized: phoneNorm,
         email: emailNorm,
         credits: 5,
-      })
+        updated_at: new Date().toISOString(),
+      }, { onConflict: 'id' })
 
       if (insertError) {
         const msg = insertError.message || ''
@@ -184,8 +185,15 @@ function SignupInner() {
           setError('Phone already used.')
           return
         }
-        // If profile already exists for this id, continue gracefully.
-        if (!msg.toLowerCase().includes('duplicate key')) {
+        if (msg.toLowerCase().includes('duplicate key') || msg.toLowerCase().includes('conflict')) {
+          const { data: profileCheck } = await supabase.from('profiles').select('id').eq('id', userId).maybeSingle()
+          if (profileCheck?.id) {
+            // Treat conflict as success when row already exists.
+          } else {
+            setError(insertError.message || 'Failed to create profile.')
+            return
+          }
+        } else {
           setError(insertError.message || 'Failed to create profile.')
           return
         }

@@ -9,6 +9,7 @@ import { trimMarkdownToVisibleMax, visibleLength, wordCountFromVisible } from '@
 import { extractFromImagesWithVision } from '@/lib/visionExtract'
 import { normalizeBase64VisionImage, type VisionImage } from '@/lib/vision'
 import { optimizeImageForVision } from '@/lib/imageOptimize'
+import { createServerAdminClient } from '@/lib/supabase/server'
 
 export const runtime = 'nodejs'
 export const maxDuration = 60
@@ -34,6 +35,7 @@ const FORBIDDEN_TEMPLATE_PATTERNS: RegExp[] = [
 const reqSchema = z.object({
   prompt: z.string().max(MAX_PLAN_PROMPT_CHARS).optional().default(''),
   language: z.enum(['hu', 'en']).optional(),
+  storage_paths: z.array(z.string().min(1)).optional().default([]),
   images: z.array(z.string().min(1)).optional().default([]),
 })
 
@@ -54,16 +56,18 @@ async function parseInput(req: Request): Promise<{
     const body = await req.json().catch(() => null)
     const parsed = reqSchema.safeParse(body)
     if (!parsed.success) throw new Error('Invalid notes payload')
-    const baseImages = parsed.data.images
+    const baseImagesRaw = parsed.data.images
       .map((encoded) => normalizeBase64VisionImage(encoded))
       .filter((image): image is VisionImage => Boolean(image))
-      .slice(0, MAX_IMAGES)
-    const images = await preprocessVisionImages(baseImages)
+    const storageImages = await downloadStorageImages(parsed.data.storage_paths)
+    const requestedImagesCount = baseImagesRaw.length + storageImages.length
+    const combined = [...baseImagesRaw, ...storageImages].slice(0, MAX_IMAGES)
+    const images = await preprocessVisionImages(combined)
     return {
       prompt: String(parsed.data.prompt || '').trim(),
       language: parsed.data.language,
       images,
-      requestedImagesCount: baseImages.length,
+      requestedImagesCount,
     }
   }
 
@@ -78,6 +82,10 @@ async function parseInput(req: Request): Promise<{
     .filter(Boolean)
     .map((encoded) => normalizeBase64VisionImage(encoded))
     .filter((image): image is VisionImage => Boolean(image))
+  const storagePaths = form
+    .getAll('storage_paths')
+    .map((x) => String(x || '').trim())
+    .filter(Boolean)
 
   const files = form.getAll('files').filter((f): f is File => f instanceof File)
   const fileImagesRaw: VisionImage[] = []
@@ -86,13 +94,36 @@ async function parseInput(req: Request): Promise<{
     const b64 = Buffer.from(await file.arrayBuffer()).toString('base64')
     fileImagesRaw.push({ mime: String(file.type || 'image/png'), b64 })
   }
-  const images = await preprocessVisionImages([...inlineImages, ...fileImagesRaw].slice(0, MAX_IMAGES))
+  const storageImages = await downloadStorageImages(storagePaths)
+  const requestedImagesCount = inlineImages.length + fileImagesRaw.length + storageImages.length
+  const images = await preprocessVisionImages([...inlineImages, ...fileImagesRaw, ...storageImages].slice(0, MAX_IMAGES))
   return {
     prompt,
     language,
     images,
-    requestedImagesCount: Math.min(MAX_IMAGES, inlineImages.length + fileImagesRaw.length),
+    requestedImagesCount,
   }
+}
+
+async function downloadStorageImages(storagePaths: string[]) {
+  if (!storagePaths.length) return [] as VisionImage[]
+  const sb = createServerAdminClient()
+  const images: VisionImage[] = []
+  for (const rawPath of storagePaths) {
+    const path = String(rawPath || '').trim()
+    if (!path) continue
+    try {
+      const { data, error } = await sb.storage.from('uploads').download(path)
+      if (error || !data) continue
+      const mime = String((data as any).type || '')
+      if (!mime.startsWith('image/')) continue
+      const b64 = Buffer.from(await data.arrayBuffer()).toString('base64')
+      images.push({ mime: mime || 'image/jpeg', b64 })
+    } catch {
+      // ignore per-file download failures
+    }
+  }
+  return images
 }
 
 async function preprocessVisionImages(images: VisionImage[]) {
@@ -103,7 +134,7 @@ async function preprocessVisionImages(images: VisionImage[]) {
     try {
       const input = Buffer.from(image.b64, 'base64')
       if (!input.length) continue
-      const optimized = await optimizeImageForVision(input, image.mime, { longEdge: 1024, quality: 72 })
+      const optimized = await optimizeImageForVision(input, image.mime, { longEdge: 1280, quality: 80 })
       if (!optimized) continue
       if (totalBytes + optimized.bytes > MAX_VISION_BYTES) continue
       out.push({ mime: optimized.mime, b64: optimized.b64 })
@@ -130,6 +161,7 @@ async function generateChunk(params: {
 
   const system = [
     langInstruction,
+    'Respond in the same language as the input text or the detected language of the images.',
     'Write detailed study notes in Markdown as continuous, readable learning material.',
     'Use clear section headings in Markdown format (## Heading).',
     'Write coherent short paragraphs with logical flow.',
@@ -190,6 +222,9 @@ export async function POST(req: Request) {
     if (!key) return NextResponse.json({ error: 'Missing OPENAI_API_KEY' }, { status: 500 })
 
     const input = await parseInput(req)
+    if (input.requestedImagesCount > MAX_IMAGES) {
+      return NextResponse.json({ error: 'MAX_IMAGES_EXCEEDED' }, { status: 400 })
+    }
     if (input.prompt.length > MAX_PLAN_PROMPT_CHARS) {
       return NextResponse.json({ error: `Prompt max ${MAX_PLAN_PROMPT_CHARS} chars` }, { status: 400 })
     }
@@ -217,13 +252,15 @@ export async function POST(req: Request) {
 
     console.log('notes.vision.counts', {
       requestId,
+      number_of_images_received: imagesRequestedCount,
+      number_of_images_sent_to_model: imagesAttachedToModelCount,
       images_requested_count: imagesRequestedCount,
       images_preprocessed_count: imagesPreprocessedCount,
       images_attached_to_model_count: imagesAttachedToModelCount,
     })
 
     if (imagesRequestedCount > 0 && imagesAttachedToModelCount === 0) {
-      return NextResponse.json({ error: 'NOTES_VISION_INPUT_EMPTY' }, { status: 400 })
+      return NextResponse.json({ error: 'VISION_INPUT_EMPTY' }, { status: 400 })
     }
 
     const extracted = input.images.length
@@ -244,7 +281,7 @@ export async function POST(req: Request) {
         }
 
     if (input.images.length > 0 && !String(extracted.extracted || '').trim()) {
-      return NextResponse.json({ error: 'NOTES_VISION_INPUT_EMPTY' }, { status: 400 })
+      return NextResponse.json({ error: 'VISION_INPUT_EMPTY' }, { status: 400 })
     }
 
     const language = resolveLanguage({

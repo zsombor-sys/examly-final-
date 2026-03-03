@@ -122,7 +122,8 @@ function Inner() {
       if (!res.ok) {
         const code = String(json?.error || '')
         if (code === 'INSUFFICIENT_CREDITS') throw new Error(ui.creditsError)
-        if (code === 'NOTES_VISION_INPUT_EMPTY') throw new Error(ui.visionError)
+        if (code === 'VISION_INPUT_EMPTY') throw new Error(ui.visionError)
+        if (code === 'MAX_IMAGES_EXCEEDED') throw new Error(language === 'hu' ? 'Legfeljebb 7 képet tölthetsz fel.' : 'You can upload at most 7 images.')
         throw new Error(code || 'Failed to generate notes')
       }
 

@@ -150,7 +150,7 @@ async function parsePlanRequest(req: Request) {
     input.storage_paths.length +
     input.images.length
   if (totalSelected > MAX_PLAN_IMAGES) {
-    return { ok: false as const, error: 'TOO_MANY_FILES' as const }
+    return { ok: false as const, error: 'MAX_IMAGES_EXCEEDED' as const }
   }
 
   return {
@@ -299,7 +299,7 @@ async function optimizeVisionImages(rawImages: RawImageSource[]): Promise<Optimi
   let total = 0
 
   for (const img of rawImages) {
-    const o = await optimizeImageForVision(img.buffer, img.mime, { longEdge: 1024, quality: 70 })
+    const o = await optimizeImageForVision(img.buffer, img.mime, { longEdge: 1280, quality: 80 })
     if (!o) continue
     if (total + o.bytes > MAX_VISION_BYTES) continue
     optimized.push(o)
@@ -656,9 +656,9 @@ export async function POST(req: Request) {
 
     const parsedRequest = await parsePlanRequest(req)
     if (!parsedRequest.ok) {
-      if (parsedRequest.error === 'TOO_MANY_FILES') {
+      if (parsedRequest.error === 'MAX_IMAGES_EXCEEDED') {
         return NextResponse.json(
-          limitExceeded(`Max ${MAX_PLAN_IMAGES} images`),
+          { error: 'MAX_IMAGES_EXCEEDED' },
           { status: 400, headers: { 'cache-control': 'no-store' } }
         )
       }
@@ -688,7 +688,7 @@ export async function POST(req: Request) {
       inlineImages.length
     if (imagesReceivedCount > MAX_PLAN_IMAGES) {
       return NextResponse.json(
-        limitExceeded(`Max ${MAX_PLAN_IMAGES} images`),
+        { error: 'MAX_IMAGES_EXCEEDED' },
         { status: 400, headers: { 'cache-control': 'no-store' } }
       )
     }
@@ -712,6 +712,8 @@ export async function POST(req: Request) {
 
     console.log('plan.vision.counts', {
       requestId,
+      number_of_images_received: imagesSelected,
+      number_of_images_sent_to_model: imagesSentToVision,
       images_received_count: imagesSelected,
       images_decoded_count: imagesDownloaded,
       images_attached_to_model_count: imagesSentToVision,
@@ -719,7 +721,7 @@ export async function POST(req: Request) {
 
     if (imagesSelected > 0 && imagesSentToVision === 0) {
       return NextResponse.json(
-        { error: 'PLAN_VISION_INPUT_EMPTY' },
+        { error: 'VISION_INPUT_EMPTY' },
         { status: 400, headers: { 'cache-control': 'no-store' } }
       )
     }
@@ -825,6 +827,7 @@ export async function POST(req: Request) {
     const systemText = [
       'Return ONLY valid JSON. No markdown. No commentary.',
       targetLang === 'hu' ? 'Respond in Hungarian.' : 'Respond in English.',
+      'Respond in the same language as the input text or the detected language of the images.',
       'Plan summary must be concise: 2-4 lines maximum.',
       'Daily must always include Day 1 with 6-12 time blocks and pomodoro-friendly sequencing (25m study / 5m break pattern with one longer break).',
       'Read and incorporate ALL information from the images into the plan.',

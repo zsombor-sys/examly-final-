@@ -82,76 +82,104 @@ export async function extractFromImagesWithVision(params: {
     required: ['extracted', 'key_topics', 'tasks_found', 'language'],
   } as const
 
-  let lastErr: unknown = null
+  async function runSingleBatch(batchImages: VisionInputImage[], batchIndex: number) {
+    let lastErr: unknown = null
+    for (let attempt = 0; attempt <= retries; attempt += 1) {
+      const retryInstruction = attempt > 0 ? 'Return ONLY valid JSON matching the schema. No markdown.' : ''
+      try {
+        const userContent: any[] = [{ type: 'text', text: `User prompt:\n${prompt || '(empty)'}` }]
+        userContent.push(...buildVisionBlocks(batchImages))
 
-  for (let attempt = 0; attempt <= retries; attempt += 1) {
-    const retryInstruction = attempt > 0 ? 'Return ONLY valid JSON matching the schema. No markdown.' : ''
-    try {
-      const userContent: any[] = [{ type: 'text', text: `User prompt:\n${prompt || '(empty)'}` }]
-      userContent.push(...buildVisionBlocks(images))
-
-      const resp = await withTimeout(timeoutMs, (signal) =>
-        client.chat.completions.create(
-          {
-            model,
-            messages: [
-              {
-                role: 'system',
-                content: [
-                  'You extract study material from uploaded images.',
-                  'Return only JSON with factual extracted content seen in the images.',
-                  'Focus on headings, exercises, formulas, questions, and task statements.',
-                  'Use Hungarian if the content appears Hungarian.',
-                  retryInstruction,
-                ].filter(Boolean).join('\n'),
-              },
-              {
-                role: 'user',
-                content: userContent as any,
-              },
-            ],
-            max_tokens: 800,
-            temperature: 0,
-            response_format: {
-              type: 'json_schema',
-              json_schema: {
-                name: 'vision_extract',
-                strict: true,
-                schema,
-              },
-            } as any,
-          },
-          { signal }
+        const resp = await withTimeout(timeoutMs, (signal) =>
+          client.chat.completions.create(
+            {
+              model,
+              messages: [
+                {
+                  role: 'system',
+                  content: [
+                    'You extract study material from uploaded images.',
+                    'Return only JSON with factual extracted content seen in the images.',
+                    'Focus on headings, exercises, formulas, questions, and task statements.',
+                    'Use Hungarian if the content appears Hungarian.',
+                    retryInstruction,
+                  ].filter(Boolean).join('\n'),
+                },
+                {
+                  role: 'user',
+                  content: userContent as any,
+                },
+              ],
+              max_tokens: 800,
+              temperature: 0,
+              response_format: {
+                type: 'json_schema',
+                json_schema: {
+                  name: 'vision_extract',
+                  strict: true,
+                  schema,
+                },
+              } as any,
+            },
+            { signal }
+          )
         )
-      )
 
-      const parsed = parseVisionResponseJson(resp.choices?.[0]?.message?.content)
-      const validated = VisionExtractSchema.parse(parsed)
-      return {
-        extracted: String(validated.extracted || '').trim(),
-        key_topics: validated.key_topics.map((x) => String(x || '').trim()).filter(Boolean).slice(0, 20),
-        tasks_found: validated.tasks_found.map((x) => String(x || '').trim()).filter(Boolean).slice(0, 20),
-        language: validated.language,
+        const parsed = parseVisionResponseJson(resp.choices?.[0]?.message?.content)
+        return VisionExtractSchema.parse(parsed)
+      } catch (err) {
+        lastErr = err
+        console.warn('plan.vision.retry', {
+          requestId,
+          batch: batchIndex + 1,
+          attempt: attempt + 1,
+          message: (err as any)?.message ?? 'unknown',
+        })
       }
-    } catch (err) {
-      lastErr = err
-      console.warn('plan.vision.retry', {
-        requestId,
-        attempt: attempt + 1,
-        message: (err as any)?.message ?? 'unknown',
-      })
     }
+    throw lastErr instanceof Error ? lastErr : new Error('VISION_BATCH_FAILED')
   }
 
-  console.warn('plan.vision.fallback', {
-    requestId,
-    message: (lastErr as any)?.message ?? 'unknown',
-  })
+  try {
+    const batches: VisionInputImage[][] = []
+    for (let i = 0; i < images.length; i += 4) {
+      batches.push(images.slice(i, i + 4))
+    }
 
-  return {
-    extracted: prompt.trim(),
-    key_topics: [],
-    tasks_found: [],
-    language: defaultLanguage,
+    const batchResults: VisionExtract[] = []
+    for (let i = 0; i < batches.length; i += 1) {
+      const parsed = await runSingleBatch(batches[i], i)
+      batchResults.push({
+        extracted: String(parsed.extracted || '').trim(),
+        key_topics: parsed.key_topics.map((x) => String(x || '').trim()).filter(Boolean).slice(0, 20),
+        tasks_found: parsed.tasks_found.map((x) => String(x || '').trim()).filter(Boolean).slice(0, 20),
+        language: parsed.language,
+      })
+    }
+
+    const mergedExtract = batchResults.map((x) => x.extracted).filter(Boolean).join('\n\n')
+    const mergedTopics = Array.from(new Set(batchResults.flatMap((x) => x.key_topics))).slice(0, 20)
+    const mergedTasks = Array.from(new Set(batchResults.flatMap((x) => x.tasks_found))).slice(0, 20)
+    const mergedLanguage = batchResults.some((x) => x.language === 'hu') ? 'hu' : defaultLanguage
+
+    return {
+      extracted: mergedExtract,
+      key_topics: mergedTopics,
+      tasks_found: mergedTasks,
+      language: mergedLanguage,
+    }
+  } catch (err) {
+    const lastErr = err
+    console.warn('plan.vision.fallback', {
+      requestId,
+      message: (lastErr as any)?.message ?? 'unknown',
+    })
+
+    return {
+      extracted: prompt.trim(),
+      key_topics: [],
+      tasks_found: [],
+      language: defaultLanguage,
+    }
   }
 }

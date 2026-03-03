@@ -625,7 +625,7 @@ function Inner({ entitlement }: { entitlement: { credits: number | null; entitle
           message = 'Server plans table schema mismatch. Run latest migrations.'
         } else if (code === 'INSUFFICIENT_CREDITS') {
           message = prefersHu ? 'Nincs elég kredited ehhez a generáláshoz.' : "You don't have enough credits to generate this."
-        } else if (code === 'PLAN_VISION_INPUT_EMPTY') {
+        } else if (code === 'VISION_INPUT_EMPTY') {
           message = prefersHu ? 'A feltöltött képek nem jutottak el a modellhez.' : 'Uploaded images were not attached to the model input.'
         } else if (code === 'UNAUTHENTICATED') {
           message = 'Please log in again.'

@@ -117,7 +117,9 @@ function parseModelJson(text: string) {
   try {
     return JSON.parse(String(text || ''))
   } catch {
-    throw new Error('MODEL_JSON_INVALID')
+    const err: any = new Error('JSON_INVALID')
+    err.code = 'JSON_INVALID'
+    throw err
   }
 }
 
@@ -134,6 +136,7 @@ export async function callVisionStructured<T>(params: {
   maxOutputTokens?: number
   fallbackShortTokens?: number
   timeoutMs?: number
+  retries?: number
 }) {
   const {
     client,
@@ -148,6 +151,7 @@ export async function callVisionStructured<T>(params: {
     maxOutputTokens = 900,
     fallbackShortTokens = 650,
     timeoutMs = DEFAULT_TIMEOUT_MS,
+    retries = 2,
   } = params
 
   const run = async (tokens: number) => {
@@ -189,18 +193,37 @@ export async function callVisionStructured<T>(params: {
       )
 
       const parsed = parseModelJson(String(response.output_text || ''))
-      return schema.parse(parsed)
+      try {
+        return schema.parse(parsed)
+      } catch {
+        const err: any = new Error('JSON_INVALID')
+        err.code = 'JSON_INVALID'
+        throw err
+      }
     } finally {
       clearTimeout(timer)
     }
   }
 
-  try {
-    return await run(maxOutputTokens)
-  } catch (err: any) {
-    if (!shouldRetryShort(err)) throw err
-    return run(fallbackShortTokens)
+  let lastErr: any = null
+  const attempts = Math.max(1, retries + 1)
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    const tokens =
+      attempt === 0
+        ? maxOutputTokens
+        : attempt === 1
+          ? fallbackShortTokens
+          : Math.max(200, Math.floor(fallbackShortTokens * 0.75))
+    try {
+      return await run(tokens)
+    } catch (err: any) {
+      lastErr = err
+      const retryable = shouldRetryShort(err) || String(err?.code || err?.message || '').includes('JSON_INVALID')
+      if (!retryable || attempt === attempts - 1) throw err
+    }
   }
+
+  throw lastErr ?? new Error('JSON_INVALID')
 }
 
 export function mapOpenAiError(error: any) {

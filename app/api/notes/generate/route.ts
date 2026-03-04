@@ -1,16 +1,18 @@
 import { NextResponse } from 'next/server'
 import OpenAI from 'openai'
-import { z } from 'zod'
 import { requireUser } from '@/lib/authServer'
 import { chargeCredits, getCredits } from '@/lib/credits'
 import { CREDITS_PER_GENERATION, MAX_IMAGES, MAX_PLAN_PROMPT_CHARS } from '@/lib/limits'
 import {
+  callVisionStructured,
+  checkImageUrlsAccessible,
   mapOpenAiError,
   modelForNotes,
   normalizeNotesMarkdown,
+  notesOutputSchema,
   parseGenerateInput,
+  resolveRequestedLanguage,
 } from '@/lib/aiVisionGenerate'
-import { fetchImagesAsDataUrls } from '@/lib/aiImage'
 
 export const runtime = 'nodejs'
 export const maxDuration = 120
@@ -23,26 +25,6 @@ function getLocks(): LockMap {
   if (!g.__notesGenerateLocks) g.__notesGenerateLocks = new Map<string, string>()
   return g.__notesGenerateLocks as LockMap
 }
-
-function isHungarianText(input: string) {
-  const text = String(input || '').toLowerCase()
-  return /[áéíóöőúüű]/.test(text)
-}
-
-function resolveFinalLanguage(inputLanguage: 'auto' | 'hu' | 'en', topic: string): 'hu' | 'en' {
-  if (inputLanguage === 'hu' || inputLanguage === 'en') return inputLanguage
-  return isHungarianText(topic) ? 'hu' : 'hu'
-}
-
-function parseJsonOutput(raw: string) {
-  return JSON.parse(String(raw || '').trim())
-}
-
-const NotesOutputZod = z.object({
-  language: z.enum(['hu', 'en']),
-  detectedTopic: z.string().min(1).max(200),
-  notesBlocks: z.array(z.string().min(80).max(350)).min(4).max(12),
-})
 
 function buildNotesJsonSchema(finalLanguage: 'hu' | 'en') {
   return {
@@ -97,12 +79,8 @@ export async function POST(req: Request) {
     locks.set(user.id, requestId)
 
     try {
-      const dataImageUrls = await fetchImagesAsDataUrls(input.imageUrls.slice(0, MAX_IMAGES), {
-        timeoutMs: 10_000,
-        maxBytes: 5 * 1024 * 1024,
-      })
-
-      if (!dataImageUrls.length) {
+      const accessibleCount = await checkImageUrlsAccessible(input.imageUrls)
+      if (accessibleCount === 0) {
         return NextResponse.json({ error: { code: 'IMAGES_INACCESSIBLE', message: 'A képek nem hozzáférhetők' }, requestId }, { status: 400 })
       }
 
@@ -116,7 +94,10 @@ export async function POST(req: Request) {
 
       const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY })
       model = modelForNotes()
-      const finalLanguage = resolveFinalLanguage(input.language || 'auto', input.topic)
+      const finalLanguage =
+        input.language === 'hu' || input.language === 'en'
+          ? input.language
+          : resolveRequestedLanguage(input)
 
       const baseSystemText = [
         'You are generating study notes from uploaded images.',
@@ -130,61 +111,21 @@ export async function POST(req: Request) {
         `topic: ${input.topic || '(empty)'}`,
       ].join('\n')
 
-      const runStructured = async (attempt: number) => {
-        const retryText = attempt > 0 ? '\nReturn ONLY JSON. Do not include markdown fences. Escape quotes.' : ''
-        const maxTokens = attempt === 0 ? 1100 : attempt === 1 ? 800 : 650
-
-        return client.responses.create({
-          model,
-          temperature: 0,
-          max_output_tokens: maxTokens,
-          input: [
-            {
-              role: 'system',
-              content: [{ type: 'input_text', text: `${baseSystemText}${retryText}` }],
-            },
-            {
-              role: 'user',
-              content: [
-                { type: 'input_text', text: userText },
-                ...dataImageUrls.map((img) => ({ type: 'input_image' as const, image_url: img })),
-              ],
-            },
-          ],
-          response_format: {
-            type: 'json_schema',
-            json_schema: {
-              name: 'notes_generate',
-              schema: buildNotesJsonSchema(finalLanguage),
-              strict: true,
-            },
-          },
-        } as any)
-      }
-
-      let output: z.infer<typeof NotesOutputZod> | null = null
-      let lastErr: any = null
-      for (let attempt = 0; attempt < 3; attempt += 1) {
-        try {
-          const resp = await runStructured(attempt)
-          const parsed = parseJsonOutput(String(resp.output_text || ''))
-          output = NotesOutputZod.parse(parsed)
-          break
-        } catch (err: any) {
-          lastErr = err
-        }
-      }
-
-      if (!output) {
-        console.error('notes.generate.json_invalid', {
-          requestId,
-          imageCount,
-          topicLen,
-          openaiModel: model,
-          message: String(lastErr?.message || ''),
-        })
-        return NextResponse.json({ error: { code: 'VISION_JSON_INVALID', message: 'Invalid structured JSON from vision model' }, requestId }, { status: 500 })
-      }
+      const output = await callVisionStructured({
+        client,
+        model,
+        requestId,
+        systemText: baseSystemText,
+        userText,
+        imageUrls: input.imageUrls,
+        schemaName: 'notes_generate',
+        schemaObject: buildNotesJsonSchema(finalLanguage),
+        schema: notesOutputSchema,
+        maxOutputTokens: 1100,
+        fallbackShortTokens: 750,
+        timeoutMs: 45_000,
+        retries: 2,
+      })
 
       const notesMarkdown = normalizeNotesMarkdown(output.notesBlocks.join('\n\n'))
 
@@ -232,6 +173,12 @@ export async function POST(req: Request) {
     }
     if (String(error?.message || '').includes('INSUFFICIENT_CREDITS')) {
       return NextResponse.json({ error: { code: 'INSUFFICIENT_CREDITS', message: 'Not enough credits' }, requestId }, { status: 402 })
+    }
+    if (String(error?.code || error?.message || '').includes('JSON_INVALID')) {
+      return NextResponse.json(
+        { error: { code: 'JSON_INVALID', message: 'Vision structured JSON parsing failed' }, requestId },
+        { status: 500 }
+      )
     }
     if (mapped.status === 429) {
       return NextResponse.json(

@@ -10,7 +10,6 @@ import { Button, Textarea } from '@/components/ui'
 import { authedFetch } from '@/lib/authClient'
 import { CREDITS_PER_GENERATION, MAX_IMAGES, MAX_PLAN_PROMPT_CHARS } from '@/lib/limits'
 import { looksHungarian } from '@/lib/language'
-import { uploadFilesToStorage } from '@/lib/uploadClient'
 
 export default function NotesPage() {
   return (
@@ -113,16 +112,9 @@ function Inner() {
 
       const fd = new FormData()
       fd.append('prompt', trimmed)
-      const prepared: File[] = []
       for (const file of files.slice(0, MAX_IMAGES)) {
         const compressed = file.type.startsWith('image/') ? await compressImage(file) : file
-        prepared.push(compressed)
-      }
-      if (prepared.length > 0) {
-        const storagePaths = await uploadFilesToStorage({ files: prepared, folder: 'plan', maxFiles: MAX_IMAGES })
-        for (const path of storagePaths) {
-          fd.append('storage_paths', path)
-        }
+        fd.append('files', compressed)
       }
 
       const res = await authedFetch('/api/notes/generate', { method: 'POST', body: fd })

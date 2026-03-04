@@ -299,7 +299,7 @@ async function optimizeVisionImages(rawImages: RawImageSource[]): Promise<Optimi
   let total = 0
 
   for (const img of rawImages) {
-    const o = await optimizeImageForVision(img.buffer, img.mime, { longEdge: 1280, quality: 80 })
+    const o = await optimizeImageForVision(img.buffer, img.mime, { longEdge: 1024, quality: 75 })
     if (!o) continue
     if (total + o.bytes > MAX_VISION_BYTES) continue
     optimized.push(o)
@@ -307,29 +307,6 @@ async function optimizeVisionImages(rawImages: RawImageSource[]): Promise<Optimi
   }
 
   return optimized
-}
-
-async function uploadOptimizedAndSign(params: {
-  sb: ReturnType<typeof createServerAdminClient>
-  requestId: string
-  images: OptimizedVisionImage[]
-}) {
-  const urls: string[] = []
-  for (let i = 0; i < params.images.length; i += 1) {
-    const img = params.images[i]
-    const path = `vision/tmp/${params.requestId}/${i + 1}.jpg`
-    const payload = Buffer.from(img.b64, 'base64')
-    const { error: upErr } = await params.sb.storage.from('uploads').upload(path, payload, {
-      upsert: true,
-      contentType: 'image/jpeg',
-      cacheControl: '600',
-    })
-    if (upErr) continue
-    const { data: signed, error: signErr } = await params.sb.storage.from('uploads').createSignedUrl(path, 600)
-    if (signErr || !signed?.signedUrl) continue
-    urls.push(String(signed.signedUrl))
-  }
-  return urls
 }
 
 type SavePlanRow = {
@@ -717,7 +694,6 @@ export async function POST(req: Request) {
     }
     const imagesSelected = Math.min(MAX_PLAN_IMAGES, imagesReceivedCount)
 
-    const sb = createServerAdminClient()
     const rawImages = await collectRawImages({
       files,
       storagePaths,
@@ -726,8 +702,7 @@ export async function POST(req: Request) {
     })
     const imagesDownloaded = rawImages.length
     const optimizedImages = await optimizeVisionImages(rawImages)
-    const signedVisionUrls = await uploadOptimizedAndSign({ sb, requestId, images: optimizedImages })
-    const imagesSentToVision = signedVisionUrls.length
+    const imagesSentToVision = optimizedImages.length
 
     const prompt =
       promptRaw.trim() ||
@@ -829,7 +804,7 @@ export async function POST(req: Request) {
       client,
       model: VISION_MODEL,
       prompt,
-      images: signedVisionUrls.map((url) => ({ url })),
+      images: optimizedImages.map((img) => ({ mime: img.mime, b64: img.b64 })),
       requestId,
       retries: 2,
       timeoutMs: STEP1_TIMEOUT_MS,
@@ -852,7 +827,7 @@ export async function POST(req: Request) {
 
     const targetLang = resolveLanguage({
       extracted: extracted.detected_language,
-      prompt: [prompt, extracted.extracted_text, extracted.key_points.join(' ')].join('\n'),
+      prompt: [prompt, extracted.extracted_text, extracted.key_points.join(' '), extracted.entities.join(' ')].join('\n'),
     })
 
     const systemText = [
@@ -883,9 +858,11 @@ export async function POST(req: Request) {
     const extractedText = String(extracted.extracted_text || '').slice(0, MAX_EXTRACT_CHARS)
     const userText = [
       `Prompt:\n${prompt || '(empty)'}`,
-      `Detected topic title:\n${extracted.topic_title || '(none)'}`,
+      `Detected topic title:\n${extracted.topic_guess || '(none)'}`,
       `Extracted material from images:\n${extractedText || '(none)'}`,
       `Key points:\n${extracted.key_points.join(', ') || '(none)'}`,
+      `Entities:\n${extracted.entities.join(', ') || '(none)'}`,
+      `Extraction confidence:\n${String(extracted.confidence ?? 0)}`,
     ].join('\n\n')
     let generatedPlanNotesMarkdown = ''
     let generatedQuickQuestions: string[] = []

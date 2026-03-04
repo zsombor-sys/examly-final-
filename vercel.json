@@ -2,6 +2,9 @@
   "functions": {
     "app/api/plan/route.ts": {
       "maxDuration": 60
+    },
+    "app/api/notes/generate/route.ts": {
+      "maxDuration": 60
     }
   }
 }

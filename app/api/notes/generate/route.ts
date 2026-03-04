@@ -17,7 +17,7 @@ export const dynamic = 'force-dynamic'
 
 const NOTES_MIN_CHARS = 2000
 const NOTES_MAX_CHARS = 3000
-const NOTES_MAX_CALLS = 3
+const NOTES_MAX_CALLS = 2
 const NOTES_MAX_TOKENS = 2200
 const VISION_MODEL = process.env.OPENAI_VISION_MODEL || OPENAI_MODEL
 const MAX_VISION_BYTES = 8 * 1024 * 1024
@@ -197,30 +197,6 @@ async function parseInput(req: Request): Promise<{
   }
 }
 
-async function uploadProcessedAndSign(images: VisionImage[], requestId: string) {
-  const sb = createServerAdminClient()
-  const urls: string[] = []
-  for (let i = 0; i < images.length; i += 1) {
-    const img = images[i]
-    try {
-      const path = `vision/tmp/${requestId}/notes-${i + 1}.jpg`
-      const payload = Buffer.from(img.b64, 'base64')
-      const { error: upErr } = await sb.storage.from('uploads').upload(path, payload, {
-        upsert: true,
-        contentType: 'image/jpeg',
-        cacheControl: '600',
-      })
-      if (upErr) continue
-      const { data, error: signErr } = await sb.storage.from('uploads').createSignedUrl(path, 600)
-      if (signErr || !data?.signedUrl) continue
-      urls.push(String(data.signedUrl))
-    } catch {
-      // ignore per-file failures
-    }
-  }
-  return urls
-}
-
 async function downloadStorageImages(storagePaths: string[]) {
   if (!storagePaths.length) return [] as VisionImage[]
   const sb = createServerAdminClient()
@@ -250,7 +226,7 @@ async function preprocessVisionImages(images: VisionImage[]) {
     try {
       const input = Buffer.from(image.b64, 'base64')
       if (!input.length) continue
-      const optimized = await optimizeImageForVision(input, image.mime, { longEdge: 1280, quality: 80 })
+      const optimized = await optimizeImageForVision(input, image.mime, { longEdge: 1024, quality: 75 })
       if (!optimized) continue
       if (totalBytes + optimized.bytes > MAX_VISION_BYTES) continue
       out.push({ mime: optimized.mime, b64: optimized.b64 })
@@ -367,12 +343,11 @@ export async function POST(req: Request) {
     const client = new OpenAI({ apiKey: key })
     const requestId = crypto.randomUUID()
 
-    const signedFromProcessed = await uploadProcessedAndSign(input.images, requestId)
-    const signedVisionUrls = signedFromProcessed.slice(0, MAX_IMAGES)
+    const visionImages = input.images.slice(0, MAX_IMAGES)
 
     const imagesRequestedCount = input.requestedImagesCount
     const imagesPreprocessedCount = input.images.length
-    const imagesAttachedToModelCount = signedVisionUrls.length
+    const imagesAttachedToModelCount = visionImages.length
 
     console.log('notes.vision.counts', {
       requestId,
@@ -384,34 +359,36 @@ export async function POST(req: Request) {
     })
 
     if (imagesRequestedCount > 0 && imagesAttachedToModelCount === 0) {
-      return NextResponse.json({ error: 'NOTES_VISION_INPUT_EMPTY' }, { status: 400 })
+      return NextResponse.json({ error: 'VISION_INPUT_EMPTY' }, { status: 400 })
     }
 
-    const extracted = signedVisionUrls.length
+    const extracted = visionImages.length
       ? await extractFromImagesWithVision({
           client,
           model: VISION_MODEL,
           prompt: input.prompt || 'Generate structured learning notes from these images.',
-          images: signedVisionUrls.map((url) => ({ url })),
+          images: visionImages.map((img) => ({ mime: img.mime, b64: img.b64 })),
           requestId,
           retries: 2,
           timeoutMs: 12_000,
         })
       : {
           detected_language: null as SupportedLanguage | null,
-          topic_title: '',
+          topic_guess: '',
           extracted_text: '',
           key_points: [] as string[],
+          entities: [] as string[],
+          confidence: 0,
         }
 
-    if (signedVisionUrls.length > 0 && String(extracted.extracted_text || '').trim().length < 50) {
+    if (visionImages.length > 0 && String(extracted.extracted_text || '').trim().length < 50) {
       return NextResponse.json({ error: 'VISION_EXTRACTION_EMPTY' }, { status: 400 })
     }
 
     const language = resolveLanguage({
       explicit: input.language,
       extracted: extracted.detected_language,
-      prompt: [input.prompt, extracted.extracted_text, extracted.key_points.join(' ')].join('\n'),
+      prompt: [input.prompt, extracted.extracted_text, extracted.key_points.join(' '), extracted.entities.join(' ')].join('\n'),
     })
 
     let markdown = ''
@@ -423,7 +400,7 @@ export async function POST(req: Request) {
         previous: markdown,
         language,
         continuation: markdown.length > 0,
-        hasImages: signedVisionUrls.length > 0,
+        hasImages: visionImages.length > 0,
         extractedText: String(extracted.extracted_text || '').trim(),
         keyTerms: extracted.key_points || [],
       })
@@ -450,7 +427,9 @@ export async function POST(req: Request) {
       word_count: wordCountFromVisible(finalMarkdown),
       reached_target: characterCount >= NOTES_MIN_CHARS,
       language,
-      vision_used: signedVisionUrls.length > 0,
+      vision_used: visionImages.length > 0,
+      extraction_confidence: extracted.confidence,
+      extraction_topic: extracted.topic_guess,
     })
   } catch (error: any) {
     const msg = String(error?.message || 'Failed to generate notes')

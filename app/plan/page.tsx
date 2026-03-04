@@ -10,7 +10,6 @@ import ClientAuthGuard from '@/components/ClientAuthGuard'
 import { authedFetch } from '@/lib/authClient'
 import { supabase } from '@/lib/supabaseClient'
 import { looksHungarian } from '@/lib/language'
-import { uploadFilesToStorage } from '@/lib/uploadClient'
 import HScroll from '@/components/HScroll'
 import Pomodoro from '@/components/Pomodoro'
 import { MAX_PLAN_IMAGES, MAX_PLAN_PROMPT_CHARS, CREDITS_PER_GENERATION } from '@/lib/limits'
@@ -609,16 +608,9 @@ function Inner({ entitlement }: { entitlement: { credits: number | null; entitle
         (files.length > 0 ? 'Create structured study notes and a study plan based on the uploaded materials.' : '')
       form.append('prompt', promptToSend)
       form.append('required_credits', String(cost))
-      const prepared: File[] = []
       for (const f of files.slice(0, MAX_PLAN_IMAGES)) {
         const file = f.type.startsWith('image/') ? await compressImage(f) : f
-        prepared.push(file)
-      }
-      if (prepared.length > 0) {
-        const storagePaths = await uploadFilesToStorage({ files: prepared, folder: 'plan', maxFiles: MAX_PLAN_IMAGES })
-        for (const path of storagePaths) {
-          form.append('storage_paths', path)
-        }
+        form.append('files', file)
       }
 
       const res = await authedFetch('/api/plan', { method: 'POST', body: form })

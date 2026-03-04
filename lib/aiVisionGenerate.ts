@@ -1,7 +1,7 @@
 import OpenAI from 'openai'
 import { z } from 'zod'
 import { MAX_IMAGES, MAX_PLAN_PROMPT_CHARS, OPENAI_MODEL } from '@/lib/limits'
-import { looksHungarian, type SupportedLanguage } from '@/lib/language'
+import { detectLanguage, type SupportedLanguage } from '@/lib/language'
 
 const MAX_NOTES_CHARS = 3000
 const DEFAULT_TIMEOUT_MS = 45_000
@@ -76,7 +76,7 @@ export function resolveRequestedLanguage(input: GenerateInput): SupportedLanguag
   if (input.language === 'hu' || input.language === 'en') return input.language
   const topic = String(input.topic || '').trim()
   if (!topic) return 'hu'
-  return looksHungarian(topic) ? 'hu' : 'en'
+  return detectLanguage(topic)
 }
 
 export function normalizeNotesMarkdown(markdown: string) {
@@ -116,9 +116,20 @@ function shouldRetryShort(error: any) {
 }
 
 function parseModelJson(text: string) {
+  const raw = String(text || '')
   try {
-    return JSON.parse(String(text || ''))
+    return JSON.parse(raw)
   } catch {
+    const first = raw.indexOf('{')
+    const last = raw.lastIndexOf('}')
+    if (first >= 0 && last > first) {
+      const maybeJson = raw.slice(first, last + 1)
+      try {
+        return JSON.parse(maybeJson)
+      } catch {
+        // fall through
+      }
+    }
     const err: any = new Error('JSON_INVALID')
     err.code = 'JSON_INVALID'
     throw err
@@ -476,7 +487,7 @@ export function mapOpenAiError(error: any) {
 }
 
 export function autoLanguageHint(topic: string) {
-  return looksHungarian(topic) ? 'hu' : 'en'
+  return detectLanguage(topic)
 }
 
 export function modelForNotes() {

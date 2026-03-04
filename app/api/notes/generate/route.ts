@@ -106,25 +106,39 @@ export async function POST(req: Request) {
           ? input.language
           : resolveRequestedLanguage(input)
       selectedLanguage = finalLanguage
+      const hasImages = input.imageUrls.length > 0
 
-      const languageDirective = finalLanguage === 'hu' ? 'Answer in Hungarian.' : 'Answer in English.'
-      const baseSystemText = [
-        'You are generating study notes from uploaded images.',
-        languageDirective,
-        'Use the images if provided. If no images are provided, use the topic only.',
-        'Do not output generic templates. Be specific and topic-focused.',
-        'Return only valid JSON.',
-        'notesMarkdown target length: 2500-3000 characters, concise headings + bullets, no fluff.',
-        `ALL strings MUST be in language: ${finalLanguage}.`,
-        'If images are provided but unreadable, set detectedTopic="NO_READABLE_CONTENT" and explain briefly in notesBlocks.',
-      ].join('\n')
+      const languageDirective = finalLanguage === 'hu' ? 'Respond ONLY in Hungarian.' : 'Respond ONLY in English.'
+      const baseSystemText = hasImages
+        ? [
+            'You are generating study notes from uploaded images.',
+            languageDirective,
+            'You MUST analyze the uploaded images and generate notes from the visible content.',
+            'Do not output generic templates. Be specific and topic-focused.',
+            'Return only valid JSON.',
+            'Notes target length: 2500-3000 characters, concise headings + bullets, no fluff.',
+            `ALL strings MUST be in language: ${finalLanguage}.`,
+            'If images are unreadable, set detectedTopic="NO_READABLE_CONTENT" and explain briefly in notesBlocks.',
+          ].join('\n')
+        : [
+            'You are a study assistant. Generate structured study notes and a study plan based only on the provided topic.',
+            languageDirective,
+            'Do not output generic templates. Be specific and topic-focused.',
+            'Return only valid JSON.',
+            'Notes target length: 2500-3000 characters, concise headings + bullets, no fluff.',
+            `ALL strings MUST be in language: ${finalLanguage}.`,
+          ].join('\n')
 
-      const userText = [
-        'Generate structured study notes.',
-        `topic: ${input.topic || '(empty)'}`,
-        'If images exist: prioritize them over general knowledge.',
-        'If images do not exist: rely on topic text only.',
-      ].join('\n')
+      const userText = hasImages
+        ? [
+            'Generate structured study notes from the uploaded images.',
+            `topic_context: ${input.topic || '(empty)'}`,
+            'Prioritize image content over general knowledge.',
+          ].join('\n')
+        : [
+            'Generate structured study notes from the topic only.',
+            `topic: ${input.topic || '(empty)'}`,
+          ].join('\n')
 
       const output = await callVisionStructured({
         client,

@@ -144,25 +144,40 @@ export async function POST(req: Request) {
           ? input.language
           : resolveRequestedLanguage(input)
       selectedLanguage = finalLanguage
+      const hasImages = input.imageUrls.length > 0
 
-      const languageDirective = finalLanguage === 'hu' ? 'Answer in Hungarian.' : 'Answer in English.'
-      const baseSystemText = [
-        'You are a study assistant.',
-        languageDirective,
-        'Use the images if provided. If no images are provided, use the topic only.',
-        'Do not output generic templates. Be specific and topic-focused.',
-        'Return only valid JSON.',
-        'notesMarkdown target length: 2500-3000 characters, concise headings + bullets, no fluff.',
-        `ALL strings MUST be in language: ${finalLanguage}.`,
-        'If images are provided but unreadable, set detectedTopic="NO_READABLE_CONTENT" and explain briefly in notesBlocks.',
-      ].join('\n')
+      const languageDirective = finalLanguage === 'hu' ? 'Respond ONLY in Hungarian.' : 'Respond ONLY in English.'
+      const baseSystemText = hasImages
+        ? [
+            'You are a study assistant.',
+            languageDirective,
+            'You MUST analyze the uploaded images and generate notes from the visible content.',
+            'Images are primary. If topic text conflicts, trust the images.',
+            'Do not output generic templates. Be specific and topic-focused.',
+            'Return only valid JSON.',
+            'Plan notesMarkdown target length: 2200-3000 characters, concise headings + bullets, no fluff.',
+            `ALL strings MUST be in language: ${finalLanguage}.`,
+            'If images are unreadable, set detectedTopic="NO_READABLE_CONTENT" and explain briefly in notesBlocks.',
+          ].join('\n')
+        : [
+            'You are a study assistant. Generate structured study notes and a study plan based only on the provided topic.',
+            languageDirective,
+            'Do not output generic templates. Be specific and topic-focused.',
+            'Return only valid JSON.',
+            'Plan notesMarkdown target length: 2200-3000 characters, concise headings + bullets, no fluff.',
+            `ALL strings MUST be in language: ${finalLanguage}.`,
+          ].join('\n')
 
-      const userText = [
-        'Analyze the uploaded images (if provided) and generate a study plan + notes + practice based on visible content.',
-        `prompt: ${input.topic || '(empty)'}`,
-        'If images exist: prioritize them over general knowledge.',
-        'If images do not exist: rely on topic text only.',
-      ].join('\n')
+      const userText = hasImages
+        ? [
+            'Analyze the uploaded images and generate a study plan + notes + practice based on visible content.',
+            `topic_context: ${input.topic || '(empty)'}`,
+            'Prioritize image content over general knowledge.',
+          ].join('\n')
+        : [
+            'Generate a study plan + notes + practice from the topic only.',
+            `topic: ${input.topic || '(empty)'}`,
+          ].join('\n')
 
       const output = await callVisionStructured({
         client,

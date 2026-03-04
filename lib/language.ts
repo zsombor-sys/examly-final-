@@ -31,6 +31,10 @@ export function looksHungarian(input: string) {
   return score >= 1
 }
 
+export function detectLanguage(topic: string): SupportedLanguage {
+  return looksHungarian(topic) ? 'hu' : 'en'
+}
+
 export function resolveLanguage(params: {
   explicit?: SupportedLanguage | null
   extracted?: SupportedLanguage | null

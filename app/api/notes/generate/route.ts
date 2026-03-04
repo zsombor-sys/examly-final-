@@ -1,18 +1,16 @@
 import { NextResponse } from 'next/server'
 import OpenAI from 'openai'
+import { z } from 'zod'
 import { requireUser } from '@/lib/authServer'
 import { chargeCredits, getCredits } from '@/lib/credits'
 import { CREDITS_PER_GENERATION, MAX_IMAGES, MAX_PLAN_PROMPT_CHARS } from '@/lib/limits'
 import {
-  callVisionStructured,
-  checkImageUrlsAccessible,
   mapOpenAiError,
   modelForNotes,
   normalizeNotesMarkdown,
-  notesOutputSchema,
   parseGenerateInput,
-  resolveRequestedLanguage,
 } from '@/lib/aiVisionGenerate'
+import { fetchImagesAsDataUrls } from '@/lib/aiImage'
 
 export const runtime = 'nodejs'
 export const maxDuration = 120
@@ -26,15 +24,42 @@ function getLocks(): LockMap {
   return g.__notesGenerateLocks as LockMap
 }
 
-const notesSchemaJson = {
-  type: 'object',
-  additionalProperties: false,
-  properties: {
-    language: { type: 'string', enum: ['hu', 'en'] },
-    detectedTopic: { type: 'string' },
-    notesMarkdown: { type: 'string' },
-  },
-  required: ['language', 'detectedTopic', 'notesMarkdown'],
+function isHungarianText(input: string) {
+  const text = String(input || '').toLowerCase()
+  return /[áéíóöőúüű]/.test(text)
+}
+
+function resolveFinalLanguage(inputLanguage: 'auto' | 'hu' | 'en', topic: string): 'hu' | 'en' {
+  if (inputLanguage === 'hu' || inputLanguage === 'en') return inputLanguage
+  return isHungarianText(topic) ? 'hu' : 'hu'
+}
+
+function parseJsonOutput(raw: string) {
+  return JSON.parse(String(raw || '').trim())
+}
+
+const NotesOutputZod = z.object({
+  language: z.enum(['hu', 'en']),
+  detectedTopic: z.string().min(1).max(200),
+  notesBlocks: z.array(z.string().min(80).max(350)).min(4).max(12),
+})
+
+function buildNotesJsonSchema(finalLanguage: 'hu' | 'en') {
+  return {
+    type: 'object',
+    additionalProperties: false,
+    properties: {
+      language: { type: 'string', enum: [finalLanguage] },
+      detectedTopic: { type: 'string' },
+      notesBlocks: {
+        type: 'array',
+        minItems: 4,
+        maxItems: 12,
+        items: { type: 'string', minLength: 80, maxLength: 350 },
+      },
+    },
+    required: ['language', 'detectedTopic', 'notesBlocks'],
+  }
 }
 
 export async function POST(req: Request) {
@@ -72,8 +97,12 @@ export async function POST(req: Request) {
     locks.set(user.id, requestId)
 
     try {
-      const accessibleCount = await checkImageUrlsAccessible(input.imageUrls)
-      if (accessibleCount === 0) {
+      const dataImageUrls = await fetchImagesAsDataUrls(input.imageUrls.slice(0, MAX_IMAGES), {
+        timeoutMs: 10_000,
+        maxBytes: 5 * 1024 * 1024,
+      })
+
+      if (!dataImageUrls.length) {
         return NextResponse.json({ error: { code: 'IMAGES_INACCESSIBLE', message: 'A képek nem hozzáférhetők' }, requestId }, { status: 400 })
       }
 
@@ -87,51 +116,77 @@ export async function POST(req: Request) {
 
       const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY })
       model = modelForNotes()
-      const languageHint = resolveRequestedLanguage(input)
+      const finalLanguage = resolveFinalLanguage(input.language || 'auto', input.topic)
 
-      console.log('notes.generate.start', {
-        requestId,
-        imageCount,
-        topicLen,
-        openaiModel: model,
-      })
-
-      const systemText = [
-        'You are generating study notes from the uploaded images.',
-        'Carefully read the images and extract the key concepts.',
-        'Produce structured bullet-point notes based on the content in the images.',
-        'You MUST use the images. If images are missing, say so and stop.',
-        'Return only valid JSON matching schema.',
-        'detectedTopic must be one short line inferred from the images, not from user topic.',
-        'If there are no usable images, set detectedTopic to NO_IMAGES and notesMarkdown to "Nem tudtam értelmezhető szöveget kiolvasni a képekről." and stop.',
-        'notesMarkdown must be well-structured markdown with headings and bullet points.',
-        'Keep notesMarkdown around 2000-3000 characters.',
-        'Language rule: if topic is non-empty, language should match topic language; if topic is empty, use dominant language of image content (HU/EN).',
+      const baseSystemText = [
+        'You are generating study notes from uploaded images.',
+        'Use the images as the primary source.',
+        `ALL strings MUST be in language: ${finalLanguage}.`,
+        'If you cannot see images, return detectedTopic="NO_IMAGES" and minimal notesBlocks explaining you could not read them.',
       ].join('\n')
 
       const userText = [
-        'Analyze the uploaded images and generate study notes and a study plan based on the visible content.',
-        `prompt: ${input.topic || '(empty)'}`,
-        `languagePreference: ${input.language || 'auto'}`,
-        `fallbackLanguageHint: ${languageHint}`,
+        'Images first. Topic text is optional context only.',
+        `topic: ${input.topic || '(empty)'}`,
       ].join('\n')
 
-      const output = await callVisionStructured({
-        client,
-        model,
-        requestId,
-        systemText,
-        userText,
-        imageUrls: input.imageUrls,
-        schemaName: 'notes_generate',
-        schemaObject: notesSchemaJson,
-        schema: notesOutputSchema,
-        maxOutputTokens: 950,
-        fallbackShortTokens: 700,
-        timeoutMs: 45_000,
-      })
+      const runStructured = async (attempt: number) => {
+        const retryText = attempt > 0 ? '\nReturn ONLY JSON. Do not include markdown fences. Escape quotes.' : ''
+        const maxTokens = attempt === 0 ? 1100 : attempt === 1 ? 800 : 650
 
-      const notesMarkdown = normalizeNotesMarkdown(output.notesMarkdown)
+        return client.responses.create({
+          model,
+          temperature: 0,
+          max_output_tokens: maxTokens,
+          input: [
+            {
+              role: 'system',
+              content: [{ type: 'input_text', text: `${baseSystemText}${retryText}` }],
+            },
+            {
+              role: 'user',
+              content: [
+                { type: 'input_text', text: userText },
+                ...dataImageUrls.map((img) => ({ type: 'input_image' as const, image_url: img })),
+              ],
+            },
+          ],
+          response_format: {
+            type: 'json_schema',
+            json_schema: {
+              name: 'notes_generate',
+              schema: buildNotesJsonSchema(finalLanguage),
+              strict: true,
+            },
+          },
+        } as any)
+      }
+
+      let output: z.infer<typeof NotesOutputZod> | null = null
+      let lastErr: any = null
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        try {
+          const resp = await runStructured(attempt)
+          const parsed = parseJsonOutput(String(resp.output_text || ''))
+          output = NotesOutputZod.parse(parsed)
+          break
+        } catch (err: any) {
+          lastErr = err
+        }
+      }
+
+      if (!output) {
+        console.error('notes.generate.json_invalid', {
+          requestId,
+          imageCount,
+          topicLen,
+          openaiModel: model,
+          message: String(lastErr?.message || ''),
+        })
+        return NextResponse.json({ error: { code: 'VISION_JSON_INVALID', message: 'Invalid structured JSON from vision model' }, requestId }, { status: 500 })
+      }
+
+      const notesMarkdown = normalizeNotesMarkdown(output.notesBlocks.join('\n\n'))
 
       if (CREDITS_PER_GENERATION > 0) {
         await chargeCredits(user.id, CREDITS_PER_GENERATION)
@@ -149,7 +204,7 @@ export async function POST(req: Request) {
 
       return NextResponse.json(
         {
-          language: output.language,
+          language: finalLanguage,
           detectedTopic: output.detectedTopic,
           notesMarkdown,
           requestId,
@@ -170,7 +225,6 @@ export async function POST(req: Request) {
       durationMs,
       errorCode: mapped.code,
       message: String(error?.message || ''),
-      stack: String(error?.stack || ''),
     })
 
     if (String(error?.message || '').includes('INVALID_PAYLOAD')) {

@@ -26,7 +26,7 @@ const inputSchema = z.preprocess((raw) => {
 export const notesOutputSchema = z.object({
   language: z.enum(['hu', 'en']),
   detectedTopic: z.string().min(1).max(200),
-  notesMarkdown: z.string().min(1).max(3200),
+  notesBlocks: z.array(z.string().min(80).max(350)).min(4).max(12),
 })
 
 export const planOutputSchema = z.object({
@@ -42,7 +42,7 @@ export const planOutputSchema = z.object({
     )
     .min(3)
     .max(10),
-  notesMarkdown: z.string().min(1).max(3200),
+  notesBlocks: z.array(z.string().min(80).max(350)).min(4).max(12),
   practice: z
     .array(
       z.object({

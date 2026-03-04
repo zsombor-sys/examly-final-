@@ -4,7 +4,6 @@ import { requireUser } from '@/lib/authServer'
 import { chargeCredits, getCredits } from '@/lib/credits'
 import { CREDITS_PER_GENERATION, MAX_IMAGES, MAX_PLAN_PROMPT_CHARS } from '@/lib/limits'
 import {
-  callVisionStructured,
   checkImageUrlsAccessible,
   mapOpenAiError,
   modelForPlan,
@@ -150,20 +149,45 @@ export async function POST(req: Request) {
         'Return one integrated response: time-block plan + meaningful notes + practice questions.',
       ].join('\n')
 
-      const output = await callVisionStructured({
-        client,
-        model,
-        requestId,
-        systemText,
-        userText,
-        imageUrls: input.imageUrls,
-        schemaName: 'plan_generate',
-        schemaObject: planSchemaJson,
-        schema: planOutputSchema,
-        maxOutputTokens: 1100,
-        fallbackShortTokens: 750,
-        timeoutMs: 45_000,
-      })
+      const content = [
+        { type: 'input_text' as const, text: userText },
+        ...input.imageUrls.map((url) => ({
+          type: 'input_image' as const,
+          image_url: url,
+        })),
+      ]
+
+      const resp = await client.responses.create({
+        model: process.env.OPENAI_MODEL || model || 'gpt-4.1-mini',
+        temperature: 0,
+        max_output_tokens: 1100,
+        input: [
+          {
+            role: 'system',
+            content: [{ type: 'input_text', text: systemText }],
+          },
+          {
+            role: 'user',
+            content,
+          },
+        ],
+        response_format: {
+          type: 'json_schema',
+          json_schema: {
+            name: 'plan_generate',
+            schema: planSchemaJson,
+            strict: true,
+          },
+        },
+      } as any)
+
+      let parsedOutput: unknown
+      try {
+        parsedOutput = JSON.parse(String(resp.output_text || ''))
+      } catch {
+        throw new Error('OPENAI_INVALID_JSON: Unterminated string in JSON')
+      }
+      const output = planOutputSchema.parse(parsedOutput)
 
       const notesMarkdown = normalizeNotesMarkdown(output.notesMarkdown)
 

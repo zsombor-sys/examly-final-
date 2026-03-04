@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server'
 import OpenAI from 'openai'
 import { z } from 'zod'
 import { requireUser } from '@/lib/authServer'
-import { OPENAI_MODEL } from '@/lib/limits'
+import { MAX_HOMEWORK_IMAGES, MAX_HOMEWORK_PROMPT_CHARS, OPENAI_MODEL } from '@/lib/limits'
 import { looksHungarianText, pickLanguage, type SupportedLanguage } from '@/lib/language'
 
 export const runtime = 'nodejs'
@@ -12,8 +12,8 @@ export const dynamic = 'force-dynamic'
 type VisionImage = { mime: string; b64: string }
 
 const jsonSchema = z.object({
-  images: z.array(z.string().min(1)).min(1),
-  subject: z.string().optional(),
+  images: z.array(z.string().min(1)).min(1).max(MAX_HOMEWORK_IMAGES),
+  subject: z.string().max(MAX_HOMEWORK_PROMPT_CHARS).optional(),
 })
 
 const extractResponseSchema = z.object({
@@ -115,6 +115,13 @@ async function parseImages(req: Request): Promise<{ images: VisionImage[]; subje
     if (!String(file.type || '').startsWith('image/')) continue
     const b64 = Buffer.from(await file.arrayBuffer()).toString('base64')
     images.push({ mime: String(file.type || 'image/png'), b64 })
+  }
+
+  if (images.length > MAX_HOMEWORK_IMAGES) {
+    throw new Error(`Max ${MAX_HOMEWORK_IMAGES} images`)
+  }
+  if (subject.length > MAX_HOMEWORK_PROMPT_CHARS) {
+    throw new Error(`Prompt max ${MAX_HOMEWORK_PROMPT_CHARS} chars`)
   }
 
   return { images, subject }

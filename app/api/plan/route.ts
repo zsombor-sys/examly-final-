@@ -883,6 +883,7 @@ export async function POST(req: Request) {
 
     const extractedText = String(extracted.extracted_text || '').slice(0, MAX_EXTRACT_CHARS)
     const userText = [
+      'Analyze the uploaded images and generate study notes and a study plan based on the visible content.',
       `Prompt:\n${prompt || '(empty)'}`,
       `Detected topic title:\n${extracted.topic_guess || '(none)'}`,
       `Extracted material from images:\n${extractedText || '(none)'}`,
@@ -890,6 +891,10 @@ export async function POST(req: Request) {
       `Entities:\n${extracted.entities.join(', ') || '(none)'}`,
       `Extraction confidence:\n${String(extracted.confidence ?? 0)}`,
     ].join('\n\n')
+    const modelImageContent = visionImages.map((img) => ({
+      type: 'image_url' as const,
+      image_url: { url: img.url },
+    }))
     let generatedPlanNotesMarkdown = ''
     let generatedQuickQuestions: string[] = []
 
@@ -903,7 +908,13 @@ export async function POST(req: Request) {
               { role: 'system', content: [systemText, extra].filter(Boolean).join('\n') },
               {
                 role: 'user',
-                content: `${userText}\n\nGenerate only title, language, summary, plan.blocks and daily.days. Keep it compact.`,
+                content: [
+                  {
+                    type: 'text',
+                    text: `${userText}\n\nGenerate only title, language, summary, plan.blocks and daily.days. Keep it compact.`,
+                  },
+                  ...modelImageContent,
+                ] as any,
               },
             ],
             temperature: 0,
@@ -968,17 +979,23 @@ export async function POST(req: Request) {
                 { role: 'system', content: [systemText, extra, continuationInstruction].filter(Boolean).join('\n') },
                 {
                   role: 'user',
-                  content:
-                    `${userText}\n\n` +
-                    `Existing compact plan:\n${JSON.stringify({
-                      title: base.title,
-                      language: base.language,
-                      summary: base.summary,
-                      plan: base.plan,
-                      daily: base.daily,
-                    })}\n\n` +
-                    `Generate only notes_markdown and practice_questions. Keep notes in ${PLAN_NOTES_MIN_CHARS}-${PLAN_NOTES_MAX_CHARS} visible chars.` +
-                    (pass > 0 ? `\n\nCurrent notes draft:\n${compactMarkdown}` : ''),
+                  content: [
+                    {
+                      type: 'text',
+                      text:
+                        `${userText}\n\n` +
+                        `Existing compact plan:\n${JSON.stringify({
+                          title: base.title,
+                          language: base.language,
+                          summary: base.summary,
+                          plan: base.plan,
+                          daily: base.daily,
+                        })}\n\n` +
+                        `Generate only notes_markdown and practice_questions. Keep notes in ${PLAN_NOTES_MIN_CHARS}-${PLAN_NOTES_MAX_CHARS} visible chars.` +
+                        (pass > 0 ? `\n\nCurrent notes draft:\n${compactMarkdown}` : ''),
+                    },
+                    ...modelImageContent,
+                  ] as any,
                 },
               ],
               temperature: 0.4,

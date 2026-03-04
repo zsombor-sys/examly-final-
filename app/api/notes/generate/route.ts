@@ -97,18 +97,21 @@ export async function POST(req: Request) {
       })
 
       const systemText = [
-        'You are a vision study assistant.',
+        'You are generating study notes from the uploaded images.',
+        'Carefully read the images and extract the key concepts.',
+        'Produce structured bullet-point notes based on the content in the images.',
         'You MUST use the images. If images are missing, say so and stop.',
         'Return only valid JSON matching schema.',
         'detectedTopic must be one short line inferred from the images, not from user topic.',
-        'If there are no usable images, set detectedTopic to NO_IMAGES and notesMarkdown to either "Nem kaptam meg a képeket" or "A képek nem hozzáférhetők" and stop.',
+        'If there are no usable images, set detectedTopic to NO_IMAGES and notesMarkdown to "Nem tudtam értelmezhető szöveget kiolvasni a képekről." and stop.',
         'notesMarkdown must be well-structured markdown with headings and bullet points.',
         'Keep notesMarkdown around 2000-3000 characters.',
         'Language rule: if topic is non-empty, language should match topic language; if topic is empty, use dominant language of image content (HU/EN).',
       ].join('\n')
 
       const userText = [
-        `topic: ${input.topic || '(empty)'}`,
+        'Analyze the uploaded images and generate study notes and a study plan based on the visible content.',
+        `prompt: ${input.topic || '(empty)'}`,
         `languagePreference: ${input.language || 'auto'}`,
         `fallbackLanguageHint: ${languageHint}`,
       ].join('\n')

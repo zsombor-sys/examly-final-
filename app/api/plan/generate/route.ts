@@ -127,11 +127,15 @@ export async function POST(req: Request) {
       })
 
       const systemText = [
-        'You are a vision study planner.',
+        'You are a study assistant.',
+        'Analyze the uploaded images carefully.',
+        'The images likely contain school material (notes, exercises, textbook pages).',
+        'Generate a focused study plan based on what appears in the images.',
+        'If the images contain exercises or theory, explain what topics the student should review and create a structured study plan.',
         'You MUST use the images. If images are missing, say so and stop.',
         'Return only valid JSON matching schema.',
         'detectedTopic must be one short line inferred from the images, not from user topic.',
-        'If there are no usable images, set detectedTopic to NO_IMAGES and notesMarkdown to either "Nem kaptam meg a képeket" or "A képek nem hozzáférhetők" and stop.',
+        'If there are no usable images, set detectedTopic to NO_IMAGES and notesMarkdown to "Nem tudtam értelmezhető szöveget kiolvasni a képekről." and stop.',
         'Plan must contain concrete, topic-specific time blocks. Avoid generic templates.',
         'notesMarkdown must be structured markdown with headings and bullets, around 2000-3000 characters.',
         'practice must contain 6-10 topic-relevant quick questions with short answers.',
@@ -139,7 +143,8 @@ export async function POST(req: Request) {
       ].join('\n')
 
       const userText = [
-        `topic: ${input.topic || '(empty)'}`,
+        'Analyze the uploaded images and generate study notes and a study plan based on the visible content.',
+        `prompt: ${input.topic || '(empty)'}`,
         `languagePreference: ${input.language || 'auto'}`,
         `fallbackLanguageHint: ${languageHint}`,
         'Return one integrated response: time-block plan + meaningful notes + practice questions.',

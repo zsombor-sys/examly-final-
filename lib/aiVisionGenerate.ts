@@ -6,11 +6,22 @@ import { looksHungarian, resolveLanguage, type SupportedLanguage } from '@/lib/l
 const MAX_NOTES_CHARS = 3000
 const DEFAULT_TIMEOUT_MS = 45_000
 
-const inputSchema = z.object({
+const inputSchema = z.preprocess((raw) => {
+  const body = (raw ?? {}) as any
+  return {
+    topic: String(body?.topic ?? body?.prompt ?? '').trim(),
+    imageUrls: Array.isArray(body?.imageUrls)
+      ? body.imageUrls
+      : Array.isArray(body?.images)
+        ? body.images
+        : [],
+    language: body?.language ?? 'auto',
+  }
+}, z.object({
   topic: z.string().max(MAX_PLAN_PROMPT_CHARS).optional().default(''),
   imageUrls: z.array(z.string().url()).max(MAX_IMAGES),
   language: z.enum(['auto', 'hu', 'en']).optional().default('auto'),
-})
+}))
 
 export const notesOutputSchema = z.object({
   language: z.enum(['hu', 'en']),

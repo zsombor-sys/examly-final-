@@ -585,7 +585,9 @@ function Inner({ entitlement }: { entitlement: { credits: number | null; entitle
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           topic: promptToSend,
+          prompt: promptToSend,
           imageUrls,
+          images: imageUrls,
           language: promptToSend ? (looksHungarian(promptToSend) ? 'hu' : 'en') : 'auto',
         }),
       })

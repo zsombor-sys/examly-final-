@@ -104,7 +104,9 @@ function Inner() {
       const imageUrls = await createSignedImageUrls(paths, 600)
       const payload = {
         topic: trimmed,
+        prompt: trimmed,
         imageUrls,
+        images: imageUrls,
         language: trimmed ? (looksHungarian(trimmed) ? 'hu' : 'en') : 'auto',
       }
 

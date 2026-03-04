@@ -1,6 +1,5 @@
 import OpenAI from 'openai'
 import { z } from 'zod'
-import { buildVisionBlocks } from '@/lib/vision'
 
 export const VisionExtractSchema = z.object({
   detected_language: z.enum(['hu', 'en']),
@@ -34,6 +33,25 @@ function parseVisionResponseJson(content: unknown): unknown {
   const raw = String(text || '').trim()
   if (!raw) throw new Error('VISION_EMPTY_RESPONSE')
   return JSON.parse(raw)
+}
+
+function responseToText(resp: any) {
+  const direct = String(resp?.output_text || '').trim()
+  if (direct) return direct
+  const out = Array.isArray(resp?.output) ? resp.output : []
+  for (const item of out) {
+    const content = Array.isArray(item?.content) ? item.content : []
+    for (const c of content) {
+      const t = String(c?.text || c?.value || '').trim()
+      if (t) return t
+    }
+  }
+  return ''
+}
+
+function toImageUrl(image: VisionInputImage) {
+  if ('url' in image) return String(image.url || '')
+  return `data:${image.mime};base64,${image.b64}`
 }
 
 async function withTimeout<T>(ms: number, fn: (signal: AbortSignal) => Promise<T>) {
@@ -90,47 +108,46 @@ export async function extractFromImagesWithVision(params: {
     for (let attempt = 0; attempt <= retries; attempt += 1) {
       const retryInstruction = attempt > 0 ? 'Return ONLY valid JSON matching the schema. No markdown.' : ''
       try {
-        const userContent: any[] = [{ type: 'text', text: `User prompt:\n${prompt || '(empty)'}` }]
-        userContent.push(...buildVisionBlocks(batchImages))
+        const userContent: any[] = [
+          {
+            type: 'input_text',
+            text: [
+              'Look at the images and extract the study topic and key information.',
+              'Return JSON only with fields: detected_language, topic_guess, extracted_text, key_points, entities, confidence.',
+              'If image text is unreadable, set extracted_text to "Not enough readable information" and lower confidence.',
+              `User prompt: ${prompt || '(empty)'}`,
+            ].join('\n'),
+          },
+        ]
+        for (const image of batchImages) {
+          userContent.push({
+            type: 'input_image',
+            image_url: toImageUrl(image),
+          })
+        }
 
         const resp = await withTimeout(timeoutMs, (signal) =>
-          client.chat.completions.create(
+          client.responses.create(
             {
               model,
-              messages: [
-                {
-                  role: 'system',
-                  content: [
-                  'You extract study material from uploaded images.',
-                  'Return only JSON with factual extracted content seen in the images.',
-                  'Focus on headings, exercises, formulas, questions, and task statements.',
-                  'Return fields: detected_language, topic_guess, extracted_text, key_points, entities, confidence.',
-                  'If image text is unreadable, set extracted_text to "Not enough readable information" and lower confidence.',
-                  'Use Hungarian if the content appears Hungarian.',
-                  retryInstruction,
-                ].filter(Boolean).join('\n'),
-                },
-                {
-                  role: 'user',
-                  content: userContent as any,
-                },
-              ],
-              max_tokens: 120,
-              temperature: 0,
-              response_format: {
-                type: 'json_schema',
-                json_schema: {
+              max_output_tokens: 120,
+              input: [{ role: 'user', content: userContent }],
+              text: {
+                format: {
+                  type: 'json_schema',
                   name: 'vision_extract',
                   strict: true,
                   schema,
                 },
-              } as any,
-            },
-            { signal }
+              },
+              temperature: 0,
+              metadata: { stage: 'vision_extract', retry: String(attempt), note: retryInstruction },
+            } as any,
+            { signal } as any
           )
         )
 
-        const parsed = parseVisionResponseJson(resp.choices?.[0]?.message?.content)
+        const parsed = parseVisionResponseJson(responseToText(resp))
         return VisionExtractSchema.parse(parsed)
       } catch (err) {
         lastErr = err

@@ -24,7 +24,7 @@ import { trimMarkdownToVisibleMax, visibleLength } from '@/lib/textMeasure'
 import { preprocessImages } from '@/lib/vision/preprocessImages'
 
 export const runtime = 'nodejs'
-export const maxDuration = 120
+export const maxDuration = 60
 export const dynamic = 'force-dynamic'
 
 const PLAN_MODEL = process.env.OPENAI_PLAN_MODEL || OPENAI_MODEL
@@ -47,7 +47,11 @@ const FORBIDDEN_NOTES_PATTERNS: RegExp[] = [
 ]
 
 const planRequestSchema = z.object({
+  topic: z.string().max(MAX_PLAN_PROMPT_CHARS).optional(),
   prompt: z.string().max(MAX_PLAN_PROMPT_CHARS).optional().default(''),
+  mode: z.enum(['plan', 'notes']).optional(),
+  lang: z.enum(['hu', 'en', 'auto']).optional(),
+  language: z.enum(['hu', 'en']).optional(),
   storage_paths: z.array(z.string().min(1)).optional().default([]),
   images: z.array(z.string().min(1)).optional().default([]),
 })
@@ -117,10 +121,22 @@ async function parsePlanRequest(req: Request) {
   } else {
     const form = await req.formData()
     raw = {
+      topic: form.get('topic'),
       prompt: form.get('prompt'),
+      mode: form.get('mode'),
+      lang: form.get('lang'),
+      language: form.get('language'),
       storage_paths: form.getAll('storage_paths'),
     }
-    files = form.getAll('files').filter((f): f is File => f instanceof File)
+    files = [
+      ...form.getAll('images').filter((f): f is File => f instanceof File),
+      ...form.getAll('files').filter((f): f is File => f instanceof File),
+    ]
+    images = form
+      .getAll('images')
+      .filter((x): x is string => typeof x === 'string')
+      .map((x) => String(x ?? '').trim())
+      .filter(Boolean)
     storagePaths = form
       .getAll('storage_paths')
       .map((x) => String(x ?? '').trim())
@@ -128,14 +144,18 @@ async function parsePlanRequest(req: Request) {
   }
 
   const input = {
+    topic: raw?.topic != null ? String(raw.topic) : '',
     prompt: raw?.prompt != null ? String(raw.prompt) : '',
+    mode: raw?.mode != null ? String(raw.mode) : undefined,
+    lang: raw?.lang != null ? String(raw.lang) : undefined,
+    language: raw?.language != null ? String(raw.language) : undefined,
     storage_paths: Array.isArray(raw?.storage_paths)
       ? raw.storage_paths.map((x: any) => String(x ?? '').trim()).filter(Boolean)
       : storagePaths,
     images,
   }
 
-  if (input.prompt.length > MAX_PLAN_PROMPT_CHARS) {
+  if (String(input.topic || input.prompt).length > MAX_PLAN_PROMPT_CHARS) {
     return { ok: false as const, error: 'PROMPT_TOO_LONG' as const }
   }
 
@@ -155,7 +175,14 @@ async function parsePlanRequest(req: Request) {
   return {
     ok: true as const,
     value: {
+      topic: String(parsed.data.topic || '').trim(),
       prompt: parsed.data.prompt.trim(),
+      language:
+        parsed.data.lang === 'hu' || parsed.data.lang === 'en'
+          ? parsed.data.lang
+          : parsed.data.language === 'hu' || parsed.data.language === 'en'
+            ? parsed.data.language
+            : null,
       files,
       storage_paths: parsed.data.storage_paths,
       images: parsed.data.images,
@@ -659,7 +686,10 @@ export async function POST(req: Request) {
       )
     }
 
-    const promptRaw = parsedRequest.value.prompt
+    const promptRaw = parsedRequest.value.topic || parsedRequest.value.prompt
+    const explicitLanguage = parsedRequest.value.language === 'hu' || parsedRequest.value.language === 'en'
+      ? parsedRequest.value.language
+      : null
     const files = parsedRequest.value.files
     const storagePaths = parsedRequest.value.storage_paths
     const inlineImages = parsedRequest.value.images
@@ -695,13 +725,15 @@ export async function POST(req: Request) {
     const prompt =
       promptRaw.trim() ||
       (imagesDownloaded ? 'Create structured study notes and a study plan based on the uploaded materials.' : '')
-    const resolvedPromptLanguage = resolveLanguage({ prompt })
+    const resolvedPromptLanguage = resolveLanguage({ explicit: explicitLanguage, prompt })
     const isHu = resolvedPromptLanguage === 'hu'
 
     console.log('images received:', imagesSelected)
     console.log('images sent to vision:', imagesSentToVision)
     console.log('plan.vision.counts', {
       requestId,
+      approx_request_bytes:
+        rawImages.reduce((sum, img) => sum + img.buffer.length, 0) + Buffer.byteLength(prompt || '', 'utf8'),
       number_of_images_received: imagesSelected,
       number_of_images_sent_to_model: imagesSentToVision,
       images_received_count: imagesSelected,
@@ -790,6 +822,7 @@ export async function POST(req: Request) {
 
     const client = new OpenAI({ apiKey: openAiKey })
 
+    const extractStartedAt = Date.now()
     const extracted = await extractFromImagesWithVision({
       client,
       model: VISION_MODEL,
@@ -799,6 +832,7 @@ export async function POST(req: Request) {
       retries: 2,
       timeoutMs: STEP1_TIMEOUT_MS,
     })
+    const extractMs = Date.now() - extractStartedAt
 
     const extractLength = String(extracted.extracted_text || '').length
     console.log('vision topic:', String(extracted.topic_guess || '').trim())
@@ -817,6 +851,7 @@ export async function POST(req: Request) {
     })
 
     const targetLang = resolveLanguage({
+      explicit: explicitLanguage,
       extracted: extracted.detected_language,
       prompt: [prompt, extracted.extracted_text, extracted.key_points.join(' '), extracted.entities.join(' ')].join('\n'),
     })
@@ -831,6 +866,12 @@ export async function POST(req: Request) {
       'Use the images as the primary source. Reference concrete facts from them explicitly.',
       'You MUST incorporate extracted facts from uploaded images. Do not output generic content.',
       'Use ONLY the extracted text for factual content. Do NOT invent topics.',
+      targetLang === 'hu'
+        ? 'Csak a képek tartalmát használd. Ha valami nem olvasható, írd: "Nem olvasható a képen: ...".'
+        : 'Use only the image content. If something is unreadable, write: "Not readable in image: ...".',
+      targetLang === 'hu'
+        ? 'Ne találj ki képleteket/definíciókat, amelyek nincsenek a képeken.'
+        : 'Do not invent formulas/definitions that are not present in the images.',
       'If extracted material is empty, still generate a useful plan but explicitly mention this is a fallback context in notes summary.',
       'Notes inside plan must be compact, structured prose markdown with ## headings and short paragraphs.',
       `summary_notes_markdown must be ${PLAN_NOTES_MIN_CHARS}-${PLAN_NOTES_MAX_CHARS} characters.`,
@@ -1013,6 +1054,7 @@ export async function POST(req: Request) {
       return normalizePlanDocument(merged, isHu, prompt)
     }
 
+    const generationStartedAt = Date.now()
     let document: PlanDocument | null = null
     let finalStatus: 'done' | 'partial' = 'partial'
     let finalPath: 'strict_success' | 'strict_retry_success' | 'fallback_used' = 'fallback_used'
@@ -1173,6 +1215,8 @@ export async function POST(req: Request) {
       finalPath,
       finalSchemaValid: finalPath !== 'fallback_used' && finalStatus === 'done',
       status: finalStatus,
+      extraction_ms: extractMs,
+      generation_ms: Date.now() - generationStartedAt,
       imagesSelected,
       imagesDownloaded,
       imagesSentToVision,

@@ -8,6 +8,7 @@ import { FileUp, Loader2, Trash2, ArrowLeft, Send } from 'lucide-react'
 import AuthGate from '@/components/AuthGate'
 import ClientAuthGuard from '@/components/ClientAuthGuard'
 import { authedFetch } from '@/lib/authClient'
+import { compressImages } from '@/lib/client/compressImages'
 import { supabase } from '@/lib/supabaseClient'
 import { looksHungarian } from '@/lib/language'
 import HScroll from '@/components/HScroll'
@@ -539,37 +540,6 @@ function Inner({ entitlement }: { entitlement: { credits: number | null; entitle
     setError(null)
   }
 
-  async function compressImage(file: File) {
-    if (typeof window === 'undefined') return file
-    if (!file.type.startsWith('image/')) return file
-
-    const img = new Image()
-    const url = URL.createObjectURL(file)
-    await new Promise((resolve, reject) => {
-      img.onload = resolve
-      img.onerror = reject
-      img.src = url
-    })
-    const maxW = 1280
-    const scale = img.width > maxW ? maxW / img.width : 1
-    const w = Math.round(img.width * scale)
-    const h = Math.round(img.height * scale)
-    const canvas = document.createElement('canvas')
-    canvas.width = w
-    canvas.height = h
-    const ctx = canvas.getContext('2d')
-    if (!ctx) {
-      URL.revokeObjectURL(url)
-      return file
-    }
-    ctx.drawImage(img, 0, 0, w, h)
-    const blob: Blob = await new Promise((resolve) =>
-      canvas.toBlob((b) => resolve(b || file), 'image/jpeg', 0.7)
-    )
-    URL.revokeObjectURL(url)
-    return new File([blob], file.name.replace(/\.\w+$/, '.jpg'), { type: 'image/jpeg' })
-  }
-
   async function uploadMaterials() {
     if (!supabase) throw new Error('Auth is not configured (missing Supabase env vars).')
     const sess = await supabase.auth.getSession()
@@ -606,14 +576,16 @@ function Inner({ entitlement }: { entitlement: { credits: number | null; entitle
       const promptToSend =
         prompt.trim() ||
         (files.length > 0 ? 'Create structured study notes and a study plan based on the uploaded materials.' : '')
-      form.append('prompt', promptToSend)
+      form.append('topic', promptToSend)
+      form.append('mode', 'plan')
+      form.append('lang', promptToSend ? (looksHungarian(promptToSend) ? 'hu' : 'en') : 'auto')
       form.append('required_credits', String(cost))
-      for (const f of files.slice(0, MAX_PLAN_IMAGES)) {
-        const file = f.type.startsWith('image/') ? await compressImage(f) : f
-        form.append('files', file)
+      const compressed = await compressImages(files.slice(0, MAX_PLAN_IMAGES))
+      for (const file of compressed) {
+        form.append('images', file)
       }
 
-      const res = await authedFetch('/api/plan', { method: 'POST', body: form })
+      const res = await authedFetch('/api/plan/generate', { method: 'POST', body: form })
       let json = await res.json().catch(() => ({} as any))
       if (!res.ok) {
         const code = json?.error?.code ?? json?.code ?? json?.error

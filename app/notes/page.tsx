@@ -8,6 +8,7 @@ import ClientAuthGuard from '@/components/ClientAuthGuard'
 import MarkdownMath from '@/components/MarkdownMath'
 import { Button, Textarea } from '@/components/ui'
 import { authedFetch } from '@/lib/authClient'
+import { compressImages } from '@/lib/client/compressImages'
 import { CREDITS_PER_GENERATION, MAX_IMAGES, MAX_PLAN_PROMPT_CHARS } from '@/lib/limits'
 import { looksHungarian } from '@/lib/language'
 
@@ -67,37 +68,6 @@ function Inner() {
         }
   }, [language, notesPrompt])
 
-  async function compressImage(file: File) {
-    if (typeof window === 'undefined') return file
-    if (!file.type.startsWith('image/')) return file
-
-    const img = new Image()
-    const url = URL.createObjectURL(file)
-    await new Promise((resolve, reject) => {
-      img.onload = resolve
-      img.onerror = reject
-      img.src = url
-    })
-    const maxW = 1280
-    const scale = img.width > maxW ? maxW / img.width : 1
-    const w = Math.round(img.width * scale)
-    const h = Math.round(img.height * scale)
-    const canvas = document.createElement('canvas')
-    canvas.width = w
-    canvas.height = h
-    const ctx = canvas.getContext('2d')
-    if (!ctx) {
-      URL.revokeObjectURL(url)
-      return file
-    }
-    ctx.drawImage(img, 0, 0, w, h)
-    const blob: Blob = await new Promise((resolve) =>
-      canvas.toBlob((b) => resolve(b || file), 'image/jpeg', 0.7)
-    )
-    URL.revokeObjectURL(url)
-    return new File([blob], file.name.replace(/\.\w+$/, '.jpg'), { type: 'image/jpeg' })
-  }
-
   async function generate() {
     setError(null)
     setLoading(true)
@@ -111,10 +81,12 @@ function Inner() {
       }
 
       const fd = new FormData()
-      fd.append('prompt', trimmed)
-      for (const file of files.slice(0, MAX_IMAGES)) {
-        const compressed = file.type.startsWith('image/') ? await compressImage(file) : file
-        fd.append('files', compressed)
+      fd.append('topic', trimmed)
+      fd.append('mode', 'notes')
+      fd.append('lang', trimmed ? (looksHungarian(trimmed) ? 'hu' : 'en') : 'auto')
+      const compressed = await compressImages(files.slice(0, MAX_IMAGES))
+      for (const file of compressed) {
+        fd.append('images', file)
       }
 
       const res = await authedFetch('/api/notes/generate', { method: 'POST', body: fd })

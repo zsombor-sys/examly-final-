@@ -8,12 +8,11 @@ import { resolveLanguage, type SupportedLanguage } from '@/lib/language'
 import { trimMarkdownToVisibleMax, visibleLength, wordCountFromVisible } from '@/lib/textMeasure'
 import { extractFromImagesWithVision } from '@/lib/visionExtract'
 import { normalizeBase64VisionImage, type VisionImage } from '@/lib/vision'
-import { optimizeImageForVision } from '@/lib/imageOptimize'
 import { createServerAdminClient } from '@/lib/supabase/server'
 import { preprocessImages } from '@/lib/vision/preprocessImages'
 
 export const runtime = 'nodejs'
-export const maxDuration = 120
+export const maxDuration = 60
 export const dynamic = 'force-dynamic'
 
 const NOTES_MIN_CHARS = 2000
@@ -21,7 +20,6 @@ const NOTES_MAX_CHARS = 3000
 const NOTES_MAX_CALLS = 2
 const NOTES_MAX_TOKENS = 800
 const VISION_MODEL = process.env.OPENAI_VISION_MODEL || OPENAI_MODEL
-const MAX_VISION_BYTES = 8 * 1024 * 1024
 const OPENAI_TIMEOUT_MS = 60_000
 const OPENAI_MAX_RETRIES = 2
 
@@ -36,7 +34,10 @@ const FORBIDDEN_TEMPLATE_PATTERNS: RegExp[] = [
 ]
 
 const reqSchema = z.object({
+  topic: z.string().max(MAX_PLAN_PROMPT_CHARS).optional(),
   prompt: z.string().max(MAX_PLAN_PROMPT_CHARS).optional().default(''),
+  mode: z.enum(['notes', 'plan']).optional(),
+  lang: z.enum(['hu', 'en', 'auto']).optional(),
   language: z.enum(['hu', 'en']).optional(),
   storage_paths: z.array(z.string().min(1)).optional().default([]),
   images: z.array(z.string().min(1)).optional().default([]),
@@ -140,8 +141,9 @@ async function createChatCompletionWithTimeoutRetry(
 async function parseInput(req: Request): Promise<{
   prompt: string
   language?: SupportedLanguage
-  images: VisionImage[]
+  files: File[]
   requestedImagesCount: number
+  requestBytes: number
 }> {
   const contentType = req.headers.get('content-type') || ''
 
@@ -155,24 +157,31 @@ async function parseInput(req: Request): Promise<{
     const storageImages = await downloadStorageImages(parsed.data.storage_paths)
     const requestedImagesCount = baseImagesRaw.length + storageImages.length
     const combined = [...baseImagesRaw, ...storageImages].slice(0, MAX_IMAGES)
-    const images = await preprocessVisionImages(combined)
+    const files = combined.map((img, i) => {
+      const bytes = Buffer.from(img.b64, 'base64')
+      return new File([new Uint8Array(bytes)], `notes-json-${i + 1}.jpg`, { type: img.mime || 'image/jpeg' })
+    })
+    const requestBytes = files.reduce((sum, f) => sum + (f.size || 0), 0)
     return {
-      prompt: String(parsed.data.prompt || '').trim(),
-      language: parsed.data.language,
-      images,
+      prompt: String(parsed.data.topic || parsed.data.prompt || '').trim(),
+      language: parsed.data.lang === 'hu' || parsed.data.lang === 'en' ? parsed.data.lang : parsed.data.language,
+      files,
       requestedImagesCount,
+      requestBytes,
     }
   }
 
   const form = await req.formData()
-  const prompt = String(form.get('prompt') || '').trim()
-  const languageRaw = String(form.get('language') || '').trim().toLowerCase()
+  const prompt = String(form.get('topic') || form.get('prompt') || '').trim()
+  const languageRaw = String(form.get('lang') || form.get('language') || '').trim().toLowerCase()
   const language = languageRaw === 'hu' || languageRaw === 'en' ? (languageRaw as SupportedLanguage) : undefined
 
-  const inlineImages = form
+  const inlineImageValues = form
     .getAll('images')
+    .filter((v): v is string => typeof v === 'string')
     .map((x) => String(x || '').trim())
     .filter(Boolean)
+  const inlineImages = inlineImageValues
     .map((encoded) => normalizeBase64VisionImage(encoded))
     .filter((image): image is VisionImage => Boolean(image))
   const storagePaths = form
@@ -180,21 +189,31 @@ async function parseInput(req: Request): Promise<{
     .map((x) => String(x || '').trim())
     .filter(Boolean)
 
-  const files = form.getAll('files').filter((f): f is File => f instanceof File)
+  const filesFromImages = form.getAll('images').filter((f): f is File => f instanceof File)
+  const filesFromLegacyField = form.getAll('files').filter((f): f is File => f instanceof File)
+  const allFiles = [...filesFromImages, ...filesFromLegacyField]
   const fileImagesRaw: VisionImage[] = []
-  for (const file of files) {
+  let fileBytes = 0
+  for (const file of allFiles) {
     if (!String(file.type || '').startsWith('image/')) continue
+    fileBytes += file.size || 0
     const b64 = Buffer.from(await file.arrayBuffer()).toString('base64')
     fileImagesRaw.push({ mime: String(file.type || 'image/png'), b64 })
   }
   const storageImages = await downloadStorageImages(storagePaths)
+  const storageBytes = storageImages.reduce((sum, img) => sum + Buffer.from(img.b64, 'base64').length, 0)
   const requestedImagesCount = inlineImages.length + fileImagesRaw.length + storageImages.length
-  const images = await preprocessVisionImages([...inlineImages, ...fileImagesRaw, ...storageImages].slice(0, MAX_IMAGES))
+  const normalized = [...inlineImages, ...fileImagesRaw, ...storageImages].slice(0, MAX_IMAGES)
+  const files = normalized.map((img, i) => {
+    const bytes = Buffer.from(img.b64, 'base64')
+    return new File([new Uint8Array(bytes)], `notes-upload-${i + 1}.jpg`, { type: img.mime || 'image/jpeg' })
+  })
   return {
     prompt,
     language,
-    images,
+    files,
     requestedImagesCount,
+    requestBytes: fileBytes + storageBytes,
   }
 }
 
@@ -217,26 +236,6 @@ async function downloadStorageImages(storagePaths: string[]) {
     }
   }
   return images
-}
-
-async function preprocessVisionImages(images: VisionImage[]) {
-  const out: VisionImage[] = []
-  let totalBytes = 0
-
-  for (const image of images) {
-    try {
-      const input = Buffer.from(image.b64, 'base64')
-      if (!input.length) continue
-      const optimized = await optimizeImageForVision(input, image.mime, { longEdge: 1024, quality: 75 })
-      if (!optimized) continue
-      if (totalBytes + optimized.bytes > MAX_VISION_BYTES) continue
-      out.push({ mime: optimized.mime, b64: optimized.b64 })
-      totalBytes += optimized.bytes
-    } catch {
-      // ignore invalid image payload
-    }
-  }
-  return out
 }
 
 async function generateChunk(params: {
@@ -266,6 +265,20 @@ async function generateChunk(params: {
       ? 'Images were uploaded. Treat extracted image material as the primary source of truth for every section.'
       : 'No images were uploaded. Build complete notes from the topic prompt only.',
     'Use ONLY the extracted text for factual content. Do NOT invent topics.',
+    hasImages
+      ? language === 'hu'
+        ? 'Csak a képek tartalmát használd. Ha valami nem olvasható, írd: "Nem olvasható a képen: ...".'
+        : 'Use only the image content. If something is unreadable, write: "Not readable in image: ...".'
+      : language === 'hu'
+        ? 'A témakérés alapján készíts részletes, tárgyilagos jegyzetet.'
+        : 'Create detailed and factual notes from the provided topic prompt.',
+    hasImages
+      ? language === 'hu'
+        ? 'Ne találj ki képleteket vagy definíciókat, amelyek nem szerepelnek a képeken.'
+        : 'Do not invent formulas or definitions that are not present in the images.'
+      : language === 'hu'
+        ? 'Ne használj sablonos, helykitöltő mondatokat.'
+        : 'Do not use template placeholder sentences.',
     'Write as if this is the only material the student will use.',
     'Whenever you write mathematics, you MUST use LaTeX.',
     'Use ONLY \\( \\) for inline math and \\[ \\] for display math.',
@@ -326,10 +339,10 @@ export async function POST(req: Request) {
     if (input.prompt.length > MAX_PLAN_PROMPT_CHARS) {
       return NextResponse.json({ error: `Prompt max ${MAX_PLAN_PROMPT_CHARS} chars` }, { status: 400 })
     }
-    if (input.images.length > MAX_IMAGES) {
+    if (input.files.length > MAX_IMAGES) {
       return NextResponse.json({ error: `Max ${MAX_IMAGES} images` }, { status: 400 })
     }
-    if (!input.prompt && input.images.length === 0) {
+    if (!input.prompt && input.files.length === 0) {
       return NextResponse.json({ error: 'Provide prompt or at least one image.' }, { status: 400 })
     }
 
@@ -343,21 +356,19 @@ export async function POST(req: Request) {
 
     const client = new OpenAI({ apiKey: key })
     const requestId = crypto.randomUUID()
-
-    const filesForVision = input.images
-      .slice(0, MAX_IMAGES)
-      .map((img, i) => new File([new Uint8Array(Buffer.from(img.b64, 'base64'))], `notes-${i + 1}.jpg`, { type: img.mime || 'image/jpeg' }))
-    const processedImages = await preprocessImages(filesForVision)
+    const totalStart = Date.now()
+    const processedImages = await preprocessImages(input.files.slice(0, MAX_IMAGES))
     const visionImages = processedImages.map((url) => ({ url }))
 
     const imagesRequestedCount = input.requestedImagesCount
-    const imagesPreprocessedCount = input.images.length
+    const imagesPreprocessedCount = input.files.length
     const imagesAttachedToModelCount = visionImages.length
 
     console.log('images received:', imagesRequestedCount)
     console.log('images sent to vision:', imagesAttachedToModelCount)
     console.log('notes.vision.counts', {
       requestId,
+      approx_request_bytes: input.requestBytes + Buffer.byteLength(input.prompt || '', 'utf8'),
       number_of_images_received: imagesRequestedCount,
       number_of_images_sent_to_model: imagesAttachedToModelCount,
       images_requested_count: imagesRequestedCount,
@@ -369,6 +380,7 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: 'VISION_INPUT_EMPTY' }, { status: 400 })
     }
 
+    const extractStartedAt = Date.now()
     const extracted = visionImages.length
       ? await extractFromImagesWithVision({
           client,
@@ -387,6 +399,7 @@ export async function POST(req: Request) {
           entities: [] as string[],
           confidence: 0,
         }
+    const extractMs = Date.now() - extractStartedAt
 
     console.log('vision topic:', String(extracted.topic_guess || '').trim())
 
@@ -403,6 +416,7 @@ export async function POST(req: Request) {
       prompt: [input.prompt, extracted.extracted_text, extracted.key_points.join(' '), extracted.entities.join(' ')].join('\n'),
     })
 
+    const generationStartedAt = Date.now()
     let markdown = ''
     let calls = 0
     while (calls < NOTES_MAX_CALLS) {
@@ -432,6 +446,13 @@ export async function POST(req: Request) {
     if (cost > 0) {
       await chargeCredits(user.id, cost)
     }
+    const generationMs = Date.now() - generationStartedAt
+    console.log('notes.model.timing', {
+      requestId,
+      extraction_ms: extractMs,
+      generation_ms: generationMs,
+      total_ms: Date.now() - totalStart,
+    })
 
     return NextResponse.json({
       markdown: finalMarkdown,

@@ -10,15 +10,16 @@ import { extractFromImagesWithVision } from '@/lib/visionExtract'
 import { normalizeBase64VisionImage, type VisionImage } from '@/lib/vision'
 import { optimizeImageForVision } from '@/lib/imageOptimize'
 import { createServerAdminClient } from '@/lib/supabase/server'
+import { preprocessImages } from '@/lib/vision/preprocessImages'
 
 export const runtime = 'nodejs'
-export const maxDuration = 60
+export const maxDuration = 120
 export const dynamic = 'force-dynamic'
 
 const NOTES_MIN_CHARS = 2000
 const NOTES_MAX_CHARS = 3000
 const NOTES_MAX_CALLS = 2
-const NOTES_MAX_TOKENS = 2200
+const NOTES_MAX_TOKENS = 800
 const VISION_MODEL = process.env.OPENAI_VISION_MODEL || OPENAI_MODEL
 const MAX_VISION_BYTES = 8 * 1024 * 1024
 const OPENAI_TIMEOUT_MS = 60_000
@@ -343,12 +344,18 @@ export async function POST(req: Request) {
     const client = new OpenAI({ apiKey: key })
     const requestId = crypto.randomUUID()
 
-    const visionImages = input.images.slice(0, MAX_IMAGES)
+    const filesForVision = input.images
+      .slice(0, MAX_IMAGES)
+      .map((img, i) => new File([new Uint8Array(Buffer.from(img.b64, 'base64'))], `notes-${i + 1}.jpg`, { type: img.mime || 'image/jpeg' }))
+    const processedImages = await preprocessImages(filesForVision)
+    const visionImages = processedImages.map((url) => ({ url }))
 
     const imagesRequestedCount = input.requestedImagesCount
     const imagesPreprocessedCount = input.images.length
     const imagesAttachedToModelCount = visionImages.length
 
+    console.log('images received:', imagesRequestedCount)
+    console.log('images sent to vision:', imagesAttachedToModelCount)
     console.log('notes.vision.counts', {
       requestId,
       number_of_images_received: imagesRequestedCount,
@@ -367,7 +374,7 @@ export async function POST(req: Request) {
           client,
           model: VISION_MODEL,
           prompt: input.prompt || 'Generate structured learning notes from these images.',
-          images: visionImages.map((img) => ({ mime: img.mime, b64: img.b64 })),
+          images: visionImages,
           requestId,
           retries: 2,
           timeoutMs: 12_000,
@@ -381,8 +388,13 @@ export async function POST(req: Request) {
           confidence: 0,
         }
 
-    if (visionImages.length > 0 && String(extracted.extracted_text || '').trim().length < 50) {
-      return NextResponse.json({ error: 'VISION_EXTRACTION_EMPTY' }, { status: 400 })
+    console.log('vision topic:', String(extracted.topic_guess || '').trim())
+
+    if (
+      visionImages.length > 0 &&
+      (!String(extracted.topic_guess || '').trim() || String(extracted.extracted_text || '').trim().length < 50)
+    ) {
+      return NextResponse.json({ error: 'VISION_FAILED' }, { status: 400 })
     }
 
     const language = resolveLanguage({

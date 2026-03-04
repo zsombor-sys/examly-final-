@@ -123,7 +123,7 @@ function Inner() {
         const code = String(json?.error || '')
         if (code === 'INSUFFICIENT_CREDITS') throw new Error(ui.creditsError)
         if (code === 'VISION_INPUT_EMPTY' || code === 'NOTES_VISION_INPUT_EMPTY') throw new Error(ui.visionError)
-        if (code === 'VISION_EXTRACTION_EMPTY') throw new Error(language === 'hu' ? 'A képekből nem sikerült elegendő szöveget kinyerni.' : 'Could not extract enough text from the uploaded images.')
+        if (code === 'VISION_EXTRACTION_EMPTY' || code === 'VISION_FAILED') throw new Error(language === 'hu' ? 'A képekből nem sikerült elegendő szöveget kinyerni.' : 'Could not extract enough text from the uploaded images.')
         if (code === 'MAX_IMAGES_EXCEEDED') throw new Error(language === 'hu' ? 'Legfeljebb 7 képet tölthetsz fel.' : 'You can upload at most 7 images.')
         if (code === 'NOTES_TIMEOUT') throw new Error(language === 'hu' ? 'A jegyzetgenerálás időtúllépés miatt megszakadt. Próbáld újra kevesebb képpel.' : 'Notes generation timed out. Try again with fewer images.')
         throw new Error(code || 'Failed to generate notes')

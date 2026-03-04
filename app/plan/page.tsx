@@ -627,7 +627,7 @@ function Inner({ entitlement }: { entitlement: { credits: number | null; entitle
           message = prefersHu ? 'Nincs elég kredited ehhez a generáláshoz.' : "You don't have enough credits to generate this."
         } else if (code === 'PLAN_VISION_INPUT_EMPTY' || code === 'VISION_INPUT_EMPTY') {
           message = prefersHu ? 'A feltöltött képek nem jutottak el a modellhez.' : 'Uploaded images were not attached to the model input.'
-        } else if (code === 'VISION_EXTRACTION_EMPTY') {
+        } else if (code === 'VISION_EXTRACTION_EMPTY' || code === 'VISION_FAILED') {
           message = prefersHu ? 'A képekből nem sikerült elég szöveget kinyerni a generáláshoz.' : 'Could not extract enough text from the uploaded images for generation.'
         } else if (code === 'MAX_IMAGES_EXCEEDED') {
           message = prefersHu ? `Legfeljebb ${MAX_PLAN_IMAGES} képet tölthetsz fel.` : `You can upload up to ${MAX_PLAN_IMAGES} images.`

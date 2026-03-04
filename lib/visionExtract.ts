@@ -115,7 +115,7 @@ export async function extractFromImagesWithVision(params: {
                   content: userContent as any,
                 },
               ],
-              max_tokens: 800,
+              max_tokens: 120,
               temperature: 0,
               response_format: {
                 type: 'json_schema',

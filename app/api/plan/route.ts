@@ -13,7 +13,6 @@ import {
 import { getCredits, chargeCredits, refundCredits } from '@/lib/credits'
 import { TABLE_PLANS } from '@/lib/dbTables'
 import { throwIfMissingTable } from '@/lib/supabaseErrors'
-import { optimizeImageForVision, type OptimizedVisionImage } from '@/lib/imageOptimize'
 import { extractFromImagesWithVision } from '@/lib/visionExtract'
 import { resolveLanguage } from '@/lib/language'
 import {
@@ -22,18 +21,18 @@ import {
   type PlanDocument,
 } from '@/lib/planDocument'
 import { trimMarkdownToVisibleMax, visibleLength } from '@/lib/textMeasure'
+import { preprocessImages } from '@/lib/vision/preprocessImages'
 
 export const runtime = 'nodejs'
-export const maxDuration = 60
+export const maxDuration = 120
 export const dynamic = 'force-dynamic'
 
 const PLAN_MODEL = process.env.OPENAI_PLAN_MODEL || OPENAI_MODEL
 const VISION_MODEL = process.env.OPENAI_VISION_MODEL || OPENAI_MODEL
-const MAX_OUTPUT_TOKENS = 1400
+const MAX_OUTPUT_TOKENS = 800
 const STEP1_TIMEOUT_MS = 12_000
 const STEP2_TIMEOUT_MS = 14_000
 const OPENAI_ATTEMPTS = 2
-const MAX_VISION_BYTES = 8 * 1024 * 1024
 const MAX_EXTRACT_CHARS = 12_000
 const PLAN_NOTES_MIN_CHARS = 2000
 const PLAN_NOTES_MAX_CHARS = 3000
@@ -292,21 +291,6 @@ async function collectRawImages(input: {
   }
 
   return out
-}
-
-async function optimizeVisionImages(rawImages: RawImageSource[]): Promise<OptimizedVisionImage[]> {
-  const optimized: OptimizedVisionImage[] = []
-  let total = 0
-
-  for (const img of rawImages) {
-    const o = await optimizeImageForVision(img.buffer, img.mime, { longEdge: 1024, quality: 75 })
-    if (!o) continue
-    if (total + o.bytes > MAX_VISION_BYTES) continue
-    optimized.push(o)
-    total += o.bytes
-  }
-
-  return optimized
 }
 
 type SavePlanRow = {
@@ -701,8 +685,12 @@ export async function POST(req: Request) {
       maxImages: MAX_PLAN_IMAGES,
     })
     const imagesDownloaded = rawImages.length
-    const optimizedImages = await optimizeVisionImages(rawImages)
-    const imagesSentToVision = optimizedImages.length
+    const filesForVision = rawImages.map(
+      (img, i) => new File([new Uint8Array(img.buffer)], `plan-${i + 1}.jpg`, { type: img.mime || 'image/jpeg' })
+    )
+    const processedImages = await preprocessImages(filesForVision)
+    const visionImages = processedImages.map((url) => ({ url }))
+    const imagesSentToVision = visionImages.length
 
     const prompt =
       promptRaw.trim() ||
@@ -710,6 +698,8 @@ export async function POST(req: Request) {
     const resolvedPromptLanguage = resolveLanguage({ prompt })
     const isHu = resolvedPromptLanguage === 'hu'
 
+    console.log('images received:', imagesSelected)
+    console.log('images sent to vision:', imagesSentToVision)
     console.log('plan.vision.counts', {
       requestId,
       number_of_images_received: imagesSelected,
@@ -804,16 +794,17 @@ export async function POST(req: Request) {
       client,
       model: VISION_MODEL,
       prompt,
-      images: optimizedImages.map((img) => ({ mime: img.mime, b64: img.b64 })),
+      images: visionImages,
       requestId,
       retries: 2,
       timeoutMs: STEP1_TIMEOUT_MS,
     })
 
     const extractLength = String(extracted.extracted_text || '').length
-    if (imagesSentToVision > 0 && extractLength < 50) {
+    console.log('vision topic:', String(extracted.topic_guess || '').trim())
+    if (imagesSentToVision > 0 && (!String(extracted.topic_guess || '').trim() || extractLength < 50)) {
       return NextResponse.json(
-        { error: 'VISION_EXTRACTION_EMPTY' },
+        { error: 'VISION_FAILED' },
         { status: 400, headers: { 'cache-control': 'no-store' } }
       )
     }

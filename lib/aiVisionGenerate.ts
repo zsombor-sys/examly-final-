@@ -1,7 +1,7 @@
 import OpenAI from 'openai'
 import { z } from 'zod'
 import { MAX_IMAGES, MAX_PLAN_PROMPT_CHARS, OPENAI_MODEL } from '@/lib/limits'
-import { looksHungarian, resolveLanguage, type SupportedLanguage } from '@/lib/language'
+import { looksHungarian, type SupportedLanguage } from '@/lib/language'
 
 const MAX_NOTES_CHARS = 3000
 const DEFAULT_TIMEOUT_MS = 45_000
@@ -74,7 +74,9 @@ export function parseGenerateInput(body: unknown): GenerateInput {
 
 export function resolveRequestedLanguage(input: GenerateInput): SupportedLanguage {
   if (input.language === 'hu' || input.language === 'en') return input.language
-  return resolveLanguage({ prompt: input.topic })
+  const topic = String(input.topic || '').trim()
+  if (!topic) return 'hu'
+  return looksHungarian(topic) ? 'hu' : 'en'
 }
 
 export function normalizeNotesMarkdown(markdown: string) {
@@ -123,13 +125,29 @@ function parseModelJson(text: string) {
   }
 }
 
+function extractChatMessageText(content: unknown) {
+  if (typeof content === 'string') return content
+  if (Array.isArray(content)) {
+    const joined = content
+      .map((part: any) => {
+        if (typeof part === 'string') return part
+        if (part && typeof part === 'object' && typeof part.text === 'string') return part.text
+        return ''
+      })
+      .join('\n')
+    return joined
+  }
+  return ''
+}
+
 async function repairJsonOnce(params: {
   client: OpenAI
+  schemaName: string
   schemaObject: Record<string, unknown>
   raw: string
   timeoutMs: number
 }) {
-  const { client, schemaObject, raw, timeoutMs } = params
+  const { client, schemaName, schemaObject, raw, timeoutMs } = params
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), timeoutMs)
   try {
@@ -138,7 +156,14 @@ async function repairJsonOnce(params: {
         model: 'gpt-4o-mini',
         temperature: 0,
         max_output_tokens: 700,
-        text: { format: { type: 'json_object' } },
+        text: {
+          format: {
+            type: 'json_schema',
+            name: `${schemaName}_repair`,
+            strict: true,
+            schema: schemaObject,
+          },
+        },
         input: [
           {
             role: 'system',
@@ -159,7 +184,7 @@ async function repairJsonOnce(params: {
                   `Target schema JSON:\n${JSON.stringify(schemaObject)}`,
                   'Original output to repair:',
                   String(raw || ''),
-                  'Return only corrected JSON object.',
+                  'Return only corrected JSON object. Do not include markdown fences.',
                 ].join('\n\n'),
               },
             ],
@@ -188,6 +213,7 @@ export async function callVisionStructured<T>(params: {
   fallbackShortTokens?: number
   timeoutMs?: number
   retries?: number
+  apiMode?: 'responses' | 'chat'
 }) {
   const {
     client,
@@ -203,10 +229,11 @@ export async function callVisionStructured<T>(params: {
     fallbackShortTokens = 1800,
     timeoutMs = DEFAULT_TIMEOUT_MS,
     retries = 2,
+    apiMode = 'responses',
   } = params
   let repairUsed = false
 
-  const run = async (tokens: number) => {
+  const runResponses = async (tokens: number) => {
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), timeoutMs)
     try {
@@ -251,12 +278,14 @@ export async function callVisionStructured<T>(params: {
       } catch {
         console.error('vision.json.parse_failed', {
           requestId,
-          rawPreview: raw.slice(0, 300),
+          branch: 'responses',
+          rawPreview: raw.slice(0, 400),
         })
         if (!repairUsed) {
           repairUsed = true
           const repairedRaw = await repairJsonOnce({
             client,
+            schemaName,
             schemaObject,
             raw,
             timeoutMs,
@@ -273,12 +302,104 @@ export async function callVisionStructured<T>(params: {
       } catch {
         console.error('vision.json.schema_failed', {
           requestId,
-          rawPreview: raw.slice(0, 300),
+          branch: 'responses',
+          rawPreview: raw.slice(0, 400),
         })
         if (!repairUsed) {
           repairUsed = true
           const repairedRaw = await repairJsonOnce({
             client,
+            schemaName,
+            schemaObject,
+            raw,
+            timeoutMs,
+          })
+          const repairedParsed = parseModelJson(repairedRaw)
+          return schema.parse(repairedParsed)
+        }
+        const err: any = new Error('JSON_INVALID')
+        err.code = 'JSON_INVALID'
+        throw err
+      }
+    } finally {
+      clearTimeout(timer)
+    }
+  }
+
+  const runChat = async (tokens: number) => {
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), timeoutMs)
+    try {
+      const response = await client.chat.completions.create(
+        {
+          model,
+          temperature: 0.2,
+          max_tokens: tokens,
+          response_format: {
+            type: 'json_schema',
+            json_schema: {
+              name: schemaName,
+              strict: true,
+              schema: schemaObject,
+            },
+          },
+          messages: [
+            {
+              role: 'system',
+              content: systemText,
+            },
+            {
+              role: 'user',
+              content: [
+                { type: 'text', text: userText },
+                ...imageUrls.map((url) => ({ type: 'image_url', image_url: { url, detail: 'auto' as const } })),
+              ] as any,
+            },
+          ],
+        },
+        { signal: controller.signal }
+      )
+
+      const raw = extractChatMessageText(response.choices?.[0]?.message?.content)
+      let parsed: unknown
+      try {
+        parsed = parseModelJson(raw)
+      } catch {
+        console.error('vision.json.parse_failed', {
+          requestId,
+          branch: 'chat',
+          rawPreview: raw.slice(0, 400),
+        })
+        if (!repairUsed) {
+          repairUsed = true
+          const repairedRaw = await repairJsonOnce({
+            client,
+            schemaName,
+            schemaObject,
+            raw,
+            timeoutMs,
+          })
+          parsed = parseModelJson(repairedRaw)
+        } else {
+          const err: any = new Error('JSON_INVALID')
+          err.code = 'JSON_INVALID'
+          throw err
+        }
+      }
+
+      try {
+        return schema.parse(parsed)
+      } catch {
+        console.error('vision.json.schema_failed', {
+          requestId,
+          branch: 'chat',
+          rawPreview: raw.slice(0, 400),
+        })
+        if (!repairUsed) {
+          repairUsed = true
+          const repairedRaw = await repairJsonOnce({
+            client,
+            schemaName,
             schemaObject,
             raw,
             timeoutMs,
@@ -305,7 +426,7 @@ export async function callVisionStructured<T>(params: {
           ? fallbackShortTokens
           : Math.max(200, Math.floor(fallbackShortTokens * 0.75))
     try {
-      return await run(tokens)
+      return apiMode === 'chat' ? await runChat(tokens) : await runResponses(tokens)
     } catch (err: any) {
       lastErr = err
       const retryable = shouldRetryShort(err) || String(err?.code || err?.message || '').includes('JSON_INVALID')

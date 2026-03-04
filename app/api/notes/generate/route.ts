@@ -49,6 +49,7 @@ export async function POST(req: Request) {
   const requestId = crypto.randomUUID()
   let model = modelForNotes()
   const maxOutputTokens = 2400
+  let selectedLanguage: 'hu' | 'en' = 'hu'
   let imageCount = 0
   let topicLen = 0
 
@@ -66,8 +67,11 @@ export async function POST(req: Request) {
     if (input.imageUrls.length > MAX_IMAGES) {
       return NextResponse.json({ error: { code: 'MAX_IMAGES_EXCEEDED', message: `Max ${MAX_IMAGES} images` }, requestId }, { status: 400 })
     }
-    if (input.imageUrls.length === 0) {
-      return NextResponse.json({ error: { code: 'NO_IMAGES', message: 'Nem kaptam meg a képeket' }, requestId }, { status: 400 })
+    if (input.imageUrls.length === 0 && !input.topic.trim()) {
+      return NextResponse.json(
+        { error: { code: 'MISSING_INPUT', message: 'Adj meg legalább témát vagy tölts fel képet' }, requestId },
+        { status: 400 }
+      )
     }
 
     const locks = getLocks()
@@ -80,9 +84,11 @@ export async function POST(req: Request) {
     locks.set(user.id, requestId)
 
     try {
-      const accessibleCount = await checkImageUrlsAccessible(input.imageUrls)
-      if (accessibleCount === 0) {
-        return NextResponse.json({ error: { code: 'IMAGES_INACCESSIBLE', message: 'A képek nem hozzáférhetők' }, requestId }, { status: 400 })
+      if (input.imageUrls.length > 0) {
+        const accessibleCount = await checkImageUrlsAccessible(input.imageUrls)
+        if (accessibleCount === 0) {
+          return NextResponse.json({ error: { code: 'IMAGES_INACCESSIBLE', message: 'A képek nem hozzáférhetők' }, requestId }, { status: 400 })
+        }
       }
 
       const cost = CREDITS_PER_GENERATION
@@ -99,18 +105,25 @@ export async function POST(req: Request) {
         input.language === 'hu' || input.language === 'en'
           ? input.language
           : resolveRequestedLanguage(input)
+      selectedLanguage = finalLanguage
 
+      const languageDirective = finalLanguage === 'hu' ? 'Answer in Hungarian.' : 'Answer in English.'
       const baseSystemText = [
         'You are generating study notes from uploaded images.',
-        'Use the images as the primary source.',
-        'Answer in Hungarian if Hungarian is requested/detected.',
+        languageDirective,
+        'Use the images if provided. If no images are provided, use the topic only.',
+        'Do not output generic templates. Be specific and topic-focused.',
+        'Return only valid JSON.',
+        'notesMarkdown target length: 2500-3000 characters, concise headings + bullets, no fluff.',
         `ALL strings MUST be in language: ${finalLanguage}.`,
-        'If you cannot see images, return detectedTopic="NO_IMAGES" and minimal notesBlocks explaining you could not read them.',
+        'If images are provided but unreadable, set detectedTopic="NO_READABLE_CONTENT" and explain briefly in notesBlocks.',
       ].join('\n')
 
       const userText = [
-        'Images first. Topic text is optional context only.',
+        'Generate structured study notes.',
         `topic: ${input.topic || '(empty)'}`,
+        'If images exist: prioritize them over general knowledge.',
+        'If images do not exist: rely on topic text only.',
       ].join('\n')
 
       const output = await callVisionStructured({
@@ -141,6 +154,7 @@ export async function POST(req: Request) {
         imageCount,
         topicLen,
         openaiModel: model,
+        language: selectedLanguage,
         maxOutputTokens,
         durationMs,
         errorCode: null,
@@ -166,6 +180,7 @@ export async function POST(req: Request) {
       imageCount,
       topicLen,
       openaiModel: model,
+      language: selectedLanguage,
       maxOutputTokens,
       durationMs,
       errorCode: mapped.code,

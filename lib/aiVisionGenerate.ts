@@ -123,6 +123,57 @@ function parseModelJson(text: string) {
   }
 }
 
+async function repairJsonOnce(params: {
+  client: OpenAI
+  schemaObject: Record<string, unknown>
+  raw: string
+  timeoutMs: number
+}) {
+  const { client, schemaObject, raw, timeoutMs } = params
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), timeoutMs)
+  try {
+    const repaired = await client.responses.create(
+      {
+        model: 'gpt-4o-mini',
+        temperature: 0,
+        max_output_tokens: 700,
+        text: { format: { type: 'json_object' } },
+        input: [
+          {
+            role: 'system',
+            content: [
+              {
+                type: 'input_text',
+                text:
+                  'You repair malformed JSON output. Return ONLY one valid JSON object matching the target schema exactly.',
+              },
+            ],
+          },
+          {
+            role: 'user',
+            content: [
+              {
+                type: 'input_text',
+                text: [
+                  `Target schema JSON:\n${JSON.stringify(schemaObject)}`,
+                  'Original output to repair:',
+                  String(raw || ''),
+                  'Return only corrected JSON object.',
+                ].join('\n\n'),
+              },
+            ],
+          },
+        ],
+      },
+      { signal: controller.signal }
+    )
+    return String(repaired.output_text || '')
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
 export async function callVisionStructured<T>(params: {
   client: OpenAI
   model: string
@@ -153,6 +204,7 @@ export async function callVisionStructured<T>(params: {
     timeoutMs = DEFAULT_TIMEOUT_MS,
     retries = 2,
   } = params
+  let repairUsed = false
 
   const run = async (tokens: number) => {
     const controller = new AbortController()
@@ -192,10 +244,48 @@ export async function callVisionStructured<T>(params: {
         { signal: controller.signal }
       )
 
-      const parsed = parseModelJson(String(response.output_text || ''))
+      const raw = String(response.output_text || '')
+      let parsed: unknown
+      try {
+        parsed = parseModelJson(raw)
+      } catch {
+        console.error('vision.json.parse_failed', {
+          requestId,
+          rawPreview: raw.slice(0, 300),
+        })
+        if (!repairUsed) {
+          repairUsed = true
+          const repairedRaw = await repairJsonOnce({
+            client,
+            schemaObject,
+            raw,
+            timeoutMs,
+          })
+          parsed = parseModelJson(repairedRaw)
+        } else {
+          const err: any = new Error('JSON_INVALID')
+          err.code = 'JSON_INVALID'
+          throw err
+        }
+      }
       try {
         return schema.parse(parsed)
       } catch {
+        console.error('vision.json.schema_failed', {
+          requestId,
+          rawPreview: raw.slice(0, 300),
+        })
+        if (!repairUsed) {
+          repairUsed = true
+          const repairedRaw = await repairJsonOnce({
+            client,
+            schemaObject,
+            raw,
+            timeoutMs,
+          })
+          const repairedParsed = parseModelJson(repairedRaw)
+          return schema.parse(repairedParsed)
+        }
         const err: any = new Error('JSON_INVALID')
         err.code = 'JSON_INVALID'
         throw err

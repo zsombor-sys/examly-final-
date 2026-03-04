@@ -102,6 +102,7 @@ export async function POST(req: Request) {
       const baseSystemText = [
         'You are generating study notes from uploaded images.',
         'Use the images as the primary source.',
+        'Answer in Hungarian if Hungarian is requested/detected.',
         `ALL strings MUST be in language: ${finalLanguage}.`,
         'If you cannot see images, return detectedTopic="NO_IMAGES" and minimal notesBlocks explaining you could not read them.',
       ].join('\n')

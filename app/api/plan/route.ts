@@ -826,7 +826,7 @@ export async function POST(req: Request) {
     const extracted = await extractFromImagesWithVision({
       client,
       model: VISION_MODEL,
-      prompt,
+      prompt: 'Analyze the uploaded images and generate study notes and a study plan based on the visible content.',
       images: visionImages,
       requestId,
       retries: 2,
@@ -836,12 +836,6 @@ export async function POST(req: Request) {
 
     const extractLength = String(extracted.extracted_text || '').length
     console.log('vision topic:', String(extracted.topic_guess || '').trim())
-    if (imagesSentToVision > 0 && (!String(extracted.topic_guess || '').trim() || extractLength < 50)) {
-      return NextResponse.json(
-        { error: 'VISION_FAILED' },
-        { status: 400, headers: { 'cache-control': 'no-store' } }
-      )
-    }
     console.log('plan.vision', {
       requestId,
       imagesSelected,

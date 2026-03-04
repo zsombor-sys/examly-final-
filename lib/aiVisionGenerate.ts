@@ -199,8 +199,8 @@ export async function callVisionStructured<T>(params: {
     schemaName,
     schemaObject,
     schema,
-    maxOutputTokens = 900,
-    fallbackShortTokens = 650,
+    maxOutputTokens = 2400,
+    fallbackShortTokens = 1800,
     timeoutMs = DEFAULT_TIMEOUT_MS,
     retries = 2,
   } = params

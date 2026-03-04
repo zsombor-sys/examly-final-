@@ -86,6 +86,7 @@ export async function POST(req: Request) {
   const startedAt = Date.now()
   const requestId = crypto.randomUUID()
   let model = modelForPlan()
+  const maxOutputTokens = 2400
   let imageCount = 0
   let topicLen = 0
 
@@ -161,8 +162,8 @@ export async function POST(req: Request) {
         schemaName: 'plan_generate',
         schemaObject: buildPlanJsonSchema(finalLanguage),
         schema: planOutputSchema,
-        maxOutputTokens: 1100,
-        fallbackShortTokens: 750,
+        maxOutputTokens,
+        fallbackShortTokens: 1800,
         timeoutMs: 45_000,
         retries: 2,
       })
@@ -179,6 +180,7 @@ export async function POST(req: Request) {
         imageCount,
         topicLen,
         openaiModel: model,
+        maxOutputTokens,
         durationMs,
         errorCode: null,
       })
@@ -213,6 +215,7 @@ export async function POST(req: Request) {
       imageCount,
       topicLen,
       openaiModel: model,
+      maxOutputTokens,
       durationMs,
       errorCode: mapped.code,
       message: String(error?.message || ''),

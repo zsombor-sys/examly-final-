@@ -72,7 +72,8 @@ const planSchemaJson = {
   required: ['language', 'detectedTopic', 'plan', 'notesBlocks', 'practice'],
 }
 
-function buildPlanJsonSchema(finalLanguage: 'hu' | 'en') {
+function buildPlanJsonSchema(finalLanguage?: 'hu' | 'en' | null) {
+  if (!finalLanguage) return planSchemaJson
   return {
     ...planSchemaJson,
     properties: {
@@ -139,24 +140,27 @@ export async function POST(req: Request) {
 
       const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY })
       model = modelForPlan()
-      const finalLanguage =
-        input.language === 'hu' || input.language === 'en'
-          ? input.language
-          : resolveRequestedLanguage(input)
-      selectedLanguage = finalLanguage
       const hasImages = input.imageUrls.length > 0
+      const explicitLanguage = input.language === 'hu' || input.language === 'en' ? input.language : null
+      const finalLanguage = explicitLanguage ?? (hasImages ? null : resolveRequestedLanguage(input))
+      if (finalLanguage) selectedLanguage = finalLanguage
 
-      const languageDirective = finalLanguage === 'hu' ? 'Respond ONLY in Hungarian.' : 'Respond ONLY in English.'
+      const languageDirective = finalLanguage
+        ? finalLanguage === 'hu'
+          ? 'Respond ONLY in Hungarian.'
+          : 'Respond ONLY in English.'
+        : 'Detect language from text visible in the uploaded images. Ignore topic text for language detection. Respond ONLY in that detected language (Hungarian or English).'
       const baseSystemText = hasImages
         ? [
             'You are a study assistant.',
             languageDirective,
             'You MUST analyze the uploaded images and generate notes from the visible content.',
             'Images are primary. If topic text conflicts, trust the images.',
+            'Images are hints for topic/structure/keywords. Do not transcribe images verbatim; explain the topic like exam notes.',
             'Do not output generic templates. Be specific and topic-focused.',
             'Return only valid JSON.',
-            'Plan notesMarkdown target length: 2200-3000 characters, concise headings + bullets, no fluff.',
-            `ALL strings MUST be in language: ${finalLanguage}.`,
+            'Plan notesMarkdown target length: 2400-3600 characters with clear headings and bullet points.',
+            `All strings in the output must be in ${finalLanguage ?? 'the detected image language'}.`,
             'If images are unreadable, set detectedTopic="NO_READABLE_CONTENT" and explain briefly in notesBlocks.',
           ].join('\n')
         : [
@@ -164,8 +168,8 @@ export async function POST(req: Request) {
             languageDirective,
             'Do not output generic templates. Be specific and topic-focused.',
             'Return only valid JSON.',
-            'Plan notesMarkdown target length: 2200-3000 characters, concise headings + bullets, no fluff.',
-            `ALL strings MUST be in language: ${finalLanguage}.`,
+            'Plan notesMarkdown target length: 2400-3400 characters with clear headings and bullet points.',
+            `All strings in the output must be in ${finalLanguage}.`,
           ].join('\n')
 
       const userText = hasImages
@@ -196,6 +200,7 @@ export async function POST(req: Request) {
       })
 
       const notesMarkdown = normalizeNotesMarkdown(output.notesBlocks.join('\n\n'))
+      selectedLanguage = output.language
 
       if (CREDITS_PER_GENERATION > 0) {
         await chargeCredits(user.id, CREDITS_PER_GENERATION)
@@ -215,7 +220,7 @@ export async function POST(req: Request) {
 
       return NextResponse.json(
         {
-          language: finalLanguage,
+          language: output.language,
           detectedTopic: output.detectedTopic,
           plan: output.plan,
           notesMarkdown,

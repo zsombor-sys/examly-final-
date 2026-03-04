@@ -3,7 +3,7 @@ import { z } from 'zod'
 import { MAX_IMAGES, MAX_PLAN_PROMPT_CHARS, OPENAI_MODEL } from '@/lib/limits'
 import { detectLanguage, type SupportedLanguage } from '@/lib/language'
 
-const MAX_NOTES_CHARS = 3000
+const MAX_NOTES_CHARS = 4000
 const DEFAULT_TIMEOUT_MS = 45_000
 
 const inputSchema = z.preprocess((raw) => {

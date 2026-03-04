@@ -11,9 +11,9 @@ function extFromMime(type: string) {
   return 'jpg'
 }
 
-export function buildMaterialObjectKey(userId: string, file: File) {
+export function buildMaterialObjectKey(userId: string, folder: string, file: File) {
   const ext = extFromMime(file.type || '')
-  return `materials/${userId}/${crypto.randomUUID()}.${ext}`
+  return `${folder}/${userId}/${crypto.randomUUID()}.${ext}`
 }
 
 function isBucketMissingError(err: any) {
@@ -45,10 +45,10 @@ async function withConcurrency<T, R>(
  */
 export async function uploadFilesToStorage(opts: {
   files: File[]
-  folder: 'plan' | 'vocab'
+  folder: 'plan' | 'vocab' | 'notes'
   maxFiles?: number
 }) {
-  const { files, maxFiles = 40 } = opts
+  const { files, folder, maxFiles = 40 } = opts
 
   if (!supabase) throw new Error('Supabase is not configured')
   const sess = await supabase.auth.getSession()
@@ -61,7 +61,7 @@ export async function uploadFilesToStorage(opts: {
   const bucket = supabase.storage.from('uploads')
 
   const paths = await withConcurrency(list, 3, async (f) => {
-    const path = buildMaterialObjectKey(userId, f)
+    const path = buildMaterialObjectKey(userId, folder, f)
 
     const { data, error } = await bucket.upload(path, f, {
       upsert: false,
@@ -78,4 +78,15 @@ export async function uploadFilesToStorage(opts: {
   })
 
   return paths
+}
+
+export async function createSignedImageUrls(paths: string[], expiresInSeconds = 600) {
+  if (!supabase) throw new Error('Supabase is not configured')
+  const cleanPaths = (paths || []).map((x) => String(x || '').trim()).filter(Boolean)
+  if (!cleanPaths.length) return [] as string[]
+  const { data, error } = await supabase.storage.from('uploads').createSignedUrls(cleanPaths, expiresInSeconds)
+  if (error) throw new Error(error.message)
+  return (data || [])
+    .map((item: any) => String(item?.signedUrl || '').trim())
+    .filter(Boolean)
 }

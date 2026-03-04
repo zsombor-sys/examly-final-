@@ -10,6 +10,7 @@ import ClientAuthGuard from '@/components/ClientAuthGuard'
 import { authedFetch } from '@/lib/authClient'
 import { compressImages } from '@/lib/client/compressImages'
 import { supabase } from '@/lib/supabaseClient'
+import { createSignedImageUrls, uploadFilesToStorage } from '@/lib/uploadClient'
 import { looksHungarian } from '@/lib/language'
 import HScroll from '@/components/HScroll'
 import Pomodoro from '@/components/Pomodoro'
@@ -547,7 +548,7 @@ function Inner({ entitlement }: { entitlement: { credits: number | null; entitle
     if (!userId) throw new Error('Not authenticated')
 
     const list = (files || []).slice(0, MAX_PLAN_IMAGES)
-    if (list.length === 0) return
+    if (list.length === 0) return [] as string[]
 
     const MAX_BYTES = 10 * 1024 * 1024
     for (const f of list) {
@@ -555,6 +556,10 @@ function Inner({ entitlement }: { entitlement: { credits: number | null; entitle
         throw new Error(`File too large (max 10MB): ${f.name}`)
       }
     }
+
+    const compressed = await compressImages(list)
+    const paths = await uploadFilesToStorage({ files: compressed, folder: 'plan', maxFiles: MAX_PLAN_IMAGES })
+    return createSignedImageUrls(paths, 600)
   }
 
   async function handleGenerate() {
@@ -564,47 +569,52 @@ function Inner({ entitlement }: { entitlement: { credits: number | null; entitle
       return
     }
     if (files.length > MAX_PLAN_IMAGES) {
-      setError(`You can upload up to ${MAX_PLAN_IMAGES} files.`)
+      setError(`You can upload up to ${MAX_PLAN_IMAGES} images.`)
       return
     }
-    const cost = CREDITS_PER_GENERATION
     setLoading(true)
     setIsGenerating(true)
     try {
-      await uploadMaterials()
-      const form = new FormData()
+      if (files.length === 0) throw new Error('Nem kaptam meg a képeket')
+      const imageUrls = await uploadMaterials()
       const promptToSend =
         prompt.trim() ||
         (files.length > 0 ? 'Create structured study notes and a study plan based on the uploaded materials.' : '')
-      form.append('topic', promptToSend)
-      form.append('mode', 'plan')
-      form.append('lang', promptToSend ? (looksHungarian(promptToSend) ? 'hu' : 'en') : 'auto')
-      form.append('required_credits', String(cost))
-      const compressed = await compressImages(files.slice(0, MAX_PLAN_IMAGES))
-      for (const file of compressed) {
-        form.append('images', file)
-      }
-
-      const res = await authedFetch('/api/plan/generate', { method: 'POST', body: form })
+      const res = await authedFetch('/api/plan/generate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          topic: promptToSend,
+          imageUrls,
+          language: promptToSend ? (looksHungarian(promptToSend) ? 'hu' : 'en') : 'auto',
+        }),
+      })
       let json = await res.json().catch(() => ({} as any))
       if (!res.ok) {
         const code = json?.error?.code ?? json?.code ?? json?.error
         let message = json?.error?.message ?? json?.details ?? json?.message ?? json?.error
         const prefersHu = looksHungarian(promptToSend)
-        if (code === 'SERVER_CANT_READ_CREDITS') {
-          message = "Server can't read credits (env/RLS)."
-        } else if (code === 'PLANS_SCHEMA_MISMATCH') {
-          message = 'Server plans table schema mismatch. Run latest migrations.'
+        if (res.status === 429 || code === 'RATE_LIMIT') {
+          const retry = Number(json?.error?.retryAfterSeconds)
+          message = Number.isFinite(retry)
+            ? `quota/rate limit. Retry after ~${retry}s.`
+            : 'quota/rate limit. Try again shortly.'
+        } else if (res.status === 504 || code === 'OPENAI_TIMEOUT') {
+          message = prefersHu
+            ? 'Időtúllépés történt. Rövidebb kimenettel próbáld újra.'
+            : 'Request timed out. Retry with shorter output.'
+        } else if (res.status === 409 || code === 'GENERATION_CONFLICT') {
+          message = prefersHu ? 'Generálás folyamatban / konfliktus' : 'Generation in progress / conflict'
         } else if (code === 'INSUFFICIENT_CREDITS') {
           message = prefersHu ? 'Nincs elég kredited ehhez a generáláshoz.' : "You don't have enough credits to generate this."
-        } else if (code === 'PLAN_VISION_INPUT_EMPTY' || code === 'VISION_INPUT_EMPTY') {
-          message = prefersHu ? 'A feltöltött képek nem jutottak el a modellhez.' : 'Uploaded images were not attached to the model input.'
-        } else if (code === 'VISION_EXTRACTION_EMPTY' || code === 'VISION_FAILED') {
-          message = prefersHu ? 'A képekből nem sikerült elég szöveget kinyerni a generáláshoz.' : 'Could not extract enough text from the uploaded images for generation.'
+        } else if (code === 'NO_IMAGES') {
+          message = prefersHu ? 'Nem kaptam meg a képeket' : 'No images received.'
+        } else if (code === 'IMAGES_INACCESSIBLE') {
+          message = prefersHu ? 'A képek nem hozzáférhetők' : 'The images are not accessible.'
         } else if (code === 'MAX_IMAGES_EXCEEDED') {
           message = prefersHu ? `Legfeljebb ${MAX_PLAN_IMAGES} képet tölthetsz fel.` : `You can upload up to ${MAX_PLAN_IMAGES} images.`
-        } else if (code === 'UNAUTHENTICATED') {
-          message = 'Please log in again.'
+        } else if (res.status >= 500) {
+          message = prefersHu ? 'Szerverhiba történt. Próbáld újra.' : 'Server error. Please retry.'
         }
         throw new Error(message ?? `Generation failed (${res.status})`)
       }
@@ -613,46 +623,66 @@ function Inner({ entitlement }: { entitlement: { credits: number | null; entitle
         return
       }
 
-      const serverId = typeof json?.planId === 'string' ? (json.planId as string) : null
-      if (!serverId) throw new Error('Server returned no plan id')
-
-      if (json?.title || json?.plan_blocks || json?.notes_markdown) {
+      if (json?.plan || json?.plan_blocks || json?.notesMarkdown || json?.notes_markdown) {
         setResult({
-          title: typeof json?.title === 'string' ? json.title : null,
+          title: typeof json?.detectedTopic === 'string' ? json.detectedTopic : typeof json?.title === 'string' ? json.title : null,
           language: json?.language === 'hu' ? 'hu' : json?.language === 'en' ? 'en' : null,
-          plan: Array.isArray(json?.plan_blocks) ? { blocks: json.plan_blocks } : null,
-          notes_markdown: typeof json?.notes_markdown === 'string' ? json.notes_markdown : null,
-          practice: Array.isArray(json?.practice_questions)
+          plan: Array.isArray(json?.plan_blocks)
+            ? { blocks: json.plan_blocks }
+            : Array.isArray(json?.plan)
+              ? {
+                  blocks: json.plan.map((x: any) => ({
+                    title: String(x?.title ?? ''),
+                    duration_minutes: Number(x?.minutes ?? 30),
+                    description: Array.isArray(x?.bullets) ? x.bullets.join(' • ') : '',
+                  })),
+                }
+              : null,
+          notes_markdown:
+            typeof json?.notesMarkdown === 'string'
+              ? json.notesMarkdown
+              : typeof json?.notes_markdown === 'string'
+                ? json.notes_markdown
+                : null,
+          practice: Array.isArray(json?.practice)
             ? {
-                questions: json.practice_questions.map((q: any) => ({
-                  q: typeof q === 'string' ? q : String(q?.q ?? ''),
-                  a: typeof q === 'string' ? '' : String(q?.a ?? ''),
-                  explanation: typeof q === 'string' ? '' : String(q?.explanation ?? ''),
+                questions: json.practice.map((q: any) => ({
+                  q: String(q?.q ?? ''),
+                  a: String(q?.a ?? ''),
+                  explanation: '',
                 })),
               }
+            : Array.isArray(json?.practice_questions)
+              ? {
+                  questions: json.practice_questions.map((q: any) => ({
+                    q: String(q?.q ?? ''),
+                    a: String(q?.a ?? ''),
+                    explanation: '',
+                  })),
+                }
             : null,
+          requestId: typeof json?.requestId === 'string' ? json.requestId : null,
         })
       }
 
-      if (json?.fallback) {
-        const rid = getRequestId(json) ?? serverId
-        const msg = typeof json?.errorMessage === 'string' && json.errorMessage.trim()
-          ? json.errorMessage.trim()
-          : 'Generation failed.'
-        setError(`${msg} Request ID: ${rid}`)
+      const localId = crypto.randomUUID()
+      const createdAt = new Date().toISOString()
+      const localResult: PlanResult = {
+        title: String(json?.detectedTopic || json?.title || 'Study plan'),
+        language: json?.language === 'hu' ? 'hu' : 'en',
+        notes_markdown: String(json?.notesMarkdown || json?.notes_markdown || ''),
+        plan: Array.isArray(json?.plan_blocks) ? { blocks: json.plan_blocks } : null,
+        practice: Array.isArray(json?.practice)
+          ? { questions: json.practice.map((q: any) => ({ q: String(q?.q ?? ''), a: String(q?.a ?? ''), explanation: '' })) }
+          : null,
       }
-
-      await loadPlan(serverId)
+      saveLocalPlan(userId, {
+        id: localId,
+        title: localResult.title || 'Study plan',
+        created_at: createdAt,
+        result: localResult,
+      })
       await loadHistory(userId)
-      if (userId) {
-        authedFetch('/api/me')
-          .then((res) => res.json())
-          .then((json2) => {
-            const c2 = Number(json2?.entitlement?.credits)
-            setCredits(Number.isFinite(c2) ? c2 : null)
-          })
-          .catch(() => setCredits(null))
-      }
     } catch (e: any) {
       setError(e?.message ?? 'Error')
     } finally {
@@ -804,17 +834,17 @@ function Inner({ entitlement }: { entitlement: { credits: number | null; entitle
           <label className="mt-3 flex cursor-pointer items-center justify-between gap-3 rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm text-white/70 hover:bg-white/10">
             <span className="inline-flex items-center gap-2">
               <FileUp size={16} />
-              Upload PDFs or photos (handwritten supported).
+              Upload images (handwritten supported).
             </span>
             <input
               type="file"
               className="hidden"
-              accept="application/pdf,image/*"
+              accept="image/*"
               multiple
               onChange={(e) => {
                 const next = Array.from(e.target.files ?? [])
                 if (next.length > MAX_PLAN_IMAGES) {
-                  setError(`You can upload up to ${MAX_PLAN_IMAGES} files.`)
+                  setError(`You can upload up to ${MAX_PLAN_IMAGES} images.`)
                   return
                 } else {
                   setFiles(next)

@@ -1,7 +1,7 @@
 'use client'
 
 import Link from 'next/link'
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { ArrowLeft, Loader2 } from 'lucide-react'
 import AuthGate from '@/components/AuthGate'
 import ClientAuthGuard from '@/components/ClientAuthGuard'
@@ -9,6 +9,7 @@ import MarkdownMath from '@/components/MarkdownMath'
 import { Button, Textarea } from '@/components/ui'
 import { authedFetch } from '@/lib/authClient'
 import { compressImages } from '@/lib/client/compressImages'
+import { createSignedImageUrls, uploadFilesToStorage } from '@/lib/uploadClient'
 import { CREDITS_PER_GENERATION, MAX_IMAGES, MAX_PLAN_PROMPT_CHARS } from '@/lib/limits'
 import { looksHungarian } from '@/lib/language'
 
@@ -30,6 +31,21 @@ function Inner() {
   const [markdown, setMarkdown] = useState('')
   const [characterCount, setCharacterCount] = useState<number | null>(null)
   const [language, setLanguage] = useState<'hu' | 'en'>('en')
+  const NOTES_LOCAL_KEY = 'umenify_notes_v1'
+
+  useEffect(() => {
+    try {
+      const raw = window.localStorage.getItem(NOTES_LOCAL_KEY)
+      if (!raw) return
+      const saved = JSON.parse(raw)
+      if (typeof saved?.markdown === 'string') setMarkdown(saved.markdown)
+      if (typeof saved?.prompt === 'string') setNotesPrompt(saved.prompt)
+      if (saved?.language === 'hu' || saved?.language === 'en') setLanguage(saved.language)
+      if (Number.isFinite(Number(saved?.characterCount))) setCharacterCount(Number(saved.characterCount))
+    } catch {
+      // ignore
+    }
+  }, [])
 
   const ui = useMemo(() => {
     const hu = language === 'hu' || looksHungarian(notesPrompt)
@@ -76,35 +92,75 @@ function Inner() {
       if (trimmed.length > MAX_PLAN_PROMPT_CHARS) {
         throw new Error(`Prompt too long (max ${MAX_PLAN_PROMPT_CHARS} chars).`)
       }
-      if (!trimmed && files.length === 0) {
-        throw new Error(language === 'hu' ? 'Adj meg témát vagy tölts fel legalább egy képet.' : 'Provide a topic or upload at least one image.')
+      if (files.length > MAX_IMAGES) {
+        throw new Error(language === 'hu' ? `Legfeljebb ${MAX_IMAGES} képet tölthetsz fel.` : `You can upload at most ${MAX_IMAGES} images.`)
+      }
+      if (files.length === 0) {
+        throw new Error(language === 'hu' ? 'Nem kaptam meg a képeket' : 'No images received.')
       }
 
-      const fd = new FormData()
-      fd.append('topic', trimmed)
-      fd.append('mode', 'notes')
-      fd.append('lang', trimmed ? (looksHungarian(trimmed) ? 'hu' : 'en') : 'auto')
       const compressed = await compressImages(files.slice(0, MAX_IMAGES))
-      for (const file of compressed) {
-        fd.append('images', file)
+      const paths = await uploadFilesToStorage({ files: compressed, folder: 'notes', maxFiles: MAX_IMAGES })
+      const imageUrls = await createSignedImageUrls(paths, 600)
+      const payload = {
+        topic: trimmed,
+        imageUrls,
+        language: trimmed ? (looksHungarian(trimmed) ? 'hu' : 'en') : 'auto',
       }
 
-      const res = await authedFetch('/api/notes/generate', { method: 'POST', body: fd })
+      const res = await authedFetch('/api/notes/generate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      })
       const json = await res.json().catch(() => ({} as any))
       if (!res.ok) {
-        const code = String(json?.error || '')
+        const code = String(json?.error?.code || json?.error || '')
+        if (res.status === 429 || code === 'RATE_LIMIT') {
+          const retry = Number(json?.error?.retryAfterSeconds)
+          throw new Error(
+            Number.isFinite(retry)
+              ? `quota/rate limit. Retry after ~${retry}s.`
+              : 'quota/rate limit. Try again shortly.'
+          )
+        }
+        if (res.status === 504 || code === 'OPENAI_TIMEOUT') {
+          throw new Error(
+            language === 'hu'
+              ? 'Időtúllépés történt. Rövidebb kimenettel próbáld újra.'
+              : 'Request timed out. Retry with shorter output.'
+          )
+        }
+        if (res.status === 409 || code === 'GENERATION_CONFLICT') {
+          throw new Error(language === 'hu' ? 'Generálás folyamatban / konfliktus' : 'Generation in progress / conflict')
+        }
         if (code === 'INSUFFICIENT_CREDITS') throw new Error(ui.creditsError)
-        if (code === 'VISION_INPUT_EMPTY' || code === 'NOTES_VISION_INPUT_EMPTY') throw new Error(ui.visionError)
-        if (code === 'VISION_EXTRACTION_EMPTY' || code === 'VISION_FAILED') throw new Error(language === 'hu' ? 'A képekből nem sikerült elegendő szöveget kinyerni.' : 'Could not extract enough text from the uploaded images.')
+        if (code === 'NO_IMAGES') throw new Error(language === 'hu' ? 'Nem kaptam meg a képeket' : 'No images received.')
+        if (code === 'IMAGES_INACCESSIBLE') throw new Error(language === 'hu' ? 'A képek nem hozzáférhetők' : 'The images are not accessible.')
         if (code === 'MAX_IMAGES_EXCEEDED') throw new Error(language === 'hu' ? 'Legfeljebb 7 képet tölthetsz fel.' : 'You can upload at most 7 images.')
-        if (code === 'NOTES_TIMEOUT') throw new Error(language === 'hu' ? 'A jegyzetgenerálás időtúllépés miatt megszakadt. Próbáld újra kevesebb képpel.' : 'Notes generation timed out. Try again with fewer images.')
+        if (res.status >= 500) throw new Error(language === 'hu' ? 'Szerverhiba történt. Próbáld újra.' : 'Server error. Please retry.')
         throw new Error(code || 'Failed to generate notes')
       }
 
       const nextLanguage: 'hu' | 'en' = json?.language === 'hu' ? 'hu' : 'en'
       setLanguage(nextLanguage)
-      setMarkdown(String(json?.markdown || ''))
-      setCharacterCount(Number(json?.character_count || 0))
+      const nextMarkdown = String(json?.notesMarkdown || '')
+      setMarkdown(nextMarkdown)
+      setCharacterCount(nextMarkdown.length)
+      try {
+        window.localStorage.setItem(
+          NOTES_LOCAL_KEY,
+          JSON.stringify({
+            prompt: trimmed,
+            markdown: nextMarkdown,
+            language: nextLanguage,
+            characterCount: nextMarkdown.length,
+            detectedTopic: String(json?.detectedTopic || ''),
+          })
+        )
+      } catch {
+        // ignore
+      }
     } catch (e: any) {
       setError(String(e?.message || 'Failed to generate notes'))
     } finally {

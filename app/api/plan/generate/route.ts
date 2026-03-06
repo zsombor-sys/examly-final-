@@ -106,9 +106,9 @@ export async function POST(req: Request) {
     if (input.imageUrls.length > MAX_IMAGES) {
       return NextResponse.json({ error: { code: 'MAX_IMAGES_EXCEEDED', message: `Max ${MAX_IMAGES} images` }, requestId }, { status: 400 })
     }
-    if (input.imageUrls.length === 0 && !input.topic.trim()) {
+    if (!input.topic.trim()) {
       return NextResponse.json(
-        { error: { code: 'MISSING_INPUT', message: 'Adj meg legalább témát vagy tölts fel képet' }, requestId },
+        { error: { code: 'MISSING_TOPIC', message: 'Adj meg témát a terv generálásához.' }, requestId },
         { status: 400 }
       )
     }
@@ -149,18 +149,19 @@ export async function POST(req: Request) {
         ? finalLanguage === 'hu'
           ? 'Respond ONLY in Hungarian.'
           : 'Respond ONLY in English.'
-        : 'Detect language from text visible in the uploaded images. Ignore topic text for language detection. Respond ONLY in that detected language (Hungarian or English).'
+        : 'If uploaded images contain readable text, detect language from images first. If image text is unreadable, detect from topic text. If still unclear, default to Hungarian. Respond ONLY in Hungarian or English.'
       const baseSystemText = hasImages
         ? [
             'You are a study assistant.',
             languageDirective,
-            'You MUST analyze the uploaded images and generate notes from the visible content.',
-            'Images are primary. If topic text conflicts, trust the images.',
-            'Images are hints for topic/structure/keywords. Do not transcribe images verbatim; explain the topic like exam notes.',
+            'Always use the typed topic/instruction as the primary objective.',
+            'Use uploaded images as support material to add concrete facts and context.',
+            'If topic and images conflict, follow the typed topic and use images only as supporting evidence.',
+            'Do not transcribe images verbatim; explain the topic like exam notes.',
             'Do not output generic templates. Be specific and topic-focused.',
             'Return only valid JSON.',
-            'Plan notesMarkdown target length: 2400-3600 characters with clear headings and bullet points.',
-            `All strings in the output must be in ${finalLanguage ?? 'the detected image language'}.`,
+            'Plan notesMarkdown target length: 2500-4000 characters with clear headings and bullet points.',
+            `All strings in the output must be in ${finalLanguage ?? 'the detected language'}.`,
             'If images are unreadable, set detectedTopic="NO_READABLE_CONTENT" and explain briefly in notesBlocks.',
           ].join('\n')
         : [
@@ -168,15 +169,15 @@ export async function POST(req: Request) {
             languageDirective,
             'Do not output generic templates. Be specific and topic-focused.',
             'Return only valid JSON.',
-            'Plan notesMarkdown target length: 2400-3400 characters with clear headings and bullet points.',
+            'Plan notesMarkdown target length: 2500-4000 characters with clear headings and bullet points.',
             `All strings in the output must be in ${finalLanguage}.`,
           ].join('\n')
 
       const userText = hasImages
         ? [
-            'Analyze the uploaded images and generate a study plan + notes + practice based on visible content.',
-            `topic_context: ${input.topic || '(empty)'}`,
-            'Prioritize image content over general knowledge.',
+            'Generate a study plan + notes + practice from the typed topic, using uploaded images as support material.',
+            `topic: ${input.topic || '(empty)'}`,
+            'Use both sources when both are present.',
           ].join('\n')
         : [
             'Generate a study plan + notes + practice from the topic only.',

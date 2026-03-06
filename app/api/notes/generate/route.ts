@@ -108,43 +108,49 @@ export async function POST(req: Request) {
       const explicitLanguage = input.language === 'hu' || input.language === 'en' ? input.language : null
       const finalLanguage = explicitLanguage ?? (hasImages ? null : resolveRequestedLanguage(input))
       if (finalLanguage) selectedLanguage = finalLanguage
+      const hasTopic = input.topic.trim().length > 0
 
       const languageDirective = finalLanguage
         ? finalLanguage === 'hu'
           ? 'Respond ONLY in Hungarian.'
           : 'Respond ONLY in English.'
-        : 'Detect language from text visible in the uploaded images. Ignore topic text for language detection. Respond ONLY in that detected language (Hungarian or English).'
+        : 'If uploaded images contain readable text, detect language from images first. If image text is unreadable, detect from topic text. If still unclear, default to Hungarian. Respond ONLY in Hungarian or English.'
       const baseSystemText = hasImages
         ? [
-            'You are generating study notes from uploaded images.',
+            'You are generating structured study notes.',
             languageDirective,
-            'You MUST analyze the uploaded images and generate notes from the visible content.',
-            'Images are hints for topic/structure/keywords. Do not transcribe images verbatim; explain the topic like exam notes.',
+            'When both topic text and images exist, combine both sources.',
+            'When only images exist, generate notes from image content.',
+            'When only topic exists, generate from topic text.',
+            'Images are support material for structure, facts, and context. Do not transcribe images verbatim; explain the topic like exam notes.',
             'Do not output generic templates. Be specific and topic-focused.',
+            'Expand the topic with correct knowledge and clear explanations.',
+            'Structure notes with sections: title, short explanation, main concepts, key facts, processes, examples (use bullet points where useful).',
             'Return only valid JSON.',
-            'Notes target length: 2600-3800 characters with clear headings and bullet points.',
-            `All strings in the output must be in ${finalLanguage ?? 'the detected image language'}.`,
+            'Notes target length: 2500-4000 characters with clear headings and bullet points.',
+            `All strings in the output must be in ${finalLanguage ?? 'the detected language'}.`,
             'If images are unreadable, set detectedTopic="NO_READABLE_CONTENT" and explain briefly in notesBlocks.',
           ].join('\n')
         : [
             'You are a study assistant. Generate structured study notes and a study plan based only on the provided topic.',
             languageDirective,
             'Do not output generic templates. Be specific and topic-focused.',
+            'Expand the topic with correct knowledge and clear explanations.',
+            'Structure notes with sections: title, short explanation, main concepts, key facts, processes, examples (use bullet points where useful).',
             'Return only valid JSON.',
-            'Notes target length: 2600-3600 characters with clear headings and bullet points.',
+            'Notes target length: 2500-4000 characters with clear headings and bullet points.',
             `All strings in the output must be in ${finalLanguage}.`,
           ].join('\n')
 
       const userText = hasImages
-        ? [
-            'Generate structured study notes from the uploaded images.',
-            `topic_context: ${input.topic || '(empty)'}`,
-            'Prioritize image content over general knowledge.',
-          ].join('\n')
-        : [
-            'Generate structured study notes from the topic only.',
-            `topic: ${input.topic || '(empty)'}`,
-          ].join('\n')
+        ? hasTopic
+          ? [
+              'Generate structured study notes using both the typed topic and uploaded images.',
+              `topic: ${input.topic}`,
+              'Combine both sources and keep the topic focus.',
+            ].join('\n')
+          : ['Generate structured study notes from the uploaded images only.'].join('\n')
+        : ['Generate structured study notes from the topic only.', `topic: ${input.topic || '(empty)'}`].join('\n')
 
       const output = await callVisionStructured({
         client,

@@ -3,7 +3,7 @@ import OpenAI from 'openai'
 import { z } from 'zod'
 import { requireUser } from '@/lib/authServer'
 import { MAX_HOMEWORK_IMAGES, MAX_HOMEWORK_PROMPT_CHARS, OPENAI_MODEL } from '@/lib/limits'
-import { looksHungarianText, pickLanguage, type SupportedLanguage } from '@/lib/language'
+import { looksHungarianText, type SupportedLanguage } from '@/lib/language'
 
 export const runtime = 'nodejs'
 export const maxDuration = 60
@@ -200,7 +200,16 @@ export async function POST(req: Request) {
 
     const anyHungarianTask = tasks.some((t) => looksHungarianText(`${t.title}\n${t.raw_text}`))
     const imageLang = parsed.detected_language as SupportedLanguage
-    const detected_language = pickLanguage(`${subject}\n${tasks.map((t) => `${t.title} ${t.raw_text}`).join('\n')}`, anyHungarianTask ? 'hu' : imageLang)
+    const textCandidate = `${subject}\n${tasks.map((t) => `${t.title} ${t.raw_text}`).join('\n')}`
+    const fallbackFromText = looksHungarianText(textCandidate) ? 'hu' : 'en'
+    const detected_language =
+      anyHungarianTask
+        ? 'hu'
+        : imageLang === 'hu' || imageLang === 'en'
+          ? imageLang
+          : subject.trim()
+            ? fallbackFromText
+            : 'hu'
 
     return NextResponse.json({ tasks, detected_language })
   } catch (error: any) {

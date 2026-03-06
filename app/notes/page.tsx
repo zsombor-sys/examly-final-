@@ -9,6 +9,7 @@ import MarkdownMath from '@/components/MarkdownMath'
 import { Button, Textarea } from '@/components/ui'
 import { authedFetch } from '@/lib/authClient'
 import { compressImages } from '@/lib/client/compressImages'
+import { supabase } from '@/lib/supabaseClient'
 import { createSignedImageUrls, uploadFilesToStorage } from '@/lib/uploadClient'
 import { CREDITS_PER_GENERATION, MAX_IMAGES, MAX_PLAN_PROMPT_CHARS } from '@/lib/limits'
 import { looksHungarian } from '@/lib/language'
@@ -31,11 +32,34 @@ function Inner() {
   const [markdown, setMarkdown] = useState('')
   const [characterCount, setCharacterCount] = useState<number | null>(null)
   const [language, setLanguage] = useState<'hu' | 'en'>('en')
-  const NOTES_LOCAL_KEY = 'umenify_notes_v1'
+  const [userId, setUserId] = useState<string | null>(null)
 
   useEffect(() => {
+    let active = true
+    supabase.auth.getUser().then((res) => {
+      if (!active) return
+      setUserId(res?.data?.user?.id ?? null)
+    })
+    const { data } = supabase.auth.onAuthStateChange((_event, session) => {
+      if (!active) return
+      setUserId(session?.user?.id ?? null)
+    })
+    return () => {
+      active = false
+      data.subscription.unsubscribe()
+    }
+  }, [])
+
+  useEffect(() => {
+    setNotesPrompt('')
+    setFiles([])
+    setError(null)
+    setMarkdown('')
+    setCharacterCount(null)
+    setLanguage('en')
+    if (!userId) return
     try {
-      const raw = window.localStorage.getItem(NOTES_LOCAL_KEY)
+      const raw = window.localStorage.getItem(`umenify_notes_v1:${userId}`)
       if (!raw) return
       const saved = JSON.parse(raw)
       if (typeof saved?.markdown === 'string') setMarkdown(saved.markdown)
@@ -45,7 +69,7 @@ function Inner() {
     } catch {
       // ignore
     }
-  }, [])
+  }, [userId])
 
   const ui = useMemo(() => {
     const hu = language === 'hu' || looksHungarian(notesPrompt)
@@ -95,19 +119,24 @@ function Inner() {
       if (files.length > MAX_IMAGES) {
         throw new Error(language === 'hu' ? `Legfeljebb ${MAX_IMAGES} képet tölthetsz fel.` : `You can upload at most ${MAX_IMAGES} images.`)
       }
-      if (files.length === 0) {
-        throw new Error(language === 'hu' ? 'Nem kaptam meg a képeket' : 'No images received.')
+      if (!trimmed && files.length === 0) {
+        throw new Error(language === 'hu' ? 'Adj meg témát vagy tölts fel képet.' : 'Provide a topic or upload an image.')
       }
 
-      const compressed = await compressImages(files.slice(0, MAX_IMAGES))
-      const paths = await uploadFilesToStorage({ files: compressed, folder: 'notes', maxFiles: MAX_IMAGES })
-      const imageUrls = await createSignedImageUrls(paths, 600)
+      const imageUrls =
+        files.length > 0
+          ? await (async () => {
+              const compressed = await compressImages(files.slice(0, MAX_IMAGES))
+              const paths = await uploadFilesToStorage({ files: compressed, folder: 'notes', maxFiles: MAX_IMAGES })
+              return createSignedImageUrls(paths, 600)
+            })()
+          : []
       const payload = {
         topic: trimmed,
         prompt: trimmed,
         imageUrls,
         images: imageUrls,
-        language: trimmed ? (looksHungarian(trimmed) ? 'hu' : 'en') : 'auto',
+        language: imageUrls.length > 0 ? 'auto' : trimmed ? (looksHungarian(trimmed) ? 'hu' : 'en') : 'auto',
       }
 
       const res = await authedFetch('/api/notes/generate', {
@@ -150,16 +179,18 @@ function Inner() {
       setMarkdown(nextMarkdown)
       setCharacterCount(nextMarkdown.length)
       try {
-        window.localStorage.setItem(
-          NOTES_LOCAL_KEY,
-          JSON.stringify({
-            prompt: trimmed,
-            markdown: nextMarkdown,
-            language: nextLanguage,
-            characterCount: nextMarkdown.length,
-            detectedTopic: String(json?.detectedTopic || ''),
-          })
-        )
+        if (userId) {
+          window.localStorage.setItem(
+            `umenify_notes_v1:${userId}`,
+            JSON.stringify({
+              prompt: trimmed,
+              markdown: nextMarkdown,
+              language: nextLanguage,
+              characterCount: nextMarkdown.length,
+              detectedTopic: String(json?.detectedTopic || ''),
+            })
+          )
+        }
       } catch {
         // ignore
       }

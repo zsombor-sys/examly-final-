@@ -1,7 +1,7 @@
 'use client'
 
 import Link from 'next/link'
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Button, Textarea } from '@/components/ui'
 import MarkdownMath from '@/components/MarkdownMath'
 import { FileUp, Loader2, Trash2, ArrowLeft, Send } from 'lucide-react'
@@ -351,6 +351,7 @@ function Inner({ entitlement }: { entitlement: { credits: number | null; entitle
   const [askError, setAskError] = useState<string | null>(null)
 
   const [userId, setUserId] = useState<string | null>(null)
+  const prevUserIdRef = useRef<string | null>(null)
   const [credits, setCredits] = useState<number | null>(null)
   const [entitlementOk, setEntitlementOk] = useState<boolean | null>(null)
 
@@ -440,6 +441,20 @@ function Inner({ entitlement }: { entitlement: { credits: number | null; entitle
   }
 
   useEffect(() => {
+    const changedUser = prevUserIdRef.current !== userId
+    prevUserIdRef.current = userId
+    if (changedUser) {
+      setPrompt('')
+      setFiles([])
+      setSaved([])
+      setSelectedId(null)
+      setResult(null)
+      setAskAnswer(null)
+      setAskError(null)
+      setAskText('')
+      setError(null)
+      setTab('plan')
+    }
     if (!userId) {
       setSaved([])
       setSelectedId(null)
@@ -564,6 +579,11 @@ function Inner({ entitlement }: { entitlement: { credits: number | null; entitle
 
   async function handleGenerate() {
     setError(null)
+    const trimmedPrompt = prompt.trim()
+    if (!trimmedPrompt) {
+      setError('Adj meg témát a terv generálásához.')
+      return
+    }
     if (prompt.trim().length > MAX_PLAN_PROMPT_CHARS) {
       setError(`Prompt too long (max ${MAX_PLAN_PROMPT_CHARS} characters).`)
       return
@@ -575,11 +595,8 @@ function Inner({ entitlement }: { entitlement: { credits: number | null; entitle
     setLoading(true)
     setIsGenerating(true)
     try {
-      if (files.length === 0) throw new Error('Nem kaptam meg a képeket')
-      const imageUrls = await uploadMaterials()
-      const promptToSend =
-        prompt.trim() ||
-        (files.length > 0 ? 'Create structured study notes and a study plan based on the uploaded materials.' : '')
+      const imageUrls = files.length > 0 ? await uploadMaterials() : []
+      const promptToSend = trimmedPrompt
       const res = await authedFetch('/api/plan/generate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -588,7 +605,7 @@ function Inner({ entitlement }: { entitlement: { credits: number | null; entitle
           prompt: promptToSend,
           imageUrls,
           images: imageUrls,
-          language: promptToSend ? (looksHungarian(promptToSend) ? 'hu' : 'en') : 'auto',
+          language: imageUrls.length > 0 ? 'auto' : promptToSend ? (looksHungarian(promptToSend) ? 'hu' : 'en') : 'auto',
         }),
       })
       let json = await res.json().catch(() => ({} as any))
@@ -752,7 +769,7 @@ function Inner({ entitlement }: { entitlement: { credits: number | null; entitle
     creditsOk &&
     prompt.trim().length <= MAX_PLAN_PROMPT_CHARS &&
     files.length <= MAX_PLAN_IMAGES &&
-    (prompt.trim().length >= 6 || files.length > 0)
+    prompt.trim().length > 0
   const summaryText = getNotesModel(result?.notes ?? result?.notes_json).summary || extractPlanNotesText(result).trim()
   const costEstimate = CREDITS_PER_GENERATION
   const pomodoroPlan = useMemo<DayPlan[]>(() => {

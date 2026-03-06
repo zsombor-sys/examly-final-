@@ -84,6 +84,7 @@ function Inner() {
           selected: 'kiválasztva',
           cost: `Költség: ${CREDITS_PER_GENERATION} kredit / generálás`,
           generate: 'Jegyzet generálása',
+          newNotes: 'Új jegyzet',
           generating: 'Generálás…',
           count: 'Karakterszám',
           noNotes: 'Még nincs generált jegyzet.',
@@ -100,6 +101,7 @@ function Inner() {
           selected: 'selected',
           cost: `Cost: ${CREDITS_PER_GENERATION} credit / generation`,
           generate: 'Generate notes',
+          newNotes: 'New notes',
           generating: 'Generating…',
           count: 'Character count',
           noNotes: 'No generated notes yet.',
@@ -201,6 +203,19 @@ function Inner() {
     }
   }
 
+  function resetNotesState() {
+    setNotesPrompt('')
+    setFiles([])
+    setError(null)
+    setMarkdown('')
+    setCharacterCount(null)
+    try {
+      if (userId) window.localStorage.removeItem(`umenify_notes_v1:${userId}`)
+    } catch {
+      // ignore
+    }
+  }
+
   return (
     <div className="mx-auto max-w-4xl px-4 py-10">
       <div className="flex items-center justify-between">
@@ -239,16 +254,21 @@ function Inner() {
 
         <div className="text-xs text-white/60">{ui.cost}</div>
 
-        <Button onClick={generate} disabled={loading || (!notesPrompt.trim() && files.length === 0)}>
-          {loading ? (
-            <span className="inline-flex items-center gap-2">
-              <Loader2 className="animate-spin" size={16} />
-              {ui.generating}
-            </span>
-          ) : (
-            ui.generate
-          )}
-        </Button>
+        <div className="flex items-center gap-2">
+          <Button onClick={generate} disabled={loading || (!notesPrompt.trim() && files.length === 0)}>
+            {loading ? (
+              <span className="inline-flex items-center gap-2">
+                <Loader2 className="animate-spin" size={16} />
+                {ui.generating}
+              </span>
+            ) : (
+              ui.generate
+            )}
+          </Button>
+          <Button variant="ghost" onClick={resetNotesState} disabled={loading}>
+            {ui.newNotes}
+          </Button>
+        </div>
 
         {error ? <div className="text-sm text-red-400">{error}</div> : null}
         {characterCount != null ? <div className="text-sm text-white/70">{ui.count}: {characterCount}</div> : null}

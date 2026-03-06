@@ -472,6 +472,25 @@ function Inner({ entitlement }: { entitlement: { credits: number | null; entitle
       const json = await res.json().catch(() => ({} as any))
       if (!res.ok) throw new Error(json?.error?.message ?? json?.error ?? 'Failed to load')
       if (json?.plan === null && json?.error?.code === 'NOT_FOUND') {
+        const localHit = loadLocalPlans(userId).find((p) => p.id === id)
+        if (localHit?.result) {
+          setSelectedId(id)
+          setResult(localHit.result)
+          setAskAnswer(null)
+          setAskError(null)
+          setAskText('')
+          setTab('plan')
+          await setCurrentPlan(userId, id)
+          return
+        }
+        if (selectedId === id && result) {
+          setAskAnswer(null)
+          setAskError(null)
+          setAskText('')
+          setTab('plan')
+          await setCurrentPlan(userId, id)
+          return
+        }
         const filtered = saved.filter((p) => p.id !== id)
         setSaved(filtered)
         if (userId) {

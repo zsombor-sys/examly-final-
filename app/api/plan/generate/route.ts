@@ -122,7 +122,9 @@ async function generatePlanNotesMarkdown(params: {
       'Write structured exam-focused study notes.',
       'Do not output JSON.',
       'Output plain markdown only.',
-      'Target length: 2500-4000 characters.',
+      'Write a complete study note of about 3000-4000 characters.',
+      'Do not stop after a short outline.',
+      'Make the note actually useful for studying.',
       'Use clear headings and bullet points where useful.',
       'Include: title, short explanation, main concepts, key facts, processes, examples.',
       hasImages
@@ -138,7 +140,7 @@ async function generatePlanNotesMarkdown(params: {
     const response = await client.responses.create(
       {
         model,
-        max_output_tokens: 2200,
+        max_output_tokens: 2600,
         temperature: 0.2,
         input: [
           {

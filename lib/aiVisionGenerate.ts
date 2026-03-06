@@ -81,7 +81,22 @@ export function resolveRequestedLanguage(input: GenerateInput): SupportedLanguag
 
 export function normalizeNotesMarkdown(markdown: string) {
   const compact = String(markdown || '').trim()
-  return compact.length <= MAX_NOTES_CHARS ? compact : `${compact.slice(0, MAX_NOTES_CHARS - 1).trim()}…`
+  if (compact.length <= MAX_NOTES_CHARS) return compact
+  const slice = compact.slice(0, MAX_NOTES_CHARS)
+  const sentenceBoundary = Math.max(
+    slice.lastIndexOf('. '),
+    slice.lastIndexOf('! '),
+    slice.lastIndexOf('? '),
+    slice.lastIndexOf('\n')
+  )
+  if (sentenceBoundary >= Math.floor(MAX_NOTES_CHARS * 0.7)) {
+    return slice.slice(0, sentenceBoundary + 1).trim()
+  }
+  const wordBoundary = slice.lastIndexOf(' ')
+  if (wordBoundary >= Math.floor(MAX_NOTES_CHARS * 0.7)) {
+    return slice.slice(0, wordBoundary).trim()
+  }
+  return slice.trim()
 }
 
 export async function checkImageUrlsAccessible(imageUrls: string[]) {

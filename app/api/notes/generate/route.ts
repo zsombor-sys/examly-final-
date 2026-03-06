@@ -51,7 +51,7 @@ export async function POST(req: Request) {
   const startedAt = Date.now()
   const requestId = crypto.randomUUID()
   let model = modelForNotes()
-  const maxOutputTokens = 2400
+  const maxOutputTokens = 3200
   let selectedLanguage: 'hu' | 'en' = 'hu'
   let imageCount = 0
   let topicLen = 0
@@ -126,8 +126,12 @@ export async function POST(req: Request) {
             'Do not output generic templates. Be specific and topic-focused.',
             'Expand the topic with correct knowledge and clear explanations.',
             'Structure notes with sections: title, short explanation, main concepts, key facts, processes, examples (use bullet points where useful).',
+            'Write a complete study note of about 3000-4000 characters.',
+            'Do not stop after a short outline.',
+            'Make the note actually useful for studying.',
+            'Aim for 10-12 substantial notesBlocks.',
             'Return only valid JSON.',
-            'Notes target length: 2500-4000 characters with clear headings and bullet points.',
+            'Notes target length: 3000-4000 characters with clear headings and bullet points.',
             `All strings in the output must be in ${finalLanguage ?? 'the detected language'}.`,
             'If images are unreadable, set detectedTopic="NO_READABLE_CONTENT" and explain briefly in notesBlocks.',
           ].join('\n')
@@ -137,8 +141,12 @@ export async function POST(req: Request) {
             'Do not output generic templates. Be specific and topic-focused.',
             'Expand the topic with correct knowledge and clear explanations.',
             'Structure notes with sections: title, short explanation, main concepts, key facts, processes, examples (use bullet points where useful).',
+            'Write a complete study note of about 3000-4000 characters.',
+            'Do not stop after a short outline.',
+            'Make the note actually useful for studying.',
+            'Aim for 10-12 substantial notesBlocks.',
             'Return only valid JSON.',
-            'Notes target length: 2500-4000 characters with clear headings and bullet points.',
+            'Notes target length: 3000-4000 characters with clear headings and bullet points.',
             `All strings in the output must be in ${finalLanguage}.`,
           ].join('\n')
 

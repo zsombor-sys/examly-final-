@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server'
 import OpenAI from 'openai'
+import { z } from 'zod'
 import { requireUser } from '@/lib/authServer'
 import { chargeCredits, getCredits } from '@/lib/credits'
 import { CREDITS_PER_GENERATION, MAX_IMAGES, MAX_PLAN_PROMPT_CHARS } from '@/lib/limits'
@@ -10,7 +11,6 @@ import {
   modelForPlan,
   normalizeNotesMarkdown,
   parseGenerateInput,
-  planOutputSchema,
   resolveRequestedLanguage,
 } from '@/lib/aiVisionGenerate'
 
@@ -47,12 +47,6 @@ const planSchemaJson = {
         required: ['title', 'minutes', 'bullets'],
       },
     },
-    notesBlocks: {
-      type: 'array',
-      minItems: 4,
-      maxItems: 12,
-      items: { type: 'string', minLength: 80, maxLength: 350 },
-    },
     practice: {
       type: 'array',
       minItems: 6,
@@ -69,7 +63,7 @@ const planSchemaJson = {
       },
     },
   },
-  required: ['language', 'detectedTopic', 'plan', 'notesBlocks', 'practice'],
+  required: ['language', 'detectedTopic', 'plan', 'practice'],
 }
 
 function buildPlanJsonSchema(finalLanguage?: 'hu' | 'en' | null) {
@@ -80,6 +74,97 @@ function buildPlanJsonSchema(finalLanguage?: 'hu' | 'en' | null) {
       ...planSchemaJson.properties,
       language: { type: 'string', enum: [finalLanguage] },
     },
+  }
+}
+
+const planStructuredOutputSchema = z.object({
+  language: z.enum(['hu', 'en']),
+  detectedTopic: z.string().min(1).max(200),
+  plan: z
+    .array(
+      z.object({
+        title: z.string().min(1).max(120),
+        minutes: z.number().int().min(10).max(240),
+        bullets: z.array(z.string().min(1).max(180)).min(1).max(8),
+      })
+    )
+    .min(3)
+    .max(10),
+  practice: z
+    .array(
+      z.object({
+        q: z.string().min(1).max(220),
+        a: z.string().min(1).max(220),
+        difficulty: z.enum(['short', 'medium']),
+      })
+    )
+    .min(6)
+    .max(10),
+})
+
+async function generatePlanNotesMarkdown(params: {
+  client: OpenAI
+  model: string
+  requestId: string
+  language: 'hu' | 'en'
+  topic: string
+  imageUrls: string[]
+}) {
+  const { client, model, requestId, language, topic, imageUrls } = params
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), 45_000)
+  try {
+    const hasImages = imageUrls.length > 0
+    const languageDirective = language === 'hu' ? 'Respond ONLY in Hungarian.' : 'Respond ONLY in English.'
+    const systemText = [
+      'You are a study assistant writing notesMarkdown only.',
+      languageDirective,
+      'Write structured exam-focused study notes.',
+      'Do not output JSON.',
+      'Output plain markdown only.',
+      'Target length: 2500-4000 characters.',
+      'Use clear headings and bullet points where useful.',
+      'Include: title, short explanation, main concepts, key facts, processes, examples.',
+      hasImages
+        ? 'Use the typed topic as primary instruction and use uploaded images as support material.'
+        : 'Use the typed topic only.',
+      'Do not transcribe images verbatim; explain and expand clearly.',
+    ].join('\n')
+
+    const userText = hasImages
+      ? `Topic: ${topic}\nUse both topic and images, with topic as primary.`
+      : `Topic: ${topic}\nGenerate notes from topic only.`
+
+    const response = await client.responses.create(
+      {
+        model,
+        max_output_tokens: 2200,
+        temperature: 0.2,
+        input: [
+          {
+            role: 'system',
+            content: [{ type: 'input_text', text: systemText }],
+          },
+          {
+            role: 'user',
+            content: [
+              { type: 'input_text', text: userText },
+              ...imageUrls.map((url) => ({ type: 'input_image' as const, image_url: url, detail: 'auto' as const })),
+            ],
+          },
+        ],
+        metadata: {
+          requestId,
+          stage: 'plan_notes_markdown',
+          imageCount: String(imageUrls.length),
+        },
+      },
+      { signal: controller.signal }
+    )
+
+    return String(response.output_text || '').trim()
+  } finally {
+    clearTimeout(timer)
   }
 }
 
@@ -150,37 +235,34 @@ export async function POST(req: Request) {
           ? 'Respond ONLY in Hungarian.'
           : 'Respond ONLY in English.'
         : 'If uploaded images contain readable text, detect language from images first. If image text is unreadable, detect from topic text. If still unclear, default to Hungarian. Respond ONLY in Hungarian or English.'
-      const baseSystemText = hasImages
+      const structuredSystemText = hasImages
         ? [
             'You are a study assistant.',
             languageDirective,
             'Always use the typed topic/instruction as the primary objective.',
             'Use uploaded images as support material to add concrete facts and context.',
             'If topic and images conflict, follow the typed topic and use images only as supporting evidence.',
-            'Do not transcribe images verbatim; explain the topic like exam notes.',
             'Do not output generic templates. Be specific and topic-focused.',
             'Return only valid JSON.',
-            'Plan notesMarkdown target length: 2500-4000 characters with clear headings and bullet points.',
             `All strings in the output must be in ${finalLanguage ?? 'the detected language'}.`,
-            'If images are unreadable, set detectedTopic="NO_READABLE_CONTENT" and explain briefly in notesBlocks.',
+            'If images are unreadable, still generate from typed topic and set detectedTopic from topic.',
           ].join('\n')
         : [
-            'You are a study assistant. Generate structured study notes and a study plan based only on the provided topic.',
+            'You are a study assistant. Generate a study plan and practice questions based only on the provided topic.',
             languageDirective,
             'Do not output generic templates. Be specific and topic-focused.',
             'Return only valid JSON.',
-            'Plan notesMarkdown target length: 2500-4000 characters with clear headings and bullet points.',
             `All strings in the output must be in ${finalLanguage}.`,
           ].join('\n')
 
-      const userText = hasImages
+      const structuredUserText = hasImages
         ? [
-            'Generate a study plan + notes + practice from the typed topic, using uploaded images as support material.',
+            'Generate a study plan + practice from the typed topic, using uploaded images as support material.',
             `topic: ${input.topic || '(empty)'}`,
             'Use both sources when both are present.',
           ].join('\n')
         : [
-            'Generate a study plan + notes + practice from the topic only.',
+            'Generate a study plan + practice from the topic only.',
             `topic: ${input.topic || '(empty)'}`,
           ].join('\n')
 
@@ -188,20 +270,46 @@ export async function POST(req: Request) {
         client,
         model,
         requestId,
-        systemText: baseSystemText,
-        userText,
+        systemText: structuredSystemText,
+        userText: structuredUserText,
         imageUrls: input.imageUrls,
         schemaName: 'plan_generate',
         schemaObject: buildPlanJsonSchema(finalLanguage),
-        schema: planOutputSchema,
-        maxOutputTokens,
-        fallbackShortTokens: 1800,
+        schema: planStructuredOutputSchema,
+        maxOutputTokens: 1400,
+        fallbackShortTokens: 1000,
         timeoutMs: 45_000,
         retries: 2,
       })
 
-      const notesMarkdown = normalizeNotesMarkdown(output.notesBlocks.join('\n\n'))
       selectedLanguage = output.language
+      let notesMarkdown = ''
+      try {
+        const rawNotes = await generatePlanNotesMarkdown({
+          client,
+          model,
+          requestId,
+          language: output.language,
+          topic: input.topic,
+          imageUrls: input.imageUrls,
+        })
+        notesMarkdown = normalizeNotesMarkdown(rawNotes)
+      } catch (notesErr: any) {
+        console.error('plan.generate.notes_fallback', {
+          requestId,
+          message: String(notesErr?.message || ''),
+        })
+        notesMarkdown =
+          output.language === 'hu'
+            ? 'A részletes jegyzet átmenetileg nem elérhető. A terv és a gyakorló kérdések sikeresen elkészültek.'
+            : 'Detailed notes are temporarily unavailable. The plan and practice questions were generated successfully.'
+      }
+      if (!notesMarkdown.trim()) {
+        notesMarkdown =
+          output.language === 'hu'
+            ? 'A részletes jegyzet most nem érhető el. Próbáld meg újra később.'
+            : 'Detailed notes are currently unavailable. Please try again later.'
+      }
 
       if (CREDITS_PER_GENERATION > 0) {
         await chargeCredits(user.id, CREDITS_PER_GENERATION)

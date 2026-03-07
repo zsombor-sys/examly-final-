@@ -29,7 +29,7 @@ const solveOutputSchema = z.object({
     z.object({
       label: z.string(),
       explain: z.string(),
-      work_latex: z.string().nullable().optional(),
+      work_latex: z.preprocess((value) => (value == null ? '' : String(value)), z.string()).optional().default(''),
       result_latex: z.string().nullable().optional(),
     })
   ),
@@ -49,7 +49,7 @@ const solveSchema = {
         properties: {
           label: { type: 'string' },
           explain: { type: 'string' },
-          work_latex: { type: ['string', 'null'] },
+          work_latex: { type: 'string', description: 'Optional LaTeX formatted working if relevant.' },
           result_latex: { type: ['string', 'null'] },
         },
         required: ['label', 'explain'],
@@ -142,7 +142,7 @@ export async function POST(req: Request) {
         json_schema: {
           name: 'homework_solve',
           schema: solveSchema,
-          strict: true,
+          strict: false,
         },
       },
     })
@@ -155,7 +155,7 @@ export async function POST(req: Request) {
       steps: normalized.steps.map((step, idx) => ({
         label: String(step.label || `Step ${idx + 1}`).trim(),
         explain: String(step.explain || '').trim(),
-        work_latex: step.work_latex == null ? null : String(step.work_latex).trim() || null,
+        work_latex: String(step.work_latex || '').trim(),
         result_latex: step.result_latex == null ? null : String(step.result_latex).trim() || null,
       })),
       final_answer: String(normalized.final_answer || '').trim(),

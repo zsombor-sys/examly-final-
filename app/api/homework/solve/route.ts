@@ -134,7 +134,86 @@ function ensureWorkLatexFallback(parsed: unknown) {
   return root
 }
 
-async function solveOneTask(params: {
+function isStructuredSolveFailure(error: unknown) {
+  const code = String((error as any)?.code || '')
+  const message = String((error as any)?.message || '')
+  return code.includes('JSON_INVALID') || message.includes('JSON_INVALID')
+}
+
+function parseFallbackSteps(text: string, language: 'hu' | 'en') {
+  const raw = String(text || '').replace(/\r/g, '').trim()
+  if (!raw) return null
+
+  const stepChunks = raw
+    .split(/\n(?=(?:Step|Lépés)\s*\d+[:.)-]?)/i)
+    .map((part) => part.trim())
+    .filter(Boolean)
+
+  let chunks = stepChunks
+  if (chunks.length < 2) {
+    chunks = raw
+      .split(/\n{2,}/)
+      .map((part) => part.trim())
+      .filter(Boolean)
+  }
+  if (chunks.length < 2) {
+    const sentences = raw
+      .split(/(?<=[.!?])\s+/)
+      .map((s) => s.trim())
+      .filter(Boolean)
+    if (sentences.length >= 2) {
+      const middle = Math.max(1, Math.floor(sentences.length / 2))
+      chunks = [sentences.slice(0, middle).join(' '), sentences.slice(middle).join(' ')].filter(Boolean)
+    }
+  }
+  if (chunks.length === 0) return null
+
+  const picked = chunks.slice(0, 5).map((part) => part.trim()).filter(Boolean)
+  if (picked.length === 1 && picked[0].length > 100) {
+    const lines = picked[0]
+      .split(/(?<=[.!?])\s+/)
+      .map((s) => s.trim())
+      .filter(Boolean)
+    if (lines.length >= 2) {
+      picked.splice(0, 1, lines.slice(0, Math.ceil(lines.length / 2)).join(' '), lines.slice(Math.ceil(lines.length / 2)).join(' '))
+    }
+  }
+
+  const finalMatch = raw.match(/(?:^|\n)\s*(?:Final answer|Végső válasz|Válasz)\s*[:\-]\s*(.+)$/im)
+  const finalAnswer = String(
+    finalMatch?.[1] ||
+    picked[picked.length - 1] ||
+    ''
+  )
+    .replace(/^(?:Step|Lépés)\s*\d+[:.)-]?\s*/i, '')
+    .trim()
+
+  const labelPrefix = language === 'hu' ? 'Lépés' : 'Step'
+  const steps = picked.slice(0, 5).map((part, idx) => ({
+    label: `${labelPrefix} ${idx + 1}`,
+    explain: part.replace(/^(?:Step|Lépés)\s*\d+[:.)-]?\s*/i, '').trim(),
+    work_latex: '',
+    result_latex: null as string | null,
+  })).filter((step) => step.explain)
+
+  if (steps.length === 0) return null
+  if (steps.length === 1) {
+    const only = steps[0].explain
+    const split = only.split(/(?<=[.!?])\s+/).filter(Boolean)
+    if (split.length >= 2) {
+      steps.splice(
+        0,
+        1,
+        { ...steps[0], explain: split[0].trim() },
+        { label: `${labelPrefix} 2`, explain: split.slice(1).join(' ').trim(), work_latex: '', result_latex: null }
+      )
+    }
+  }
+  if (steps.length < 2) return null
+  return { steps: steps.slice(0, 5), finalAnswer: finalAnswer || steps[steps.length - 1].explain }
+}
+
+async function solveOneTaskStructured(params: {
   client: OpenAI
   task: z.infer<typeof taskSchema>
   style: 'step_by_step'
@@ -206,6 +285,67 @@ async function solveOneTask(params: {
   }
 }
 
+async function solveOneTaskFallbackText(params: {
+  client: OpenAI
+  task: z.infer<typeof taskSchema>
+  style: 'step_by_step'
+  explicitLanguage?: 'hu' | 'en'
+}) {
+  const { client, task, style, explicitLanguage } = params
+  const language = resolveLanguage({
+    explicit: explicitLanguage,
+    prompt: `${task.title}\n${task.raw_text}`,
+  })
+  const langInstruction = language === 'hu' ? 'Respond in Hungarian.' : 'Respond in English.'
+
+  const resp = await client.chat.completions.create({
+    model: OPENAI_MODEL,
+    temperature: 0.3,
+    max_tokens: 1000,
+    messages: [
+      {
+        role: 'system',
+        content: [
+          'You are a teaching assistant solving one homework task.',
+          langInstruction,
+          'Return plain text only. Do NOT return JSON.',
+          'Solve step-by-step in 2-5 steps, then provide one final answer line.',
+          'Format:',
+          language === 'hu' ? 'Lépés 1: ...' : 'Step 1: ...',
+          language === 'hu' ? 'Lépés 2: ...' : 'Step 2: ...',
+          language === 'hu' ? 'Végső válasz: ...' : 'Final answer: ...',
+          'If formulas are needed, use KaTeX-safe LaTeX.',
+          'Never leave unmatched $ or $$ delimiters.',
+          'Keep prose outside math mode.',
+        ].join('\n'),
+      },
+      {
+        role: 'user',
+        content: JSON.stringify({
+          style,
+          task,
+          instruction: 'Solve this exact task clearly.',
+        }),
+      },
+    ],
+  })
+
+  const text = structuredContentToText(resp.choices?.[0]?.message?.content).trim()
+  const parsed = parseFallbackSteps(text, language)
+  if (!parsed) {
+    const err: any = new Error('FALLBACK_EMPTY')
+    err.code = 'FALLBACK_EMPTY'
+    throw err
+  }
+
+  return {
+    language,
+    title: String(task.title || '').trim(),
+    steps: parsed.steps,
+    final_answer: parsed.finalAnswer,
+  }
+}
+
 export async function POST(req: Request) {
   const requestId = crypto.randomUUID()
   try {
@@ -247,7 +387,7 @@ export async function POST(req: Request) {
     for (let idx = 0; idx < tasks.length; idx += 1) {
       const task = tasks[idx]
       try {
-        const solved = await solveOneTask({
+        const solved = await solveOneTaskStructured({
           client,
           task,
           style,
@@ -262,14 +402,47 @@ export async function POST(req: Request) {
           final_answer: solved.final_answer,
         })
       } catch (taskErr: any) {
-        const code = String(taskErr?.code || taskErr?.message || '')
+        const primaryCode = String(taskErr?.code || taskErr?.message || '')
+        const shouldTryFallback = isStructuredSolveFailure(taskErr)
+        let fallbackSucceeded = false
+        if (shouldTryFallback) {
+          try {
+            const fallbackSolved = await solveOneTaskFallbackText({
+              client,
+              task,
+              style,
+              explicitLanguage,
+            })
+            fallbackSucceeded = true
+            results.push({
+              task,
+              solved: true,
+              language: fallbackSolved.language,
+              title: fallbackSolved.title,
+              steps: fallbackSolved.steps,
+              final_answer: fallbackSolved.final_answer,
+            })
+          } catch (fallbackErr: any) {
+            console.error('homework.solve.task_fallback_failed', {
+              requestId,
+              taskIndex: idx,
+              taskId: task.id ?? null,
+              primaryCode,
+              fallbackCode: String(fallbackErr?.code || fallbackErr?.message || ''),
+              fallbackMessage: String(fallbackErr?.message || 'Unknown fallback error'),
+            })
+          }
+        }
         console.error('homework.solve.task_failed', {
           requestId,
           taskIndex: idx,
           taskId: task.id ?? null,
-          code,
+          primaryCode,
+          structuredFailure: shouldTryFallback,
+          fallbackSucceeded,
           message: String(taskErr?.message || 'Unknown error'),
         })
+        if (fallbackSucceeded) continue
         const taskLanguage = resolveLanguage({
           explicit: explicitLanguage,
           prompt: `${task.title}\n${task.raw_text}`,

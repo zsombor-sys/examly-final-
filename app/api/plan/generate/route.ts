@@ -127,6 +127,10 @@ async function generatePlanNotesMarkdown(params: {
       'Make the note actually useful for studying.',
       'Use clear headings and bullet points where useful.',
       'Include: title, short explanation, main concepts, key facts, processes, examples.',
+      'If formulas are needed, output clean KaTeX-compatible LaTeX.',
+      'Never leave unmatched $ or $$.',
+      'Keep prose outside formulas and formulas inside proper LaTeX only.',
+      'For chemistry equations, use render-safe LaTeX (example: $$\\mathrm{C_3H_6 + H_2 \\rightarrow C_3H_8}$$).',
       hasImages
         ? 'Use the typed topic as primary instruction and use uploaded images as support material.'
         : 'Use the typed topic only.',
@@ -245,6 +249,9 @@ export async function POST(req: Request) {
             'Use uploaded images as support material to add concrete facts and context.',
             'If topic and images conflict, follow the typed topic and use images only as supporting evidence.',
             'Do not output generic templates. Be specific and topic-focused.',
+            'If formulas are needed, output clean KaTeX-compatible LaTeX only.',
+            'Never leave unmatched $ or $$ delimiters.',
+            'Keep prose outside math mode and formulas complete.',
             'Return only valid JSON.',
             `All strings in the output must be in ${finalLanguage ?? 'the detected language'}.`,
             'If images are unreadable, still generate from typed topic and set detectedTopic from topic.',
@@ -253,6 +260,9 @@ export async function POST(req: Request) {
             'You are a study assistant. Generate a study plan and practice questions based only on the provided topic.',
             languageDirective,
             'Do not output generic templates. Be specific and topic-focused.',
+            'If formulas are needed, output clean KaTeX-compatible LaTeX only.',
+            'Never leave unmatched $ or $$ delimiters.',
+            'Keep prose outside math mode and formulas complete.',
             'Return only valid JSON.',
             `All strings in the output must be in ${finalLanguage}.`,
           ].join('\n')

@@ -5,6 +5,7 @@ import { requireUser } from '@/lib/authServer'
 import { createServerAdminClient } from '@/lib/supabase/server'
 import { CREDITS_PER_GENERATION, MAX_HOMEWORK_IMAGES, MAX_HOMEWORK_PROMPT_CHARS, OPENAI_MODEL } from '@/lib/limits'
 import { detectLanguage } from '@/lib/language'
+import { parseStructuredJsonWithRepair, structuredContentToText } from '@/lib/structuredJsonSafe'
 
 export const runtime = 'nodejs'
 export const maxDuration = 60
@@ -144,33 +145,6 @@ function toLegacyResponse(tasks: Array<{ title: string; steps: Array<{ explanati
   }
 }
 
-function extractJson(text: string) {
-  const raw = String(text || '').trim()
-  if (!raw) throw new Error('EMPTY')
-  try {
-    return JSON.parse(raw)
-  } catch {
-    const s = raw.indexOf('{')
-    const e = raw.lastIndexOf('}')
-    if (s < 0 || e <= s) throw new Error('PARSE')
-    return JSON.parse(raw.slice(s, e + 1))
-  }
-}
-
-function normalizeContent(content: unknown) {
-  if (typeof content === 'string') return content
-  if (Array.isArray(content)) {
-    return content
-      .map((part: any) => {
-        if (typeof part === 'string') return part
-        if (typeof part?.text === 'string') return part.text
-        return ''
-      })
-      .join('\n')
-  }
-  return ''
-}
-
 export async function POST(req: Request) {
   try {
     const user = await requireUser(req)
@@ -245,6 +219,10 @@ export async function POST(req: Request) {
               'Return only valid JSON.',
               'Set language to "hu" or "en".',
               'Schema: { tasks: [{ title: string, steps: [{ explanation: string, result: string }] }] }',
+              'If formulas are needed, use clean KaTeX-compatible LaTeX only.',
+              'Never leave unmatched $ or $$.',
+              'Keep prose outside math mode and formulas complete.',
+              'Use chemistry equations in render-safe LaTeX when relevant.',
               hasImages
                 ? 'Language priority: detect from readable image text first; if image text is unreadable, use typed topic language; if still unclear, use Hungarian.'
                 : 'Use typed topic language; if unclear, use Hungarian.',
@@ -263,8 +241,12 @@ export async function POST(req: Request) {
           json_schema: { name: 'homework_help', schema: homeworkSchema, strict: true },
         },
       })
-      const raw = normalizeContent(resp.choices?.[0]?.message?.content)
-      return homeworkResponseSchema.parse(extractJson(raw))
+      const raw = structuredContentToText(resp.choices?.[0]?.message?.content)
+      const { value } = await parseStructuredJsonWithRepair({
+        raw,
+        validate: (parsed) => homeworkResponseSchema.parse(parsed),
+      })
+      return value
     }
 
     let parsedJson: z.infer<typeof homeworkResponseSchema>

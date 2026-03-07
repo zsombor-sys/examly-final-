@@ -5,6 +5,7 @@ import { consumeGeneration } from '@/lib/creditsServer'
 import OpenAI from 'openai'
 import { z } from 'zod'
 import { OPENAI_MODEL } from '@/lib/limits'
+import { parseStructuredJsonSafe } from '@/lib/structuredJsonSafe'
 
 export const runtime = 'nodejs'
 
@@ -116,8 +117,9 @@ Return ONLY valid JSON. No extra text.
 
 Math formatting (if the request is math/physics/chemistry):
 - You MAY use KaTeX-compatible LaTeX inside the question/answer/explanation strings.
-- Prefer $$...$$ for multi-step equations and \(...\) for inline.
+- Prefer consistent delimiters and never leave unmatched $ or $$.
 - Use \frac{a}{b} and \sqrt{...}.
+- Keep prose outside formulas and keep formulas syntactically complete.
 - Explanations MUST be step-by-step and end with a clear final answer.
 
 Output keys:
@@ -154,7 +156,7 @@ Rules:
     })
 
     const raw = String(resp.choices?.[0]?.message?.content ?? '').trim()
-    const parsed = testSchema.parse(JSON.parse(raw))
+    const parsed = testSchema.parse(parseStructuredJsonSafe(raw))
     const json = normalizeTest(parsed)
     return NextResponse.json(json)
   } catch (e: any) {

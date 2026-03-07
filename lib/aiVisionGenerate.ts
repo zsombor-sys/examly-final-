@@ -2,6 +2,7 @@ import OpenAI from 'openai'
 import { z } from 'zod'
 import { MAX_IMAGES, MAX_PLAN_PROMPT_CHARS, OPENAI_MODEL } from '@/lib/limits'
 import { detectLanguage, type SupportedLanguage } from '@/lib/language'
+import { parseStructuredJsonWithRepair, structuredContentToText, StructuredJsonError } from '@/lib/structuredJsonSafe'
 
 const MAX_NOTES_CHARS = 4000
 const DEFAULT_TIMEOUT_MS = 45_000
@@ -128,42 +129,6 @@ function shouldRetryShort(error: any) {
   const status = Number(error?.status ?? 0)
   const msg = String(error?.message || '').toLowerCase()
   return status === 408 || status === 504 || msg.includes('timeout') || msg.includes('timed out') || msg.includes('abort')
-}
-
-function parseModelJson(text: string) {
-  const raw = String(text || '')
-  try {
-    return JSON.parse(raw)
-  } catch {
-    const first = raw.indexOf('{')
-    const last = raw.lastIndexOf('}')
-    if (first >= 0 && last > first) {
-      const maybeJson = raw.slice(first, last + 1)
-      try {
-        return JSON.parse(maybeJson)
-      } catch {
-        // fall through
-      }
-    }
-    const err: any = new Error('JSON_INVALID')
-    err.code = 'JSON_INVALID'
-    throw err
-  }
-}
-
-function extractChatMessageText(content: unknown) {
-  if (typeof content === 'string') return content
-  if (Array.isArray(content)) {
-    const joined = content
-      .map((part: any) => {
-        if (typeof part === 'string') return part
-        if (part && typeof part === 'object' && typeof part.text === 'string') return part.text
-        return ''
-      })
-      .join('\n')
-    return joined
-  }
-  return ''
 }
 
 async function repairJsonOnce(params: {
@@ -298,53 +263,36 @@ export async function callVisionStructured<T>(params: {
       )
 
       const raw = String(response.output_text || '')
-      let parsed: unknown
       try {
-        parsed = parseModelJson(raw)
-      } catch {
-        console.error('vision.json.parse_failed', {
+        const parsed = await parseStructuredJsonWithRepair({
+          raw,
+          validate: (value) => schema.parse(value),
+          repairOnce: repairUsed
+            ? undefined
+            : async (malformed) => {
+                repairUsed = true
+                return repairJsonOnce({
+                  client,
+                  schemaName,
+                  schemaObject,
+                  raw: malformed,
+                  timeoutMs,
+                })
+              },
+        })
+        return parsed.value
+      } catch (err: any) {
+        console.error('vision.json.parse_or_schema_failed', {
           requestId,
           branch: 'responses',
+          code: String(err?.code || ''),
           rawPreview: raw.slice(0, 400),
         })
-        if (!repairUsed) {
-          repairUsed = true
-          const repairedRaw = await repairJsonOnce({
-            client,
-            schemaName,
-            schemaObject,
-            raw,
-            timeoutMs,
-          })
-          parsed = parseModelJson(repairedRaw)
-        } else {
-          const err: any = new Error('JSON_INVALID')
-          err.code = 'JSON_INVALID'
-          throw err
+        if (err instanceof StructuredJsonError || String(err?.code || '').includes('JSON_INVALID')) {
+          const jsonErr: any = new Error('JSON_INVALID')
+          jsonErr.code = 'JSON_INVALID'
+          throw jsonErr
         }
-      }
-      try {
-        return schema.parse(parsed)
-      } catch {
-        console.error('vision.json.schema_failed', {
-          requestId,
-          branch: 'responses',
-          rawPreview: raw.slice(0, 400),
-        })
-        if (!repairUsed) {
-          repairUsed = true
-          const repairedRaw = await repairJsonOnce({
-            client,
-            schemaName,
-            schemaObject,
-            raw,
-            timeoutMs,
-          })
-          const repairedParsed = parseModelJson(repairedRaw)
-          return schema.parse(repairedParsed)
-        }
-        const err: any = new Error('JSON_INVALID')
-        err.code = 'JSON_INVALID'
         throw err
       }
     } finally {
@@ -386,55 +334,37 @@ export async function callVisionStructured<T>(params: {
         { signal: controller.signal }
       )
 
-      const raw = extractChatMessageText(response.choices?.[0]?.message?.content)
-      let parsed: unknown
+      const raw = structuredContentToText(response.choices?.[0]?.message?.content)
       try {
-        parsed = parseModelJson(raw)
-      } catch {
-        console.error('vision.json.parse_failed', {
+        const parsed = await parseStructuredJsonWithRepair({
+          raw,
+          validate: (value) => schema.parse(value),
+          repairOnce: repairUsed
+            ? undefined
+            : async (malformed) => {
+                repairUsed = true
+                return repairJsonOnce({
+                  client,
+                  schemaName,
+                  schemaObject,
+                  raw: malformed,
+                  timeoutMs,
+                })
+              },
+        })
+        return parsed.value
+      } catch (err: any) {
+        console.error('vision.json.parse_or_schema_failed', {
           requestId,
           branch: 'chat',
+          code: String(err?.code || ''),
           rawPreview: raw.slice(0, 400),
         })
-        if (!repairUsed) {
-          repairUsed = true
-          const repairedRaw = await repairJsonOnce({
-            client,
-            schemaName,
-            schemaObject,
-            raw,
-            timeoutMs,
-          })
-          parsed = parseModelJson(repairedRaw)
-        } else {
-          const err: any = new Error('JSON_INVALID')
-          err.code = 'JSON_INVALID'
-          throw err
+        if (err instanceof StructuredJsonError || String(err?.code || '').includes('JSON_INVALID')) {
+          const jsonErr: any = new Error('JSON_INVALID')
+          jsonErr.code = 'JSON_INVALID'
+          throw jsonErr
         }
-      }
-
-      try {
-        return schema.parse(parsed)
-      } catch {
-        console.error('vision.json.schema_failed', {
-          requestId,
-          branch: 'chat',
-          rawPreview: raw.slice(0, 400),
-        })
-        if (!repairUsed) {
-          repairUsed = true
-          const repairedRaw = await repairJsonOnce({
-            client,
-            schemaName,
-            schemaObject,
-            raw,
-            timeoutMs,
-          })
-          const repairedParsed = parseModelJson(repairedRaw)
-          return schema.parse(repairedParsed)
-        }
-        const err: any = new Error('JSON_INVALID')
-        err.code = 'JSON_INVALID'
         throw err
       }
     } finally {

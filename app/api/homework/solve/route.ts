@@ -4,6 +4,7 @@ import { z } from 'zod'
 import { requireUser } from '@/lib/authServer'
 import { OPENAI_MODEL } from '@/lib/limits'
 import { resolveLanguage } from '@/lib/language'
+import { parseStructuredJsonWithRepair, structuredContentToText } from '@/lib/structuredJsonSafe'
 
 export const runtime = 'nodejs'
 export const maxDuration = 60
@@ -82,35 +83,6 @@ const solveRepairSchema = {
   required: ['title', 'steps', 'final_answer'],
 }
 
-function extractText(content: unknown) {
-  if (typeof content === 'string') return content
-  if (Array.isArray(content)) {
-    return content
-      .map((part: any) => {
-        if (typeof part === 'string') return part
-        if (typeof part?.text === 'string') return part.text
-        return ''
-      })
-      .join('\n')
-  }
-  return ''
-}
-
-function parseJson(content: unknown) {
-  const raw = extractText(content)
-    .replace(/[\u0000-\u001F]+/g, ' ')
-    .trim()
-  if (!raw) throw new Error('Empty model response')
-  try {
-    return JSON.parse(raw)
-  } catch {
-    const s = raw.indexOf('{')
-    const e = raw.lastIndexOf('}')
-    if (s < 0 || e <= s) throw new Error('Model output was not valid JSON')
-    return JSON.parse(raw.slice(s, e + 1))
-  }
-}
-
 async function repairJsonOnce(client: OpenAI, raw: string) {
   const repaired = await client.chat.completions.create({
     model: OPENAI_MODEL,
@@ -142,7 +114,7 @@ async function repairJsonOnce(client: OpenAI, raw: string) {
       },
     },
   })
-  return parseJson(repaired.choices?.[0]?.message?.content)
+  return String(repaired.choices?.[0]?.message?.content ?? '')
 }
 
 function ensureWorkLatexFallback(parsed: unknown) {
@@ -190,9 +162,10 @@ export async function POST(req: Request) {
             'Explain WHY each step is done (teaching mode).',
             'Keep each step reasonably sized for gated step-by-step UI.',
             'Whenever you write mathematics, you MUST use LaTeX.',
-            'Use ONLY \\( \\) for inline math and \\[ \\] for display math.',
-            'Do NOT use $...$.',
-            'Do NOT write math as plain text.',
+            'Use clean KaTeX-compatible LaTeX.',
+            'Never leave unmatched $ or $$ delimiters.',
+            'Keep prose outside formulas and keep formulas syntactically complete.',
+            'For chemistry equations, use render-safe LaTeX like \\mathrm{C_3H_6 + H_2 \\rightarrow C_3H_8}.',
             langInstruction,
             'Return ONLY valid JSON matching schema.',
           ].join('\n'),
@@ -216,15 +189,12 @@ export async function POST(req: Request) {
       },
     })
 
-    const raw = extractText(resp.choices?.[0]?.message?.content)
-    let parsedRaw: unknown
-    try {
-      parsedRaw = parseJson(raw)
-    } catch {
-      parsedRaw = await repairJsonOnce(client, raw)
-    }
-    parsedRaw = ensureWorkLatexFallback(parsedRaw)
-    const normalized = solveOutputSchema.parse(parsedRaw)
+    const raw = structuredContentToText(resp.choices?.[0]?.message?.content)
+    const { value: normalized } = await parseStructuredJsonWithRepair({
+      raw,
+      validate: (value) => solveOutputSchema.parse(ensureWorkLatexFallback(value)),
+      repairOnce: (malformed) => repairJsonOnce(client, malformed),
+    })
 
     return NextResponse.json({
       language,

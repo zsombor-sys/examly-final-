@@ -1,6 +1,7 @@
 'use client'
 
-import { useMemo, useState } from 'react'
+import { Component, useMemo, useState } from 'react'
+import type { ReactNode } from 'react'
 import Link from 'next/link'
 import AuthGate from '@/components/AuthGate'
 import ClientAuthGuard from '@/components/ClientAuthGuard'
@@ -8,6 +9,8 @@ import { Button, Textarea } from '@/components/ui'
 import { authedFetch } from '@/lib/authClient'
 import { MAX_HOMEWORK_IMAGES } from '@/lib/limits'
 import MarkdownMath from '@/components/MarkdownMath'
+import { BlockMath, InlineMath } from 'react-katex'
+import { sanitizeLatex } from '@/lib/latexSanitizer'
 
 type ExtractedTask = {
   id: string
@@ -21,6 +24,27 @@ type SolvedTask = {
   title: string
   steps: Array<{ label: string; explain: string; work_latex: string | null; result_latex: string | null }>
   final_answer: string
+}
+
+class HomeworkMathBoundary extends Component<{ fallback: ReactNode; children: ReactNode }, { failed: boolean }> {
+  constructor(props: { fallback: ReactNode; children: ReactNode }) {
+    super(props)
+    this.state = { failed: false }
+  }
+
+  static getDerivedStateFromError() {
+    return { failed: true }
+  }
+
+  componentDidCatch(error: unknown) {
+    if (process.env.NODE_ENV !== 'production') {
+      console.warn('Homework KaTeX render failed:', error)
+    }
+  }
+
+  render() {
+    return this.state.failed ? this.props.fallback : this.props.children
+  }
 }
 
 export default function HomeworkPage() {
@@ -99,22 +123,15 @@ function Inner() {
         noFinal: 'No final answer provided.',
       }
 
-  function normalizeHomeworkLatex(s?: string | null) {
-    if (!s) return null
-    let t = s.trim()
-
-    t = t.replace(/\\newline\b/g, '\\\\')
-    t = t.replace(/\\\\(text|sqrt|quad|frac|cdot|times|left|right|alpha|beta|gamma|pi|sin|cos|tan)\b/g, '\\$1')
-    t = t.trim()
-
-    return t || null
-  }
-
   function renderHomeworkMath(latex?: string | null, mode: 'block' | 'inline' = 'block') {
-    const cleaned = normalizeHomeworkLatex(latex)
+    const cleaned = sanitizeLatex(String(latex || ''))
     if (!cleaned) return null
-    const wrapped = mode === 'inline' ? `$${cleaned}$` : `\\[${cleaned}\\]`
-    return <MarkdownMath content={wrapped} />
+    const rawFallback = <pre className="whitespace-pre-wrap text-white/80 text-xs">{String(latex || '')}</pre>
+    return (
+      <HomeworkMathBoundary fallback={rawFallback}>
+        {mode === 'inline' ? <InlineMath math={cleaned} /> : <BlockMath math={cleaned} />}
+      </HomeworkMathBoundary>
+    )
   }
 
   async function extractTasks() {

@@ -185,6 +185,9 @@ export async function POST(req: Request) {
       'Include at least 4 mcq, 4 short, 4 true_false.',
       'Answers must be 1-3 sentences max.',
       'Questions must be based on key_topics.',
+      'If formulas are needed, use clean KaTeX-compatible LaTeX.',
+      'Never leave unmatched $ or $$ delimiters.',
+      'Keep prose outside formulas and formulas syntactically complete.',
     ].join('\n')
     const userMsg = [
       `Subject: ${notes.subject}`,

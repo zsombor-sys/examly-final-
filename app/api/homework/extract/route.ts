@@ -4,6 +4,7 @@ import { z } from 'zod'
 import { requireUser } from '@/lib/authServer'
 import { MAX_HOMEWORK_IMAGES, MAX_HOMEWORK_PROMPT_CHARS, OPENAI_MODEL } from '@/lib/limits'
 import { looksHungarianText, type SupportedLanguage } from '@/lib/language'
+import { parseStructuredJsonWithRepair, structuredContentToText } from '@/lib/structuredJsonSafe'
 
 export const runtime = 'nodejs'
 export const maxDuration = 60
@@ -53,35 +54,6 @@ const extractSchema = {
   required: ['detected_language', 'tasks'],
 }
 
-function extractText(content: unknown) {
-  if (typeof content === 'string') return content
-  if (Array.isArray(content)) {
-    return content
-      .map((part: any) => {
-        if (typeof part === 'string') return part
-        if (typeof part?.text === 'string') return part.text
-        return ''
-      })
-      .join('\n')
-  }
-  return ''
-}
-
-function parseJson(content: unknown) {
-  const raw = extractText(content)
-    .replace(/[\u0000-\u001F]+/g, ' ')
-    .trim()
-  if (!raw) throw new Error('Empty model response')
-  try {
-    return JSON.parse(raw)
-  } catch {
-    const s = raw.indexOf('{')
-    const e = raw.lastIndexOf('}')
-    if (s < 0 || e <= s) throw new Error('Model output was not valid JSON')
-    return JSON.parse(raw.slice(s, e + 1))
-  }
-}
-
 async function repairJsonOnce(client: OpenAI, raw: string) {
   const repaired = await client.chat.completions.create({
     model: OPENAI_MODEL,
@@ -113,7 +85,7 @@ async function repairJsonOnce(client: OpenAI, raw: string) {
       },
     },
   })
-  return parseJson(repaired.choices?.[0]?.message?.content)
+  return String(repaired.choices?.[0]?.message?.content ?? '')
 }
 
 function normalizeBase64Image(input: string): VisionImage {
@@ -224,14 +196,12 @@ export async function POST(req: Request) {
       },
     })
 
-    const raw = extractText(resp.choices?.[0]?.message?.content)
-    let parsedRaw: unknown
-    try {
-      parsedRaw = parseJson(raw)
-    } catch {
-      parsedRaw = await repairJsonOnce(client, raw)
-    }
-    const parsed = extractResponseSchema.parse(parsedRaw)
+    const raw = structuredContentToText(resp.choices?.[0]?.message?.content)
+    const { value: parsed } = await parseStructuredJsonWithRepair({
+      raw,
+      validate: (value) => extractResponseSchema.parse(value),
+      repairOnce: (malformed) => repairJsonOnce(client, malformed),
+    })
 
     const tasks = parsed.tasks.map((task, idx) => ({
       id: String(task.id || `t${idx + 1}`),

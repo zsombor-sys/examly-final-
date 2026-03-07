@@ -7,7 +7,6 @@ import { BRAND_NAME } from '@/lib/brand'
 const links = [
   { href: '/plan', label: 'Plan' },
   { href: '/notes', label: 'Notes' },
-  { href: '/daily', label: 'Daily' },
   { href: '/practice', label: 'Practice' },
   { href: '/homework', label: 'Homework' },
   { href: '/vocab', label: 'Vocab' },

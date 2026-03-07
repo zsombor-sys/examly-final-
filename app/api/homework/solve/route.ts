@@ -60,6 +60,28 @@ const solveSchema = {
   required: ['title', 'steps', 'final_answer'],
 }
 
+const solveRepairSchema = {
+  type: 'object',
+  properties: {
+    title: { type: 'string' },
+    steps: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          label: { type: 'string' },
+          explain: { type: 'string' },
+          work_latex: { type: 'string', description: 'Optional LaTeX working steps' },
+          result_latex: { type: ['string', 'null'] },
+        },
+        required: ['label', 'explain'],
+      },
+    },
+    final_answer: { type: 'string' },
+  },
+  required: ['title', 'steps', 'final_answer'],
+}
+
 function extractText(content: unknown) {
   if (typeof content === 'string') return content
   if (Array.isArray(content)) {
@@ -115,12 +137,23 @@ async function repairJsonOnce(client: OpenAI, raw: string) {
       type: 'json_schema',
       json_schema: {
         name: 'homework_solve_repair',
-        schema: solveSchema,
-        strict: true,
+        schema: solveRepairSchema,
+        strict: false,
       },
     },
   })
   return parseJson(repaired.choices?.[0]?.message?.content)
+}
+
+function ensureWorkLatexFallback(parsed: unknown) {
+  const root: any = parsed && typeof parsed === 'object' ? parsed : {}
+  const steps = Array.isArray(root?.steps) ? root.steps : []
+  for (const step of steps) {
+    if (step && typeof step === 'object' && !step.work_latex) {
+      step.work_latex = ''
+    }
+  }
+  return root
 }
 
 export async function POST(req: Request) {
@@ -190,6 +223,7 @@ export async function POST(req: Request) {
     } catch {
       parsedRaw = await repairJsonOnce(client, raw)
     }
+    parsedRaw = ensureWorkLatexFallback(parsedRaw)
     const normalized = solveOutputSchema.parse(parsedRaw)
 
     return NextResponse.json({

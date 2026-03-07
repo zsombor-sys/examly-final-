@@ -8,7 +8,6 @@ import { Button, Textarea } from '@/components/ui'
 import { authedFetch } from '@/lib/authClient'
 import { MAX_HOMEWORK_IMAGES } from '@/lib/limits'
 import MarkdownMath from '@/components/MarkdownMath'
-import { BlockMath, InlineMath } from 'react-katex'
 
 type ExtractedTask = {
   id: string
@@ -104,10 +103,8 @@ function Inner() {
     if (!s) return null
     let t = s.trim()
 
-    // remove any dollar-based delimiters from model output
-    t = t.replace(/\$\$/g, '')
-    t = t.replace(/\$/g, '')
-    t = t.replace(/\\newline\b/g, ' ')
+    t = t.replace(/\\newline\b/g, '\\\\')
+    t = t.replace(/\\\\(text|sqrt|quad|frac|cdot|times|left|right|alpha|beta|gamma|pi|sin|cos|tan)\b/g, '\\$1')
     t = t.trim()
 
     return t || null
@@ -116,20 +113,8 @@ function Inner() {
   function renderHomeworkMath(latex?: string | null, mode: 'block' | 'inline' = 'block') {
     const cleaned = normalizeHomeworkLatex(latex)
     if (!cleaned) return null
-    if (mode === 'inline') {
-      return (
-        <InlineMath
-          math={cleaned}
-          renderError={() => <span className="font-mono text-white/80">{cleaned}</span>}
-        />
-      )
-    }
-    return (
-      <BlockMath
-        math={cleaned}
-        renderError={() => <pre className="whitespace-pre-wrap font-mono text-white/80">{cleaned}</pre>}
-      />
-    )
+    const wrapped = mode === 'inline' ? `$${cleaned}$` : `\\[${cleaned}\\]`
+    return <MarkdownMath content={wrapped} />
   }
 
   async function extractTasks() {
@@ -312,7 +297,9 @@ function Inner() {
                   >
                     <div className="text-xs text-white/55">Task {index + 1} • {task.type} • conf {(task.confidence * 100).toFixed(0)}%</div>
                     <h3 className="mt-1 text-base font-semibold text-white/90">{task.title}</h3>
-                    <p className="mt-2 text-sm text-white/70 whitespace-pre-wrap">{task.raw_text}</p>
+                    <div className="mt-2 text-sm text-white/70 whitespace-pre-wrap">
+                      <MarkdownMath content={task.raw_text} />
+                    </div>
                   </button>
 
                   <div className="mt-3 flex gap-2">
@@ -337,7 +324,7 @@ function Inner() {
                               <span className="text-white/45">Work:</span>
                               <div className="mt-1">
                                 {renderHomeworkMath(step.work_latex, 'block') ?? (
-                                  <span className="font-mono text-white/80">{String(step.work_latex || '')}</span>
+                                  <MarkdownMath content={String(step.work_latex || '')} />
                                 )}
                               </div>
                             </div>
@@ -346,7 +333,7 @@ function Inner() {
                             <div className="mt-2 text-sm text-white/70">
                               <span className="text-white/45">Result:</span>{' '}
                               {renderHomeworkMath(step.result_latex, 'inline') ?? (
-                                <span className="font-mono text-white/80">{String(step.result_latex || '')}</span>
+                                <MarkdownMath content={String(step.result_latex || '')} />
                               )}
                             </div>
                           ) : null}

@@ -68,7 +68,9 @@ function extractText(content: unknown) {
 }
 
 function parseJson(content: unknown) {
-  const raw = extractText(content).trim()
+  const raw = extractText(content)
+    .replace(/[\u0000-\u001F]+/g, ' ')
+    .trim()
   if (!raw) throw new Error('Empty model response')
   try {
     return JSON.parse(raw)
@@ -78,6 +80,40 @@ function parseJson(content: unknown) {
     if (s < 0 || e <= s) throw new Error('Model output was not valid JSON')
     return JSON.parse(raw.slice(s, e + 1))
   }
+}
+
+async function repairJsonOnce(client: OpenAI, raw: string) {
+  const repaired = await client.chat.completions.create({
+    model: OPENAI_MODEL,
+    temperature: 0,
+    max_tokens: 900,
+    messages: [
+      {
+        role: 'system',
+        content: [
+          'Repair malformed JSON.',
+          'Return ONLY valid JSON matching the schema.',
+          'No markdown, no explanation.',
+        ].join('\n'),
+      },
+      {
+        role: 'user',
+        content: JSON.stringify({
+          schema: extractSchema,
+          malformed_json: raw,
+        }),
+      },
+    ],
+    response_format: {
+      type: 'json_schema',
+      json_schema: {
+        name: 'homework_extract_repair',
+        schema: extractSchema,
+        strict: true,
+      },
+    },
+  })
+  return parseJson(repaired.choices?.[0]?.message?.content)
 }
 
 function normalizeBase64Image(input: string): VisionImage {
@@ -188,7 +224,14 @@ export async function POST(req: Request) {
       },
     })
 
-    const parsed = extractResponseSchema.parse(parseJson(resp.choices?.[0]?.message?.content))
+    const raw = extractText(resp.choices?.[0]?.message?.content)
+    let parsedRaw: unknown
+    try {
+      parsedRaw = parseJson(raw)
+    } catch {
+      parsedRaw = await repairJsonOnce(client, raw)
+    }
+    const parsed = extractResponseSchema.parse(parsedRaw)
 
     const tasks = parsed.tasks.map((task, idx) => ({
       id: String(task.id || `t${idx + 1}`),

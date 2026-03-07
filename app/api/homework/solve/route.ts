@@ -75,7 +75,9 @@ function extractText(content: unknown) {
 }
 
 function parseJson(content: unknown) {
-  const raw = extractText(content).trim()
+  const raw = extractText(content)
+    .replace(/[\u0000-\u001F]+/g, ' ')
+    .trim()
   if (!raw) throw new Error('Empty model response')
   try {
     return JSON.parse(raw)
@@ -85,6 +87,40 @@ function parseJson(content: unknown) {
     if (s < 0 || e <= s) throw new Error('Model output was not valid JSON')
     return JSON.parse(raw.slice(s, e + 1))
   }
+}
+
+async function repairJsonOnce(client: OpenAI, raw: string) {
+  const repaired = await client.chat.completions.create({
+    model: OPENAI_MODEL,
+    temperature: 0,
+    max_tokens: 900,
+    messages: [
+      {
+        role: 'system',
+        content: [
+          'Repair malformed JSON.',
+          'Return ONLY valid JSON matching the schema.',
+          'No markdown, no explanation.',
+        ].join('\n'),
+      },
+      {
+        role: 'user',
+        content: JSON.stringify({
+          schema: solveSchema,
+          malformed_json: raw,
+        }),
+      },
+    ],
+    response_format: {
+      type: 'json_schema',
+      json_schema: {
+        name: 'homework_solve_repair',
+        schema: solveSchema,
+        strict: true,
+      },
+    },
+  })
+  return parseJson(repaired.choices?.[0]?.message?.content)
 }
 
 export async function POST(req: Request) {
@@ -125,7 +161,7 @@ export async function POST(req: Request) {
             'Do NOT use $...$.',
             'Do NOT write math as plain text.',
             langInstruction,
-            'Return JSON only matching schema.',
+            'Return ONLY valid JSON matching schema.',
           ].join('\n'),
         },
         {
@@ -147,7 +183,14 @@ export async function POST(req: Request) {
       },
     })
 
-    const normalized = solveOutputSchema.parse(parseJson(resp.choices?.[0]?.message?.content))
+    const raw = extractText(resp.choices?.[0]?.message?.content)
+    let parsedRaw: unknown
+    try {
+      parsedRaw = parseJson(raw)
+    } catch {
+      parsedRaw = await repairJsonOnce(client, raw)
+    }
+    const normalized = solveOutputSchema.parse(parsedRaw)
 
     return NextResponse.json({
       language,

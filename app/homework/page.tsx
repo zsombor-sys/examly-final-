@@ -8,6 +8,7 @@ import { Button, Textarea } from '@/components/ui'
 import { authedFetch } from '@/lib/authClient'
 import { MAX_HOMEWORK_IMAGES } from '@/lib/limits'
 import MarkdownMath from '@/components/MarkdownMath'
+import { BlockMath, InlineMath } from 'react-katex'
 
 type ExtractedTask = {
   id: string
@@ -110,10 +111,23 @@ function Inner() {
     return t || null
   }
 
-  function renderHomeworkMath(latex?: string | null) {
+  function renderHomeworkMath(latex?: string | null, mode: 'block' | 'inline' = 'block') {
     const cleaned = normalizeHomeworkLatex(latex)
     if (!cleaned) return null
-    return <MarkdownMath content={`\\[${cleaned}\\]`} />
+    if (mode === 'inline') {
+      return (
+        <InlineMath
+          math={cleaned}
+          renderError={() => <span className="font-mono text-white/80">{cleaned}</span>}
+        />
+      )
+    }
+    return (
+      <BlockMath
+        math={cleaned}
+        renderError={() => <pre className="whitespace-pre-wrap font-mono text-white/80">{cleaned}</pre>}
+      />
+    )
   }
 
   async function extractTasks() {
@@ -302,14 +316,20 @@ function Inner() {
                           </div>
                           {step.work_latex ? (
                             <div className="mt-2 text-sm text-white/70">
-                              <span className="text-white/45">Work:</span>{' '}
-                              {renderHomeworkMath(step.work_latex)}
+                              <span className="text-white/45">Work:</span>
+                              <div className="mt-1">
+                                {renderHomeworkMath(step.work_latex, 'block') ?? (
+                                  <span className="font-mono text-white/80">{String(step.work_latex || '')}</span>
+                                )}
+                              </div>
                             </div>
                           ) : null}
                           {step.result_latex ? (
                             <div className="mt-2 text-sm text-white/70">
                               <span className="text-white/45">Result:</span>{' '}
-                              {renderHomeworkMath(step.result_latex)}
+                              {renderHomeworkMath(step.result_latex, 'inline') ?? (
+                                <span className="font-mono text-white/80">{String(step.result_latex || '')}</span>
+                              )}
                             </div>
                           ) : null}
                         </div>

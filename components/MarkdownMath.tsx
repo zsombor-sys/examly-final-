@@ -11,9 +11,11 @@ function normalizeMathDelimiters(input: string) {
   //   inline  \( ... \)
   //   block   \[ ... \]
   // remark-math expects $ / $$, so we convert.
-  const out1 = withoutBadNewline.replace(/\\\[((?:.|\n)*?)\\\]/g, (_, inner) => `\n\n$$${inner}$$\n\n`)
-  const out2 = out1.replace(/\\\(((?:.|\n)*?)\\\)/g, (_, inner) => `$${inner}$`)
-  return out2
+  const out1 = withoutBadNewline.replace(/\\\\\[((?:.|\n)*?)\\\\\]/g, (_, inner) => `\n\n$$${inner}$$\n\n`)
+  const out2 = out1.replace(/\\\\\(((?:.|\n)*?)\\\\\)/g, (_, inner) => `$${inner}$`)
+  const out3 = out2.replace(/\\\[((?:.|\n)*?)\\\]/g, (_, inner) => `\n\n$$${inner}$$\n\n`)
+  const out4 = out3.replace(/\\\(((?:.|\n)*?)\\\)/g, (_, inner) => `$${inner}$`)
+  return out4
 }
 
 export default function MarkdownMath({ content }: { content: string }) {

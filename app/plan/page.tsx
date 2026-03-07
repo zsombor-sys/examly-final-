@@ -720,6 +720,8 @@ function Inner({ entitlement }: { entitlement: { credits: number | null; entitle
         created_at: createdAt,
         result: localResult,
       })
+      setSelectedId(localId)
+      await setCurrentPlan(userId, localId)
       await loadHistory(userId)
     } catch (e: any) {
       setError(e?.message ?? 'Error')
@@ -1034,32 +1036,44 @@ function Inner({ entitlement }: { entitlement: { credits: number | null; entitle
               )}
 
               {/* DAILY */}
-              {tab === 'daily' && result && (
+              {tab === 'daily' && (
                 <div className="grid gap-6 min-w-0 2xl:grid-cols-[minmax(0,1fr)_360px]">
                   <aside className="order-1 w-full shrink-0 self-start 2xl:order-2 2xl:w-[360px] 2xl:sticky 2xl:top-6">
-                    <Pomodoro dailyPlan={pomodoroPlan} />
+                    <Pomodoro dailyPlan={result ? pomodoroPlan : []} />
                   </aside>
 
                   <div className="order-2 min-w-0 space-y-6 2xl:order-1">
                     <section className="w-full rounded-3xl border border-white/10 bg-white/[0.02] p-5 min-w-0 overflow-hidden">
                       <div className="text-xs uppercase tracking-[0.18em] text-white/55">{uiText.daily}</div>
-                      <div className="mt-3 space-y-4 text-sm text-white/80">
-                        {getDailySchedule(result).length > 0 ? (
-                          getDailySchedule(result).map((day, i) => (
-                            <div key={`day-${day.day}-${i}`} className="rounded-2xl border border-white/10 bg-black/30 px-4 py-3">
-                              <div className="text-white/90">{day.label}</div>
-                              <div className="mt-2 space-y-2">
-                                {day.blocks.map((block, bi) => (
-                                  <div key={`db-${i}-${bi}`} className="rounded-xl border border-white/10 bg-black/20 px-3 py-2">
-                                    <div className="text-white/85">{block.start_time} - {block.end_time} • {block.title}</div>
-                                    {block.details ? <div className="mt-1 text-white/65">{block.details}</div> : null}
-                                  </div>
-                                ))}
+                      {!result ? (
+                        <div className="mt-3 rounded-2xl border border-white/10 bg-black/30 px-4 py-3 text-sm text-white/70">
+                          {uiLang === 'hu' ? 'Előbb generálj egy tanulási tervet.' : 'Generate a study plan first.'}
+                        </div>
+                      ) : (
+                        <div className="mt-3 space-y-4 text-sm text-white/80">
+                          {getDailySchedule(result).length > 0 ? (
+                            getDailySchedule(result).map((day, i) => (
+                              <div key={`day-${day.day}-${i}`} className="rounded-2xl border border-white/10 bg-black/30 px-4 py-3">
+                                <div className="text-white/90">{day.label}</div>
+                                <div className="mt-2 space-y-2">
+                                  {day.blocks.map((block, bi) => (
+                                    <div key={`db-${i}-${bi}`} className="rounded-xl border border-white/10 bg-black/20 px-3 py-2">
+                                      <div className="text-white/85">{block.start_time} - {block.end_time} • {block.title}</div>
+                                      {block.details ? <div className="mt-1 text-white/65">{block.details}</div> : null}
+                                    </div>
+                                  ))}
+                                </div>
+                              </div>
+                            ))
+                          ) : (
+                            <div className="rounded-2xl border border-white/10 bg-black/30 px-4 py-3">
+                              <div className="text-white/70">
+                                {uiLang === 'hu' ? 'Még nincs napi ütemezés ehhez a tervhez.' : 'No daily schedule available for this plan yet.'}
                               </div>
                             </div>
-                          ))
-                        ) : null}
-                      </div>
+                          )}
+                        </div>
+                      )}
                     </section>
                   </div>
                 </div>

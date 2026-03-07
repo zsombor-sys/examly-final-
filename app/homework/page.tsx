@@ -63,6 +63,7 @@ function Inner() {
         extract: 'Feladatok kinyerése',
         extracting: 'Kinyerés…',
         solveAll: 'Összes feladat megoldása',
+        newHomework: 'Új házifeladat',
         solvingAll: 'Összes megoldása…',
         detected: 'Észlelt feladatok',
         solved: 'Megoldva',
@@ -84,6 +85,7 @@ function Inner() {
         extract: 'Extract tasks',
         extracting: 'Extracting…',
         solveAll: 'Solve all tasks',
+        newHomework: 'New homework',
         solvingAll: 'Solving all…',
         detected: 'Detected tasks',
         solved: 'Solved',
@@ -227,6 +229,19 @@ function Inner() {
     }
   }
 
+  function resetHomeworkFlow() {
+    setSubjectHint('')
+    setFiles([])
+    setTasks([])
+    setSolutions({})
+    setExpandedTaskId(null)
+    setStepProgress({})
+    setError(null)
+    setSolvingTaskId(null)
+    setExtractLoading(false)
+    setSolveAllLoading(false)
+  }
+
   return (
     <div className="mx-auto max-w-5xl px-4 py-10 space-y-6">
       <Link href="/plan" className="text-sm text-white/70 hover:text-white">{ui.back}</Link>
@@ -265,6 +280,9 @@ function Inner() {
           </Button>
           <Button variant="ghost" onClick={solveAllTasks} disabled={solveAllLoading || extractLoading || tasks.length === 0}>
             {solveAllLoading ? ui.solvingAll : ui.solveAll}
+          </Button>
+          <Button variant="ghost" onClick={resetHomeworkFlow} disabled={extractLoading || solveAllLoading || !!solvingTaskId}>
+            {ui.newHomework}
           </Button>
         </div>
 

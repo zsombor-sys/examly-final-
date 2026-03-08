@@ -5,40 +5,123 @@ export const metadata = {
 
 const QA = [
   {
+    q: 'What is Umenify?',
+    a: `Umenify is a study assistant app that helps you turn short topic prompts and uploaded materials into study plans, notes, practice questions, and homework help.`
+  },
+  {
     q: 'How do I start?',
-    a: `Create an account, then pick a plan. After that go to **Plan** and describe your exam (date, topic, level). Optionally upload PDFs or photos. Click **Generate**.`
+    a: `Type a short description of what you need, for example:
+- “I have a logarithms test tomorrow”
+- “World War II summary”
+- “Chemistry: aldehydes and ketones”
+
+Then choose the feature that matches your goal:
+- Plan for a study plan
+- Notes for full study notes
+- Practice for quick questions
+- Homework for task extraction and solving
+
+You can also upload images in supported sections to improve the result.`
   },
   {
     q: 'What does Plan do?',
-    a: `Plan creates a realistic day-by-day schedule with focus blocks and breaks, plus study notes and flashcards from your material.`
+    a: `Plan creates a study plan from your topic and, if you upload images, from your study material too.
+
+A Plan can include:
+- timed study blocks
+- related study notes
+- practice questions
+- a Daily view inside the generated plan
+
+Plan works best when you describe:
+- what the exam is about
+- when it will happen
+- and optionally upload material images`
   },
   {
-    q: 'What is Practice?',
-    a: `Practice generates exam-style questions (15–20). You answer first, then the app checks your answers and explains mistakes.`
+    q: 'What does Notes do?',
+    a: `Notes creates full study notes from:
+- text only
+- images only
+- or text + images together
+
+The goal is to give you a useful, readable study note, not just a rough outline.`
+  },
+  {
+    q: 'What does Practice do?',
+    a: `Practice generates topic-based questions so you can quickly test what you know and review weak points.`
+  },
+  {
+    q: 'What does Homework do?',
+    a: `Homework can detect tasks from an uploaded image and help solve them step by step.
+
+Current rules:
+- maximum 1 image upload
+- maximum 4 extracted tasks from that image
+- solving all tasks at once applies to at most those 4 tasks
+
+Homework is meant for task recognition, breakdown, and guided solving.`
   },
   {
     q: 'What is Vocab?',
-    a: `Vocab turns a word list (or a photo) into **flip flashcards** and quizzes. You can swap direction (e.g., EN → HU or HU → EN).`
+    a: `Vocab is for studying words, concepts, and short definitions in a faster, more memory-friendly way.`
   },
   {
-    q: 'Plans & limits (important)',
-    a: `**Free (trial):** 10 generations for **48 hours**, **one-time only** per account. Activation requires **full name + email + phone**.
+    q: 'What is Guide?',
+    a: `Guide is a quick help page that explains what each part of the app does and when to use it.`
+  },
+  {
+    q: 'When should I upload images?',
+    a: `Uploading images helps when you have:
+- textbook pages
+- handwritten notes
+- worksheets
+- or any material you want the AI to read directly
 
-**Pro:** 20 generations for **3490 Ft** (≈ €8.9). After you buy Pro once, Umenify can **auto-recharge** another 20 when you run out (best-effort, some banks may require confirmation).`
+If you do not have images, a short topic prompt is often still enough.`
   },
   {
-    q: 'What counts as 1 generation?',
-    a: `Any AI request:
+    q: 'What counts as 1 credit?',
+    a: `In general, one full generation counts as 1 credit.
 
-- Creating a Plan
-- Creating a Practice test
-- Creating a Vocab set
-- Asking the tutor (Ask tab)
-- Generating audio (text-to-speech)`
+Examples include:
+- generating a Plan
+- generating Notes
+- generating Practice questions
+- processing Homework
+- generating a Vocab set`
   },
   {
-    q: 'Why can\'t I use the app without logging in?',
-    a: `Because credits and free usage are stored **server-side**. This prevents “edit localStorage” tricks and keeps billing fair.`
+    q: 'How do I get better results?',
+    a: `The more specific your prompt is, the better the result will usually be.
+
+Better prompts:
+- “I have a logarithms test tomorrow”
+- “Chemistry: aldehydes and ketones”
+- “World War II summary”
+
+Worse prompts:
+- “help”
+- “study”
+- “biology”`
+  },
+  {
+    q: 'Why do I need to log in?',
+    a: `Your credits, history, and generated content are tied to your account, so the app works properly when you are logged in.`
+  },
+  {
+    q: 'What should I do if the result is not good enough?',
+    a: `Try one or more of these:
+- make the topic more specific
+- upload a clearer image
+- generate again
+- switch to a different feature if your goal is different
+
+For example:
+- use Plan for structure
+- use Notes for long explanations
+- use Practice for checking yourself
+- use Homework for task solving`
   },
 ]
 

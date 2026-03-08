@@ -32,11 +32,16 @@ export async function POST(req: Request) {
         return NextResponse.json({ error: 'Payment not completed' }, { status: 402 })
       }
 
-      const userId =
-        (session.client_reference_id ? String(session.client_reference_id) : '') ||
-        (session.metadata?.user_id ? String(session.metadata.user_id) : '')
+      const userId = session.metadata?.userId || session.client_reference_id || null
+      const usedClientReferenceId = !session.metadata?.userId && Boolean(session.client_reference_id)
+      console.log('stripe webhook user resolved', {
+        event_id: event.id,
+        session_id: session.id,
+        resolved_userId: userId,
+        used_client_reference_id: usedClientReferenceId,
+      })
       if (!userId) {
-        return NextResponse.json({ error: 'Missing user id' }, { status: 400 })
+        return NextResponse.json({ error: 'Missing userId in Stripe session' }, { status: 400 })
       }
 
       const creditsRaw = Number.parseInt(process.env.STRIPE_CREDITS_PER_PURCHASE ?? '20', 10)
@@ -56,7 +61,14 @@ export async function POST(req: Request) {
           },
           { onConflict: 'id' }
         )
-      if (upErr) throw upErr
+      if (upErr) {
+        console.error('stripe webhook profile upsert failed', {
+          event_id: event.id,
+          userId,
+          supabase_error: upErr,
+        })
+        throw upErr
+      }
 
       console.log('stripe webhook processed', {
         session_id: session.id,
@@ -91,17 +103,71 @@ export async function POST(req: Request) {
           p_user_id: userId,
           p_amount: credits,
         })
-        if (!rpcErr) updated = true
-      } catch {
+        if (!rpcErr) {
+          updated = true
+          console.log('stripe webhook credits update success', {
+            event_id: event.id,
+            userId,
+            mode: 'rpc_increment_credits',
+          })
+        } else {
+          console.error('stripe webhook credits update failed', {
+            event_id: event.id,
+            userId,
+            mode: 'rpc_increment_credits',
+            supabase_error: rpcErr,
+          })
+        }
+      } catch (rpcE: any) {
+        console.error('stripe webhook credits update failed', {
+          event_id: event.id,
+          userId,
+          mode: 'rpc_increment_credits',
+          supabase_error: rpcE,
+        })
         updated = false
       }
       if (!updated) {
-        const { data: row } = await sb.from('profiles').select('credits').eq('id', userId).maybeSingle()
+        const { data: row, error: rowErr } = await sb.from('profiles').select('credits').eq('id', userId).maybeSingle()
+        if (rowErr) {
+          console.error('stripe webhook profile lookup failed', {
+            event_id: event.id,
+            userId,
+            supabase_error: rowErr,
+          })
+          throw rowErr
+        }
+        console.log('stripe webhook profile lookup', {
+          event_id: event.id,
+          userId,
+          success: Boolean(row),
+        })
         if (!row) {
           throw new Error(`Profile not found for user id: ${userId}`)
         }
         const next = Number(row?.credits ?? 0) + credits
-        await sb.from('profiles').update({ credits: next }).eq('id', userId)
+        const { error: updErr } = await sb.from('profiles').update({ credits: next }).eq('id', userId)
+        if (updErr) {
+          console.error('stripe webhook credits update failed', {
+            event_id: event.id,
+            userId,
+            mode: 'profiles_update',
+            supabase_error: updErr,
+          })
+          throw updErr
+        }
+        console.log('stripe webhook credits update success', {
+          event_id: event.id,
+          userId,
+          mode: 'profiles_update',
+        })
+      } else {
+        console.log('stripe webhook profile lookup', {
+          event_id: event.id,
+          userId,
+          success: null,
+          skipped: true,
+        })
       }
 
       console.log('stripe webhook processed', {

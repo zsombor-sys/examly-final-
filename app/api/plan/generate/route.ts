@@ -14,6 +14,7 @@ import {
   parseGenerateInput,
   resolveRequestedLanguage,
 } from '@/lib/aiVisionGenerate'
+import { parseStructuredJsonWithRepair, structuredContentToText } from '@/lib/structuredJsonSafe'
 
 export const runtime = 'nodejs'
 export const maxDuration = 120
@@ -280,6 +281,104 @@ async function generatePlanPractice(params: {
   })
 }
 
+async function repairStep1JsonOnce(params: { client: OpenAI; model: string; raw: string; requestId: string }) {
+  const { client, model, raw, requestId } = params
+  const response = await client.responses.create({
+    model,
+    max_output_tokens: 900,
+    temperature: 0,
+    input: [
+      {
+        role: 'system',
+        content: [{ type: 'input_text', text: 'Fix this into valid JSON only. Return JSON only.' }],
+      },
+      {
+        role: 'user',
+        content: [
+          {
+            type: 'input_text',
+            text: [
+              'Target JSON shape:',
+              '{"language":"hu|en","detectedTopic":"string","plan":[{"title":"string","minutes":number,"summary":"string"}]}',
+              'Malformed JSON:',
+              String(raw || ''),
+            ].join('\n\n'),
+          },
+        ],
+      },
+    ],
+    metadata: { requestId, stage: 'plan_step1_repair' },
+  })
+  return String(response.output_text || '').trim()
+}
+
+async function generatePlanStep1TextJson(params: {
+  client: OpenAI
+  model: string
+  requestId: string
+  systemText: string
+  userText: string
+  imageUrls: string[]
+}) {
+  const { client, model, requestId, systemText, userText, imageUrls } = params
+  const response = await client.responses.create({
+    model,
+    max_output_tokens: 900,
+    temperature: 0.2,
+    input: [
+      {
+        role: 'system',
+        content: [{ type: 'input_text', text: systemText }],
+      },
+      {
+        role: 'user',
+        content: [
+          { type: 'input_text', text: userText },
+          ...imageUrls.map((url) => ({ type: 'input_image' as const, image_url: url, detail: 'auto' as const })),
+        ],
+      },
+    ],
+    metadata: { requestId, stage: 'plan_step1_text_json', imageCount: String(imageUrls.length) },
+  })
+  const raw = String(response.output_text || '').trim() || structuredContentToText((response as any)?.output)
+  const { value } = await parseStructuredJsonWithRepair({
+    raw,
+    validate: (parsed) => planStructuredOutputSchema.parse(parsed),
+    repairOnce: (malformed) => repairStep1JsonOnce({ client, model, raw: malformed, requestId }),
+  })
+  return value
+}
+
+function emergencyFallbackPlan(params: {
+  language: 'hu' | 'en'
+  topic: string
+  detectedTopic: string
+}): z.infer<typeof planStructuredOutputSchema> {
+  const { language, topic, detectedTopic } = params
+  const hu = language === 'hu'
+  const cleanTopic = (topic || detectedTopic || '').trim()
+  const baseTopic = cleanTopic || (hu ? 'Tananyag' : 'Study topic')
+  const plan = hu
+    ? [
+        { title: `Gyors áttekintés: ${baseTopic}`, minutes: 30, summary: 'Olvasd át a kulcsfogalmakat és jelöld a nehéz részeket.' },
+        { title: 'Mélyebb megértés', minutes: 40, summary: 'Dolgozd fel a fő összefüggéseket rövid jegyzetpontokkal.' },
+        { title: 'Feladatgyakorlás', minutes: 35, summary: 'Oldj meg néhány célzott feladatot és ellenőrizd a hibákat.' },
+        { title: 'Rövid ismétlés', minutes: 20, summary: 'Foglald össze a lényeget és írd le a legfontosabb tényeket.' },
+      ]
+    : [
+        { title: `Quick overview: ${baseTopic}`, minutes: 30, summary: 'Review key concepts and mark the difficult parts.' },
+        { title: 'Focused understanding', minutes: 40, summary: 'Work through the core relationships with short study notes.' },
+        { title: 'Targeted practice', minutes: 35, summary: 'Solve a few focused tasks and check common mistakes.' },
+        { title: 'Final recap', minutes: 20, summary: 'Summarize the essentials and keep a short final checklist.' },
+      ]
+
+  return {
+    language,
+    detectedTopic: cleanTopic || (hu ? 'Általános tananyag' : 'General study topic'),
+    plan: plan.slice(0, 4),
+  }
+}
+
 export async function POST(req: Request) {
   const startedAt = Date.now()
   const requestId = crypto.randomUUID()
@@ -360,7 +459,8 @@ export async function POST(req: Request) {
             'If formulas are needed, output clean KaTeX-compatible LaTeX only.',
             'Never leave unmatched $ or $$ delimiters.',
             'Keep prose outside math mode and formulas complete.',
-            'Return only valid JSON.',
+            'Return ONLY valid minified JSON. No markdown. No explanation.',
+            'JSON shape: {"language":"hu|en","detectedTopic":"string","plan":[{"title":"string","minutes":number,"summary":"string"}]}',
             `All strings in the output must be in ${finalLanguage ?? 'the detected language'}.`,
             'If images are unreadable, still generate from typed topic and set detectedTopic from topic.',
           ].join('\n')
@@ -373,7 +473,8 @@ export async function POST(req: Request) {
             'If formulas are needed, output clean KaTeX-compatible LaTeX only.',
             'Never leave unmatched $ or $$ delimiters.',
             'Keep prose outside math mode and formulas complete.',
-            'Return only valid JSON.',
+            'Return ONLY valid minified JSON. No markdown. No explanation.',
+            'JSON shape: {"language":"hu|en","detectedTopic":"string","plan":[{"title":"string","minutes":number,"summary":"string"}]}',
             `All strings in the output must be in ${finalLanguage}.`,
           ].join('\n')
 
@@ -382,29 +483,24 @@ export async function POST(req: Request) {
             'Generate a study plan from the typed topic, using uploaded images as support material.',
             `topic: ${input.topic || '(empty)'}`,
             'Use both sources when both are present.',
+            'Each block must be concise: title, minutes, summary (one sentence).',
           ].join('\n')
         : [
             'Generate a study plan from the topic only.',
             `topic: ${input.topic || '(empty)'}`,
+            'Each block must be concise: title, minutes, summary (one sentence).',
           ].join('\n')
 
       const step1Start = Date.now()
       let output: z.infer<typeof planStructuredOutputSchema>
       try {
-        output = await callVisionStructured({
+        output = await generatePlanStep1TextJson({
           client,
           model,
           requestId,
           systemText: structuredSystemText,
           userText: structuredUserText,
           imageUrls: input.imageUrls,
-          schemaName: 'plan_generate',
-          schemaObject: buildPlanJsonSchema(finalLanguage),
-          schema: planStructuredOutputSchema,
-          maxOutputTokens: 900,
-          fallbackShortTokens: 700,
-          timeoutMs: 45_000,
-          retries: 2,
         })
         console.log('plan.generate.step1.success', {
           requestId,
@@ -412,13 +508,33 @@ export async function POST(req: Request) {
           outputLength: JSON.stringify(output).length,
         })
       } catch (step1Err: any) {
-        console.error('plan.generate.step1.failed', {
+        console.error('plan.generate.step1.primary_failed', {
           requestId,
           durationMs: Date.now() - step1Start,
           code: String(step1Err?.code || ''),
           message: String(step1Err?.message || ''),
         })
-        throw step1Err
+        try {
+          const fallbackLanguage = (finalLanguage ?? resolveRequestedLanguage(input)) as 'hu' | 'en'
+          output = emergencyFallbackPlan({
+            language: fallbackLanguage,
+            topic: input.topic,
+            detectedTopic: input.topic,
+          })
+          console.log('plan.generate.step1.fallback_success', {
+            requestId,
+            durationMs: Date.now() - step1Start,
+            outputLength: JSON.stringify(output).length,
+          })
+        } catch (fallbackErr: any) {
+          console.error('plan.generate.step1.failed', {
+            requestId,
+            durationMs: Date.now() - step1Start,
+            code: String(fallbackErr?.code || ''),
+            message: String(fallbackErr?.message || ''),
+          })
+          throw step1Err
+        }
       }
 
       selectedLanguage = output.language

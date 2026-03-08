@@ -49,26 +49,63 @@ export async function POST(req: Request) {
       const email =
         session.customer_details?.email ||
         (typeof session.customer_email === 'string' ? session.customer_email : null)
+      const stripePhone =
+        session.customer_details?.phone && typeof session.customer_details.phone === 'string'
+          ? session.customer_details.phone
+          : null
 
       const sb = supabaseAdmin
-      const { error: upErr } = await sb
-        .from('profiles')
-        .upsert(
-          {
-            id: userId,
-            email: email ?? null,
-            updated_at: new Date().toISOString(),
-          },
-          { onConflict: 'id' }
-        )
-      if (upErr) {
-        console.error('stripe webhook profile upsert failed', {
+      const { data: profile, error: profileErr } = await sb.from('profiles').select('*').eq('id', userId).maybeSingle()
+      if (profileErr) {
+        console.error('stripe webhook profile lookup failed', {
           event_id: event.id,
           userId,
-          supabase_error: upErr,
+          supabase_error: profileErr,
         })
-        throw upErr
+        throw profileErr
       }
+      const profileFound = Boolean(profile)
+      console.log('stripe webhook profile found', {
+        event_id: event.id,
+        userId,
+        profile_found: profileFound,
+      })
+
+      let insertAttempted = false
+      if (!profileFound) {
+        insertAttempted = true
+        const normalizedPhoneFromStripe = stripePhone ? stripePhone.replace(/[^\d+]/g, '') : ''
+        const fallbackPhoneNormalized = `stripe-missing-${userId}`
+        const phoneNormalized = normalizedPhoneFromStripe || fallbackPhoneNormalized
+        const row = {
+          id: userId,
+          email: email ?? '',
+          full_name: '',
+          phone: stripePhone ?? '',
+          phone_normalized: phoneNormalized,
+          updated_at: new Date().toISOString(),
+        }
+        const { error: insProfileErr } = await sb.from('profiles').insert(row)
+        if (insProfileErr) {
+          console.error('stripe webhook profile insert failed', {
+            event_id: event.id,
+            userId,
+            insert_attempted: insertAttempted,
+            supabase_error: insProfileErr,
+          })
+          if ((insProfileErr as any).code === '23502') {
+            throw new Error(
+              'Profile not found and cannot create fallback profile because required columns are missing'
+            )
+          }
+          throw insProfileErr
+        }
+      }
+      console.log('stripe webhook profile insert status', {
+        event_id: event.id,
+        userId,
+        insert_attempted: insertAttempted,
+      })
 
       console.log('stripe webhook processed', {
         session_id: session.id,
@@ -94,6 +131,11 @@ export async function POST(req: Request) {
           })
           return NextResponse.json({ ok: true, already_processed: true })
         }
+        console.error('stripe webhook credit purchase insert failed', {
+          event_id: event.id,
+          userId,
+          supabase_error: insErr,
+        })
         throw insErr
       }
 
@@ -161,6 +203,7 @@ export async function POST(req: Request) {
           userId,
           mode: 'profiles_update',
         })
+        updated = true
       } else {
         console.log('stripe webhook profile lookup', {
           event_id: event.id,
@@ -169,6 +212,11 @@ export async function POST(req: Request) {
           skipped: true,
         })
       }
+      console.log('stripe webhook credits status', {
+        event_id: event.id,
+        userId,
+        credits_updated: updated,
+      })
 
       console.log('stripe webhook processed', {
         session_id: session.id,

@@ -379,6 +379,77 @@ function emergencyFallbackPlan(params: {
   }
 }
 
+function detectStudyDaysFromTopic(topic: string) {
+  const raw = String(topic || '').trim()
+  if (!raw) return 1
+  const text = raw.toLowerCase().normalize('NFD').replace(/\p{Diacritic}/gu, '')
+
+  const mHu = text.match(/(\d{1,2})\s*nap\s*mulva/)
+  if (mHu?.[1]) return Math.max(1, Math.min(14, Number(mHu[1])))
+
+  const mEn1 = text.match(/\bin\s+(\d{1,2})\s+days?\b/)
+  if (mEn1?.[1]) return Math.max(1, Math.min(14, Number(mEn1[1])))
+
+  const mEn2 = text.match(/\b(\d{1,2})\s+days?\b/)
+  if (mEn2?.[1]) return Math.max(1, Math.min(14, Number(mEn2[1])))
+
+  if (/\bholnap\b|\btomorrow\b/.test(text)) return 1
+  return 1
+}
+
+function hm(totalMinutes: number) {
+  const mins = ((Math.floor(totalMinutes) % 1440) + 1440) % 1440
+  const hh = Math.floor(mins / 60)
+  const mm = mins % 60
+  return `${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}`
+}
+
+function buildDailyScheduleFromPlan(
+  plan: Array<{ title: string; minutes: number; bullets: string[] }>,
+  language: 'hu' | 'en',
+  days: number
+) {
+  const safeDays = Math.max(1, Math.min(14, Math.round(days)))
+  const perDay = Array.from({ length: safeDays }, () => [] as Array<{ title: string; minutes: number; bullets: string[] }>)
+  for (let i = 0; i < plan.length; i += 1) {
+    perDay[i % safeDays].push(plan[i])
+  }
+
+  return perDay.map((items, idx) => {
+    const day = idx + 1
+    let t = 18 * 60
+    const blocks = (items.length ? items : plan.slice(0, 1)).map((item, bi) => {
+      const duration = Math.max(15, Math.min(25, Number(item.minutes) || 25))
+      const start = hm(t)
+      t += duration
+      const end = hm(t)
+      t += 5
+      const titleBase = String(item?.title || '').trim() || (language === 'hu' ? 'Tanulás' : 'Study')
+      const title =
+        day === safeDays && safeDays > 1
+          ? `${language === 'hu' ? 'Ismétlés' : 'Review'}: ${titleBase}`
+          : titleBase
+      const details =
+        day === safeDays && safeDays > 1
+          ? language === 'hu'
+            ? 'Rövid ismétlés és gyakorlás.'
+            : 'Short review and practice.'
+          : String(item?.bullets?.[0] || '').trim()
+      return {
+        start_time: start,
+        end_time: end,
+        title: bi === 0 ? title : titleBase,
+        details,
+      }
+    })
+    return {
+      day,
+      label: language === 'hu' ? `Nap ${day}` : `Day ${day}`,
+      blocks,
+    }
+  })
+}
+
 export async function POST(req: Request) {
   const startedAt = Date.now()
   const requestId = crypto.randomUUID()
@@ -543,6 +614,8 @@ export async function POST(req: Request) {
         minutes: block.minutes,
         bullets: [block.summary],
       }))
+      const detectedStudyDays = detectStudyDaysFromTopic(input.topic)
+      const dailySchedule = buildDailyScheduleFromPlan(compatiblePlan, output.language, detectedStudyDays)
       let notesMarkdown = ''
       let practice: Array<{ q: string; a: string; difficulty: 'short' | 'medium' }> = []
       const step2Start = Date.now()
@@ -657,6 +730,8 @@ export async function POST(req: Request) {
             description: b.bullets.join(' • '),
           })),
           notes_markdown: notesMarkdown,
+          daily: { schedule: dailySchedule },
+          dailySchedule,
           practice_questions: practice.map((p) => ({ q: p.q, a: p.a, difficulty: p.difficulty })),
         },
         { headers: { 'cache-control': 'no-store' } }

@@ -661,6 +661,13 @@ function Inner({ entitlement }: { entitlement: { credits: number | null; entitle
         return
       }
 
+      const dailyFromJson =
+        json?.daily && typeof json.daily === 'object'
+          ? json.daily
+          : Array.isArray(json?.dailySchedule)
+            ? { schedule: json.dailySchedule }
+            : null
+
       if (json?.plan || json?.plan_blocks || json?.notesMarkdown || json?.notes_markdown) {
         setResult({
           title: typeof json?.detectedTopic === 'string' ? json.detectedTopic : typeof json?.title === 'string' ? json.title : null,
@@ -682,6 +689,7 @@ function Inner({ entitlement }: { entitlement: { credits: number | null; entitle
               : typeof json?.notes_markdown === 'string'
                 ? json.notes_markdown
                 : null,
+          daily: dailyFromJson,
           practice: Array.isArray(json?.practice)
             ? {
                 questions: json.practice.map((q: any) => ({
@@ -710,6 +718,7 @@ function Inner({ entitlement }: { entitlement: { credits: number | null; entitle
         language: json?.language === 'hu' ? 'hu' : 'en',
         notes_markdown: String(json?.notesMarkdown || json?.notes_markdown || ''),
         plan: Array.isArray(json?.plan_blocks) ? { blocks: json.plan_blocks } : null,
+        daily: dailyFromJson,
         practice: Array.isArray(json?.practice)
           ? { questions: json.practice.map((q: any) => ({ q: String(q?.q ?? ''), a: String(q?.a ?? ''), explanation: '' })) }
           : null,

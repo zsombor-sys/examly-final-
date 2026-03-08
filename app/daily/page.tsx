@@ -151,6 +151,7 @@ function Inner() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [plan, setPlan] = useState<PlanResult | null>(null)
+  const [selectedDayIndex, setSelectedDayIndex] = useState(0)
   const [userId, setUserId] = useState<string | null>(null)
   const [authReady, setAuthReady] = useState(false)
 
@@ -236,6 +237,16 @@ function Inner() {
       }
     })
   }, [plan])
+  const schedule = useMemo(() => getDailySchedule(plan), [plan])
+  const selectedDay = schedule[selectedDayIndex] ?? null
+  const selectedPomodoroPlan = useMemo(() => {
+    if (!selectedDay || !pomodoroPlan[selectedDayIndex]) return []
+    return [pomodoroPlan[selectedDayIndex]]
+  }, [pomodoroPlan, selectedDayIndex, selectedDay])
+
+  useEffect(() => {
+    setSelectedDayIndex(0)
+  }, [schedule.length])
 
   return (
     <div className="mx-auto max-w-6xl px-4 py-10">
@@ -262,27 +273,62 @@ function Inner() {
 
             <div className="mt-6 grid gap-6 min-w-0 2xl:grid-cols-[minmax(0,1fr)_360px]">
               <aside className="order-1 w-full shrink-0 self-start 2xl:order-2 2xl:w-[360px] 2xl:sticky 2xl:top-6">
-                <Pomodoro dailyPlan={pomodoroPlan} />
+                <Pomodoro dailyPlan={selectedPomodoroPlan} />
               </aside>
 
               <div className="order-2 min-w-0 space-y-6 2xl:order-1">
                 <section className="w-full rounded-3xl border border-white/10 bg-white/[0.02] p-5 min-w-0 overflow-hidden">
                   <div className="text-xs uppercase tracking-[0.18em] text-white/55">Schedule</div>
                   <div className="mt-4 space-y-3 text-sm text-white/80">
-                    {getDailySchedule(plan).length > 0 ? (
-                      getDailySchedule(plan).map((day, i) => (
-                        <div key={i} className="rounded-2xl border border-white/10 bg-black/30 px-4 py-3">
-                          <div className="text-white/90">{day.label}</div>
-                          <div className="mt-2 space-y-2 text-white/70">
-                            {day.blocks.map((block, bi) => (
-                              <div key={bi} className="rounded-xl border border-white/10 bg-black/20 px-3 py-2">
-                                <div>{block.start_time} - {block.end_time} • {block.title}</div>
-                                {block.details ? <div className="mt-1 text-white/60">{block.details}</div> : null}
-                              </div>
-                            ))}
-                          </div>
+                    {schedule.length > 0 ? (
+                      <>
+                        <div className="flex flex-wrap items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={() => setSelectedDayIndex((idx) => Math.max(0, idx - 1))}
+                            disabled={selectedDayIndex <= 0}
+                            className="rounded-lg border border-white/10 px-3 py-1 text-white/80 disabled:opacity-40"
+                          >
+                            Prev
+                          </button>
+                          {schedule.map((day, idx) => (
+                            <button
+                              key={`day-btn-${day.day}-${idx}`}
+                              type="button"
+                              onClick={() => setSelectedDayIndex(idx)}
+                              className={
+                                'rounded-lg border px-3 py-1 ' +
+                                (idx === selectedDayIndex
+                                  ? 'border-white/40 bg-white/15 text-white'
+                                  : 'border-white/10 text-white/75')
+                              }
+                            >
+                              {day.label}
+                            </button>
+                          ))}
+                          <button
+                            type="button"
+                            onClick={() => setSelectedDayIndex((idx) => Math.min(schedule.length - 1, idx + 1))}
+                            disabled={selectedDayIndex >= schedule.length - 1}
+                            className="rounded-lg border border-white/10 px-3 py-1 text-white/80 disabled:opacity-40"
+                          >
+                            Next
+                          </button>
                         </div>
-                      ))
+                        {selectedDay ? (
+                          <div className="rounded-2xl border border-white/10 bg-black/30 px-4 py-3">
+                            <div className="text-white/90">{selectedDay.label}</div>
+                            <div className="mt-2 space-y-2 text-white/70">
+                              {selectedDay.blocks.map((block, bi) => (
+                                <div key={bi} className="rounded-xl border border-white/10 bg-black/20 px-3 py-2">
+                                  <div>{block.start_time} - {block.end_time} • {block.title}</div>
+                                  {block.details ? <div className="mt-1 text-white/60">{block.details}</div> : null}
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        ) : null}
+                      </>
                     ) : (
                       <div className="rounded-2xl border border-white/10 bg-black/30 px-4 py-3 text-white/70">No schedule available.</div>
                     )}

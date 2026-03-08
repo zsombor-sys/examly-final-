@@ -58,6 +58,7 @@ export default function HomeworkPage() {
 }
 
 function Inner() {
+  const MAX_TASKS = 4
   const [subjectHint, setSubjectHint] = useState('')
   const [files, setFiles] = useState<File[]>([])
   const [extractLoading, setExtractLoading] = useState(false)
@@ -99,6 +100,7 @@ function Inner() {
         checks: 'Ellenőrzések',
         mistakes: 'Gyakori hibák',
         noFinal: 'Nincs végső válasz.',
+        helperLimits: 'Maximum 1 kép tölthető fel, és legfeljebb 4 feladat kerül kinyerésre.',
       }
     : {
         back: 'Back to Plan',
@@ -121,6 +123,7 @@ function Inner() {
         checks: 'Checks',
         mistakes: 'Common mistakes',
         noFinal: 'No final answer provided.',
+        helperLimits: 'Maximum 1 image upload, and up to 4 extracted tasks.',
       }
 
   function renderHomeworkMath(latex?: string | null, mode: 'block' | 'inline' = 'block') {
@@ -171,8 +174,9 @@ function Inner() {
       if (json?.detected_language === 'hu' || json?.detected_language === 'en') {
         setUiLanguage(json.detected_language)
       }
-      setTasks(extracted)
-      setExpandedTaskId(extracted[0]?.id ?? null)
+      const limited = extracted.slice(0, MAX_TASKS)
+      setTasks(limited)
+      setExpandedTaskId(limited[0]?.id ?? null)
     } catch (e: any) {
       setError(String(e?.message || 'Failed to extract tasks'))
     } finally {
@@ -222,7 +226,7 @@ function Inner() {
     setError(null)
     setSolveAllLoading(true)
     try {
-      for (const task of tasks) {
+      for (const task of tasks.slice(0, MAX_TASKS)) {
         if (solutions[task.id]) continue
         await solveTask(task)
       }
@@ -260,14 +264,13 @@ function Inner() {
         <input
           type="file"
           accept="image/*"
-          multiple
           onChange={(e) => {
             const next = Array.from(e.target.files ?? [])
             if (next.length > MAX_HOMEWORK_IMAGES) {
               setError(`Max ${MAX_HOMEWORK_IMAGES} images.`)
               return
             }
-            setFiles(next)
+            setFiles(next.slice(0, MAX_HOMEWORK_IMAGES))
             setError(null)
           }}
         />
@@ -275,6 +278,7 @@ function Inner() {
         <div className="text-xs text-white/60">
           {files.length}/{MAX_HOMEWORK_IMAGES} {ui.selected}.
         </div>
+        <div className="text-xs text-white/50">{ui.helperLimits}</div>
 
         <div className="flex flex-wrap gap-2">
           <Button onClick={extractTasks} disabled={extractLoading || solveAllLoading || !hasFiles}>

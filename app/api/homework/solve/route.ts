@@ -25,7 +25,7 @@ const reqSchema = z.object({
 })
 
 const batchReqSchema = z.object({
-  tasks: z.array(taskSchema).min(1),
+  tasks: z.array(taskSchema).min(1).max(4),
   style: z.enum(['step_by_step']).optional().default('step_by_step'),
   language: z.enum(['hu', 'en']).optional(),
 })

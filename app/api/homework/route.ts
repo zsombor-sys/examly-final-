@@ -14,6 +14,7 @@ export const dynamic = 'force-dynamic'
 const COST = CREDITS_PER_GENERATION
 const MAX_TOKENS = 1300
 const TEMP = 0.6
+const MAX_HOMEWORK_TASKS = 4
 
 const reqSchema = z.object({
   prompt: z.string().max(MAX_HOMEWORK_PROMPT_CHARS).optional().default(''),
@@ -110,8 +111,9 @@ function normalizeTasks(data: z.infer<typeof homeworkResponseSchema>, prompt: st
         .filter((step) => step.explanation),
     }))
     .filter((task) => task.steps.length > 0)
+    .slice(0, MAX_HOMEWORK_TASKS)
 
-  return tasks.length ? tasks : fallbackHomework(prompt, language).tasks
+  return tasks.length ? tasks : fallbackHomework(prompt, language).tasks.slice(0, MAX_HOMEWORK_TASKS)
 }
 
 function toLegacyResponse(tasks: Array<{ title: string; steps: Array<{ explanation: string; result: string }> }>, language: 'hu' | 'en') {

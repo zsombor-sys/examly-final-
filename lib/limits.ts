@@ -10,7 +10,7 @@ export const MAX_IMAGES = readInt(
   7
 )
 export const MAX_PLAN_IMAGES = 7
-export const MAX_HOMEWORK_IMAGES = 2
+export const MAX_HOMEWORK_IMAGES = 1
 export const MAX_HW_IMAGES = MAX_HOMEWORK_IMAGES
 export const MAX_PLAN_PROMPT_CHARS = 150
 export const MAX_HOMEWORK_PROMPT_CHARS = 500

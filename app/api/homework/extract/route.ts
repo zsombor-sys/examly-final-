@@ -9,6 +9,7 @@ import { parseStructuredJsonWithRepair, structuredContentToText } from '@/lib/st
 export const runtime = 'nodejs'
 export const maxDuration = 60
 export const dynamic = 'force-dynamic'
+const MAX_EXTRACTED_TASKS = 4
 
 type VisionImage = { mime: string; b64: string }
 
@@ -203,7 +204,7 @@ export async function POST(req: Request) {
       repairOnce: (malformed) => repairJsonOnce(client, malformed),
     })
 
-    const tasks = parsed.tasks.map((task, idx) => ({
+    const tasks = parsed.tasks.slice(0, MAX_EXTRACTED_TASKS).map((task, idx) => ({
       id: String(task.id || `t${idx + 1}`),
       title: String(task.title || `Task ${idx + 1}`).trim(),
       raw_text: String(task.raw_text || '').trim(),

@@ -42,9 +42,9 @@ const planSchemaJson = {
         properties: {
           title: { type: 'string' },
           minutes: { type: 'number' },
-          bullets: { type: 'array', minItems: 1, maxItems: 8, items: { type: 'string' } },
+          summary: { type: 'string' },
         },
-        required: ['title', 'minutes', 'bullets'],
+        required: ['title', 'minutes', 'summary'],
       },
     },
   },
@@ -70,7 +70,7 @@ const planStructuredOutputSchema = z.object({
       z.object({
         title: z.string().min(1).max(120),
         minutes: z.number().int().min(10).max(240),
-        bullets: z.array(z.string().min(1).max(180)).min(1).max(8),
+        summary: z.string().min(1).max(220),
       })
     )
     .min(3)
@@ -305,6 +305,8 @@ export async function POST(req: Request) {
             'Use uploaded images as support material to add concrete facts and context.',
             'If topic and images conflict, follow the typed topic and use images only as supporting evidence.',
             'Do not output generic templates. Be specific and topic-focused.',
+            'Each plan block must be concise: title, minutes, and one short summary sentence only.',
+            'No bullets, no nested detail, no markdown, no extra commentary.',
             'If formulas are needed, output clean KaTeX-compatible LaTeX only.',
             'Never leave unmatched $ or $$ delimiters.',
             'Keep prose outside math mode and formulas complete.',
@@ -316,6 +318,8 @@ export async function POST(req: Request) {
             'You are a study assistant. Generate a study plan based only on the provided topic.',
             languageDirective,
             'Do not output generic templates. Be specific and topic-focused.',
+            'Each plan block must be concise: title, minutes, and one short summary sentence only.',
+            'No bullets, no nested detail, no markdown, no extra commentary.',
             'If formulas are needed, output clean KaTeX-compatible LaTeX only.',
             'Never leave unmatched $ or $$ delimiters.',
             'Keep prose outside math mode and formulas complete.',
@@ -368,6 +372,11 @@ export async function POST(req: Request) {
       }
 
       selectedLanguage = output.language
+      const compatiblePlan = output.plan.map((block) => ({
+        title: block.title,
+        minutes: block.minutes,
+        bullets: [block.summary],
+      }))
       let notesMarkdown = ''
       let practice: Array<{ q: string; a: string; difficulty: 'short' | 'medium' }> = []
       const step2Start = Date.now()
@@ -413,7 +422,7 @@ export async function POST(req: Request) {
           language: output.language,
           topic: input.topic,
           imageUrls: input.imageUrls,
-          plan: output.plan,
+          plan: compatiblePlan,
         })
         practice = practiceOut.practice
         console.log('plan.generate.step3.success', {
@@ -451,11 +460,11 @@ export async function POST(req: Request) {
         {
           language: output.language,
           detectedTopic: output.detectedTopic,
-          plan: output.plan,
+          plan: compatiblePlan,
           notesMarkdown,
           practice,
           requestId,
-          plan_blocks: output.plan.map((b) => ({
+          plan_blocks: compatiblePlan.map((b) => ({
             title: b.title,
             duration_minutes: b.minutes,
             description: b.bullets.join(' • '),

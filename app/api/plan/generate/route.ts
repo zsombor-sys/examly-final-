@@ -7,6 +7,7 @@ import { CREDITS_PER_GENERATION, MAX_IMAGES, MAX_PLAN_PROMPT_CHARS } from '@/lib
 import {
   callVisionStructured,
   checkImageUrlsAccessible,
+  isLikelyTruncatedNote,
   mapOpenAiError,
   modelForPlan,
   normalizeNotesMarkdown,
@@ -136,6 +137,10 @@ async function generatePlanNotesMarkdown(params: {
       'Write a complete study note of about 3000-4000 characters.',
       'Do not stop after a short outline.',
       'Make the note actually useful for studying.',
+      'Write a complete study note.',
+      'Finish the note properly.',
+      'Do not stop mid-list or mid-sentence.',
+      'End with a proper final section or closing summary.',
       'Use clear headings and bullet points where useful.',
       'Include: title, short explanation, main concepts, key facts, processes, examples.',
       'If formulas are needed, output clean KaTeX-compatible LaTeX.',
@@ -155,7 +160,7 @@ async function generatePlanNotesMarkdown(params: {
     const response = await client.responses.create(
       {
         model,
-        max_output_tokens: 2600,
+        max_output_tokens: 4200,
         temperature: 0.2,
         input: [
           {
@@ -183,6 +188,51 @@ async function generatePlanNotesMarkdown(params: {
   } finally {
     clearTimeout(timer)
   }
+}
+
+async function continuePlanNotesMarkdown(params: {
+  client: OpenAI
+  model: string
+  requestId: string
+  language: 'hu' | 'en'
+  topic: string
+  imageUrls: string[]
+  existingNotes: string
+}) {
+  const { client, model, requestId, language, topic, imageUrls, existingNotes } = params
+  const languageDirective = language === 'hu' ? 'Respond ONLY in Hungarian.' : 'Respond ONLY in English.'
+  const response = await client.responses.create({
+    model,
+    max_output_tokens: 1600,
+    temperature: 0.2,
+    input: [
+      {
+        role: 'system',
+        content: [
+          {
+            type: 'input_text',
+            text: [
+              'Continue the same study note from where it stopped.',
+              languageDirective,
+              'Return only the missing continuation.',
+              'Do not repeat already written content.',
+              'Do not stop mid-list or mid-sentence.',
+              'End with a proper final section or closing summary.',
+            ].join('\n'),
+          },
+        ],
+      },
+      {
+        role: 'user',
+        content: [
+          { type: 'input_text', text: `Topic: ${topic}\n\nCurrent note:\n${existingNotes}` },
+          ...imageUrls.map((url) => ({ type: 'input_image' as const, image_url: url, detail: 'auto' as const })),
+        ],
+      },
+    ],
+    metadata: { requestId, stage: 'plan_notes_continue', imageCount: String(imageUrls.length) },
+  })
+  return String(response.output_text || '').trim()
 }
 
 async function generatePlanPractice(params: {
@@ -390,6 +440,27 @@ export async function POST(req: Request) {
           imageUrls: input.imageUrls,
         })
         notesMarkdown = normalizeNotesMarkdown(rawNotes)
+        if (isLikelyTruncatedNote(notesMarkdown)) {
+          try {
+            const continuation = await continuePlanNotesMarkdown({
+              client,
+              model,
+              requestId,
+              language: output.language,
+              topic: input.topic || output.detectedTopic,
+              imageUrls: input.imageUrls,
+              existingNotes: notesMarkdown,
+            })
+            if (continuation) {
+              notesMarkdown = normalizeNotesMarkdown(`${notesMarkdown}\n\n${continuation}`)
+            }
+          } catch (continuationErr: any) {
+            console.warn('plan.generate.step2.continuation_failed', {
+              requestId,
+              message: String(continuationErr?.message || ''),
+            })
+          }
+        }
         console.log('plan.generate.step2.success', {
           requestId,
           durationMs: Date.now() - step2Start,

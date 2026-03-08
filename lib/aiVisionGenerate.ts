@@ -4,7 +4,8 @@ import { MAX_IMAGES, MAX_PLAN_PROMPT_CHARS, OPENAI_MODEL } from '@/lib/limits'
 import { detectLanguage, type SupportedLanguage } from '@/lib/language'
 import { parseStructuredJsonWithRepair, structuredContentToText, StructuredJsonError } from '@/lib/structuredJsonSafe'
 
-const MAX_NOTES_CHARS = 4000
+const SOFT_MAX_NOTES_CHARS = 4300
+const HARD_MAX_NOTES_CHARS = 5200
 const DEFAULT_TIMEOUT_MS = 45_000
 
 const inputSchema = z.preprocess((raw) => {
@@ -82,22 +83,39 @@ export function resolveRequestedLanguage(input: GenerateInput): SupportedLanguag
 
 export function normalizeNotesMarkdown(markdown: string) {
   const compact = String(markdown || '').trim()
-  if (compact.length <= MAX_NOTES_CHARS) return compact
-  const slice = compact.slice(0, MAX_NOTES_CHARS)
+  if (compact.length <= SOFT_MAX_NOTES_CHARS) return compact
+  if (compact.length <= HARD_MAX_NOTES_CHARS) return compact
+  const slice = compact.slice(0, HARD_MAX_NOTES_CHARS)
   const sentenceBoundary = Math.max(
     slice.lastIndexOf('. '),
     slice.lastIndexOf('! '),
     slice.lastIndexOf('? '),
-    slice.lastIndexOf('\n')
+    slice.lastIndexOf('\n\n')
   )
-  if (sentenceBoundary >= Math.floor(MAX_NOTES_CHARS * 0.7)) {
+  if (sentenceBoundary >= Math.floor(HARD_MAX_NOTES_CHARS * 0.7)) {
     return slice.slice(0, sentenceBoundary + 1).trim()
   }
   const wordBoundary = slice.lastIndexOf(' ')
-  if (wordBoundary >= Math.floor(MAX_NOTES_CHARS * 0.7)) {
+  if (wordBoundary >= Math.floor(HARD_MAX_NOTES_CHARS * 0.7)) {
     return slice.slice(0, wordBoundary).trim()
   }
   return slice.trim()
+}
+
+export function isLikelyTruncatedNote(markdown: string) {
+  const text = String(markdown || '').trim()
+  if (!text || text.length < 120) return false
+  const lastLine = text.split('\n').pop()?.trim() || ''
+  if (!lastLine) return false
+
+  if (/[,:;([{\-]$/.test(lastLine)) return true
+  if (/^[-*]\s*[^\s]{0,3}$/u.test(lastLine)) return true
+  if (/^\d+[.)]\s*[^\s]{0,3}$/u.test(lastLine)) return true
+  if (/\b\p{L}{2,}\s+\p{L}$/u.test(lastLine)) return true
+
+  const endsComplete = /[.!?…)"\]]$/u.test(lastLine)
+  if (!endsComplete && lastLine.length < 22) return true
+  return false
 }
 
 export async function checkImageUrlsAccessible(imageUrls: string[]) {

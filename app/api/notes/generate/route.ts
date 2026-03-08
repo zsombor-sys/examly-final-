@@ -6,6 +6,7 @@ import { CREDITS_PER_GENERATION, MAX_IMAGES, MAX_PLAN_PROMPT_CHARS } from '@/lib
 import {
   callVisionStructured,
   checkImageUrlsAccessible,
+  isLikelyTruncatedNote,
   mapOpenAiError,
   modelForNotes,
   normalizeNotesMarkdown,
@@ -47,11 +48,56 @@ function buildNotesJsonSchema(finalLanguage?: 'hu' | 'en' | null) {
   }
 }
 
+async function continueNotesMarkdown(params: {
+  client: OpenAI
+  model: string
+  requestId: string
+  language: 'hu' | 'en'
+  topic: string
+  imageUrls: string[]
+  existingNotes: string
+}) {
+  const { client, model, requestId, language, topic, imageUrls, existingNotes } = params
+  const languageDirective = language === 'hu' ? 'Respond ONLY in Hungarian.' : 'Respond ONLY in English.'
+  const response = await client.responses.create({
+    model,
+    max_output_tokens: 1600,
+    temperature: 0.2,
+    input: [
+      {
+        role: 'system',
+        content: [
+          {
+            type: 'input_text',
+            text: [
+              'Continue the same study note from where it stopped.',
+              languageDirective,
+              'Return only the missing continuation.',
+              'Do not repeat existing text.',
+              'Do not stop mid-list or mid-sentence.',
+              'End with a proper final section or closing summary.',
+            ].join('\n'),
+          },
+        ],
+      },
+      {
+        role: 'user',
+        content: [
+          { type: 'input_text', text: `Topic: ${topic}\n\nCurrent note:\n${existingNotes}` },
+          ...imageUrls.map((url) => ({ type: 'input_image' as const, image_url: url, detail: 'auto' as const })),
+        ],
+      },
+    ],
+    metadata: { requestId, stage: 'notes_continue', imageCount: String(imageUrls.length) },
+  })
+  return String(response.output_text || '').trim()
+}
+
 export async function POST(req: Request) {
   const startedAt = Date.now()
   const requestId = crypto.randomUUID()
   let model = modelForNotes()
-  const maxOutputTokens = 3200
+  const maxOutputTokens = 4200
   let selectedLanguage: 'hu' | 'en' = 'hu'
   let imageCount = 0
   let topicLen = 0
@@ -133,6 +179,9 @@ export async function POST(req: Request) {
             'Write a complete study note of about 3000-4000 characters.',
             'Do not stop after a short outline.',
             'Make the note actually useful for studying.',
+            'Finish the note properly.',
+            'Do not stop mid-list or mid-sentence.',
+            'End with a proper final section or closing summary.',
             'Aim for 10-12 substantial notesBlocks.',
             'Return only valid JSON.',
             'Notes target length: 3000-4000 characters with clear headings and bullet points.',
@@ -152,6 +201,9 @@ export async function POST(req: Request) {
             'Write a complete study note of about 3000-4000 characters.',
             'Do not stop after a short outline.',
             'Make the note actually useful for studying.',
+            'Finish the note properly.',
+            'Do not stop mid-list or mid-sentence.',
+            'End with a proper final section or closing summary.',
             'Aim for 10-12 substantial notesBlocks.',
             'Return only valid JSON.',
             'Notes target length: 3000-4000 characters with clear headings and bullet points.',
@@ -179,12 +231,33 @@ export async function POST(req: Request) {
         schemaObject: buildNotesJsonSchema(finalLanguage),
         schema: notesOutputSchema,
         maxOutputTokens,
-        fallbackShortTokens: 1800,
+        fallbackShortTokens: 2600,
         timeoutMs: 45_000,
         retries: 2,
       })
 
-      const notesMarkdown = normalizeNotesMarkdown(output.notesBlocks.join('\n\n'))
+      let notesMarkdown = normalizeNotesMarkdown(output.notesBlocks.join('\n\n'))
+      if (isLikelyTruncatedNote(notesMarkdown)) {
+        try {
+          const continuation = await continueNotesMarkdown({
+            client,
+            model,
+            requestId,
+            language: output.language,
+            topic: input.topic || output.detectedTopic,
+            imageUrls: input.imageUrls,
+            existingNotes: notesMarkdown,
+          })
+          if (continuation) {
+            notesMarkdown = normalizeNotesMarkdown(`${notesMarkdown}\n\n${continuation}`)
+          }
+        } catch (continuationErr: any) {
+          console.warn('notes.generate.continuation_failed', {
+            requestId,
+            message: String(continuationErr?.message || ''),
+          })
+        }
+      }
       selectedLanguage = output.language
 
       if (CREDITS_PER_GENERATION > 0) {

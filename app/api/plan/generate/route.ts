@@ -47,23 +47,8 @@ const planSchemaJson = {
         required: ['title', 'minutes', 'bullets'],
       },
     },
-    practice: {
-      type: 'array',
-      minItems: 6,
-      maxItems: 10,
-      items: {
-        type: 'object',
-        additionalProperties: false,
-        properties: {
-          q: { type: 'string' },
-          a: { type: 'string' },
-          difficulty: { type: 'string', enum: ['short', 'medium'] },
-        },
-        required: ['q', 'a', 'difficulty'],
-      },
-    },
   },
-  required: ['language', 'detectedTopic', 'plan', 'practice'],
+  required: ['language', 'detectedTopic', 'plan'],
 }
 
 function buildPlanJsonSchema(finalLanguage?: 'hu' | 'en' | null) {
@@ -90,6 +75,32 @@ const planStructuredOutputSchema = z.object({
     )
     .min(3)
     .max(10),
+})
+
+const practiceSchemaJson = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    practice: {
+      type: 'array',
+      minItems: 4,
+      maxItems: 8,
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          q: { type: 'string' },
+          a: { type: 'string' },
+          difficulty: { type: 'string', enum: ['short', 'medium'] },
+        },
+        required: ['q', 'a', 'difficulty'],
+      },
+    },
+  },
+  required: ['practice'],
+}
+
+const practiceStructuredOutputSchema = z.object({
   practice: z
     .array(
       z.object({
@@ -98,8 +109,8 @@ const planStructuredOutputSchema = z.object({
         difficulty: z.enum(['short', 'medium']),
       })
     )
-    .min(6)
-    .max(10),
+    .min(4)
+    .max(8),
 })
 
 async function generatePlanNotesMarkdown(params: {
@@ -172,6 +183,51 @@ async function generatePlanNotesMarkdown(params: {
   } finally {
     clearTimeout(timer)
   }
+}
+
+async function generatePlanPractice(params: {
+  client: OpenAI
+  model: string
+  requestId: string
+  language: 'hu' | 'en'
+  topic: string
+  imageUrls: string[]
+  plan: Array<{ title: string; minutes: number; bullets: string[] }>
+}) {
+  const { client, model, requestId, language, topic, imageUrls, plan } = params
+  const languageDirective = language === 'hu' ? 'Respond ONLY in Hungarian.' : 'Respond ONLY in English.'
+  const hasImages = imageUrls.length > 0
+  const systemText = [
+    'You are a study assistant generating practice questions only.',
+    languageDirective,
+    'Return only valid JSON matching schema.',
+    'Create 4-8 concise questions with short, correct answers.',
+    'If formulas are needed, output clean KaTeX-compatible LaTeX only.',
+    'Never leave unmatched $ or $$ delimiters.',
+    'Keep prose outside formulas and formulas syntactically complete.',
+  ].join('\n')
+  const userText = [
+    'Generate practice questions from this topic and plan.',
+    `topic: ${topic}`,
+    `plan: ${JSON.stringify(plan)}`,
+    hasImages ? 'Use uploaded images as support context only.' : 'No images provided.',
+  ].join('\n')
+
+  return callVisionStructured({
+    client,
+    model,
+    requestId,
+    systemText,
+    userText,
+    imageUrls,
+    schemaName: 'plan_practice_generate',
+    schemaObject: practiceSchemaJson,
+    schema: practiceStructuredOutputSchema,
+    maxOutputTokens: 900,
+    fallbackShortTokens: 650,
+    timeoutMs: 45_000,
+    retries: 1,
+  })
 }
 
 export async function POST(req: Request) {
@@ -257,7 +313,7 @@ export async function POST(req: Request) {
             'If images are unreadable, still generate from typed topic and set detectedTopic from topic.',
           ].join('\n')
         : [
-            'You are a study assistant. Generate a study plan and practice questions based only on the provided topic.',
+            'You are a study assistant. Generate a study plan based only on the provided topic.',
             languageDirective,
             'Do not output generic templates. Be specific and topic-focused.',
             'If formulas are needed, output clean KaTeX-compatible LaTeX only.',
@@ -269,33 +325,52 @@ export async function POST(req: Request) {
 
       const structuredUserText = hasImages
         ? [
-            'Generate a study plan + practice from the typed topic, using uploaded images as support material.',
+            'Generate a study plan from the typed topic, using uploaded images as support material.',
             `topic: ${input.topic || '(empty)'}`,
             'Use both sources when both are present.',
           ].join('\n')
         : [
-            'Generate a study plan + practice from the topic only.',
+            'Generate a study plan from the topic only.',
             `topic: ${input.topic || '(empty)'}`,
           ].join('\n')
 
-      const output = await callVisionStructured({
-        client,
-        model,
-        requestId,
-        systemText: structuredSystemText,
-        userText: structuredUserText,
-        imageUrls: input.imageUrls,
-        schemaName: 'plan_generate',
-        schemaObject: buildPlanJsonSchema(finalLanguage),
-        schema: planStructuredOutputSchema,
-        maxOutputTokens: 1400,
-        fallbackShortTokens: 1000,
-        timeoutMs: 45_000,
-        retries: 2,
-      })
+      const step1Start = Date.now()
+      let output: z.infer<typeof planStructuredOutputSchema>
+      try {
+        output = await callVisionStructured({
+          client,
+          model,
+          requestId,
+          systemText: structuredSystemText,
+          userText: structuredUserText,
+          imageUrls: input.imageUrls,
+          schemaName: 'plan_generate',
+          schemaObject: buildPlanJsonSchema(finalLanguage),
+          schema: planStructuredOutputSchema,
+          maxOutputTokens: 900,
+          fallbackShortTokens: 700,
+          timeoutMs: 45_000,
+          retries: 2,
+        })
+        console.log('plan.generate.step1.success', {
+          requestId,
+          durationMs: Date.now() - step1Start,
+          outputLength: JSON.stringify(output).length,
+        })
+      } catch (step1Err: any) {
+        console.error('plan.generate.step1.failed', {
+          requestId,
+          durationMs: Date.now() - step1Start,
+          code: String(step1Err?.code || ''),
+          message: String(step1Err?.message || ''),
+        })
+        throw step1Err
+      }
 
       selectedLanguage = output.language
       let notesMarkdown = ''
+      let practice: Array<{ q: string; a: string; difficulty: 'short' | 'medium' }> = []
+      const step2Start = Date.now()
       try {
         const rawNotes = await generatePlanNotesMarkdown({
           client,
@@ -306,21 +381,54 @@ export async function POST(req: Request) {
           imageUrls: input.imageUrls,
         })
         notesMarkdown = normalizeNotesMarkdown(rawNotes)
-      } catch (notesErr: any) {
-        console.error('plan.generate.notes_fallback', {
+        console.log('plan.generate.step2.success', {
           requestId,
+          durationMs: Date.now() - step2Start,
+          outputLength: notesMarkdown.length,
+        })
+      } catch (notesErr: any) {
+        console.error('plan.generate.step2.failed', {
+          requestId,
+          durationMs: Date.now() - step2Start,
+          code: String(notesErr?.code || ''),
           message: String(notesErr?.message || ''),
         })
         notesMarkdown =
           output.language === 'hu'
-            ? 'A részletes jegyzet átmenetileg nem elérhető. A terv és a gyakorló kérdések sikeresen elkészültek.'
-            : 'Detailed notes are temporarily unavailable. The plan and practice questions were generated successfully.'
+            ? 'Nem sikerült teljes jegyzetet generálni, de a terv elkészült.'
+            : 'Could not generate full notes, but your plan is ready.'
       }
       if (!notesMarkdown.trim()) {
         notesMarkdown =
           output.language === 'hu'
             ? 'A részletes jegyzet most nem érhető el. Próbáld meg újra később.'
             : 'Detailed notes are currently unavailable. Please try again later.'
+      }
+      const step3Start = Date.now()
+      try {
+        const practiceOut = await generatePlanPractice({
+          client,
+          model,
+          requestId,
+          language: output.language,
+          topic: input.topic,
+          imageUrls: input.imageUrls,
+          plan: output.plan,
+        })
+        practice = practiceOut.practice
+        console.log('plan.generate.step3.success', {
+          requestId,
+          durationMs: Date.now() - step3Start,
+          outputLength: JSON.stringify(practice).length,
+        })
+      } catch (practiceErr: any) {
+        console.error('plan.generate.step3.failed', {
+          requestId,
+          durationMs: Date.now() - step3Start,
+          code: String(practiceErr?.code || ''),
+          message: String(practiceErr?.message || ''),
+        })
+        practice = []
       }
 
       if (CREDITS_PER_GENERATION > 0) {
@@ -345,7 +453,7 @@ export async function POST(req: Request) {
           detectedTopic: output.detectedTopic,
           plan: output.plan,
           notesMarkdown,
-          practice: output.practice,
+          practice,
           requestId,
           plan_blocks: output.plan.map((b) => ({
             title: b.title,
@@ -353,7 +461,7 @@ export async function POST(req: Request) {
             description: b.bullets.join(' • '),
           })),
           notes_markdown: notesMarkdown,
-          practice_questions: output.practice.map((p) => ({ q: p.q, a: p.a, difficulty: p.difficulty })),
+          practice_questions: practice.map((p) => ({ q: p.q, a: p.a, difficulty: p.difficulty })),
         },
         { headers: { 'cache-control': 'no-store' } }
       )

@@ -46,16 +46,12 @@ export async function POST(req: Request) {
 
       const creditsRaw = Number.parseInt(process.env.STRIPE_CREDITS_PER_PURCHASE ?? '20', 10)
       const credits = Number.isFinite(creditsRaw) ? Math.trunc(creditsRaw) : 20
-      const email =
-        session.customer_details?.email ||
-        (typeof session.customer_email === 'string' ? session.customer_email : null)
-      const stripePhone =
-        session.customer_details?.phone && typeof session.customer_details.phone === 'string'
-          ? session.customer_details.phone
-          : null
-
       const sb = supabaseAdmin
-      const { data: profile, error: profileErr } = await sb.from('profiles').select('*').eq('id', userId).maybeSingle()
+      const { data: profile, error: profileErr } = await sb
+        .from('profiles')
+        .select('id, credits, phone_normalized')
+        .eq('id', userId)
+        .maybeSingle()
       if (profileErr) {
         console.error('stripe webhook profile lookup failed', {
           event_id: event.id,
@@ -70,42 +66,23 @@ export async function POST(req: Request) {
         userId,
         profile_found: profileFound,
       })
-
-      let insertAttempted = false
-      if (!profileFound) {
-        insertAttempted = true
-        const normalizedPhoneFromStripe = stripePhone ? stripePhone.replace(/[^\d+]/g, '') : ''
-        const fallbackPhoneNormalized = `stripe-missing-${userId}`
-        const phoneNormalized = normalizedPhoneFromStripe || fallbackPhoneNormalized
-        const row = {
-          id: userId,
-          email: email ?? '',
-          full_name: '',
-          phone: stripePhone ?? '',
-          phone_normalized: phoneNormalized,
-          updated_at: new Date().toISOString(),
-        }
-        const { error: insProfileErr } = await sb.from('profiles').insert(row)
-        if (insProfileErr) {
-          console.error('stripe webhook profile insert failed', {
-            event_id: event.id,
-            userId,
-            insert_attempted: insertAttempted,
-            supabase_error: insProfileErr,
-          })
-          if ((insProfileErr as any).code === '23502') {
-            throw new Error(
-              'Profile not found and cannot create fallback profile because required columns are missing'
-            )
-          }
-          throw insProfileErr
-        }
-      }
+      const insertAttempted = false
       console.log('stripe webhook profile insert status', {
         event_id: event.id,
         userId,
         insert_attempted: insertAttempted,
       })
+      if (!profileFound) {
+        console.error('Profile not found for user id', {
+          event_id: event.id,
+          userId,
+          profileFound,
+          insertAttempted,
+        })
+        return NextResponse.json({ error: `Profile not found for user id: ${userId}` }, { status: 400 })
+      }
+
+      const creditsBefore = Number(profile?.credits ?? 0)
 
       console.log('stripe webhook processed', {
         session_id: session.id,
@@ -140,6 +117,7 @@ export async function POST(req: Request) {
       }
 
       let updated = false
+      let creditsAfter: number | null = null
       try {
         const { error: rpcErr } = await sb.rpc('increment_credits', {
           p_user_id: userId,
@@ -147,10 +125,26 @@ export async function POST(req: Request) {
         })
         if (!rpcErr) {
           updated = true
+          const { data: afterRow, error: afterErr } = await sb
+            .from('profiles')
+            .select('credits')
+            .eq('id', userId)
+            .maybeSingle()
+          if (afterErr) {
+            console.error('stripe webhook credits after lookup failed', {
+              event_id: event.id,
+              userId,
+              supabase_error: afterErr,
+            })
+            throw afterErr
+          }
+          creditsAfter = Number(afterRow?.credits ?? creditsBefore + credits)
           console.log('stripe webhook credits update success', {
             event_id: event.id,
             userId,
             mode: 'rpc_increment_credits',
+            creditsBefore,
+            creditsAfter,
           })
         } else {
           console.error('stripe webhook credits update failed', {
@@ -158,6 +152,8 @@ export async function POST(req: Request) {
             userId,
             mode: 'rpc_increment_credits',
             supabase_error: rpcErr,
+            creditsBefore,
+            creditsAfter,
           })
         }
       } catch (rpcE: any) {
@@ -166,6 +162,8 @@ export async function POST(req: Request) {
           userId,
           mode: 'rpc_increment_credits',
           supabase_error: rpcE,
+          creditsBefore,
+          creditsAfter,
         })
         updated = false
       }
@@ -195,13 +193,18 @@ export async function POST(req: Request) {
             userId,
             mode: 'profiles_update',
             supabase_error: updErr,
+            creditsBefore,
+            creditsAfter,
           })
           throw updErr
         }
+        creditsAfter = next
         console.log('stripe webhook credits update success', {
           event_id: event.id,
           userId,
           mode: 'profiles_update',
+          creditsBefore,
+          creditsAfter,
         })
         updated = true
       } else {
@@ -216,6 +219,8 @@ export async function POST(req: Request) {
         event_id: event.id,
         userId,
         credits_updated: updated,
+        creditsBefore,
+        creditsAfter,
       })
 
       console.log('stripe webhook processed', {

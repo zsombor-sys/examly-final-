@@ -106,7 +106,7 @@ function Inner() {
             <li>Creating a Practice test</li>
             <li>Creating a Vocab set</li>
             <li>Asking the tutor (Ask tab)</li>
-            <li>Generating audio (Text-to-speech)</li>
+            <li>Create a note</li>
           </ul>
         </div>
       </Card>

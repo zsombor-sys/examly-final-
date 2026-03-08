@@ -51,7 +51,6 @@ export async function POST(req: Request) {
         .upsert(
           {
             id: userId,
-            user_id: userId,
             email: email ?? null,
             updated_at: new Date().toISOString(),
           },
@@ -98,6 +97,9 @@ export async function POST(req: Request) {
       }
       if (!updated) {
         const { data: row } = await sb.from('profiles').select('credits').eq('id', userId).maybeSingle()
+        if (!row) {
+          throw new Error(`Profile not found for user id: ${userId}`)
+        }
         const next = Number(row?.credits ?? 0) + credits
         await sb.from('profiles').update({ credits: next }).eq('id', userId)
       }

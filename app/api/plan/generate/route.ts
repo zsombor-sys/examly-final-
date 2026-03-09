@@ -124,70 +124,83 @@ async function generatePlanNotesMarkdown(params: {
   imageUrls: string[]
 }) {
   const { client, model, requestId, language, topic, imageUrls } = params
-  const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), 45_000)
-  try {
-    const hasImages = imageUrls.length > 0
-    const languageDirective = language === 'hu' ? 'Respond ONLY in Hungarian.' : 'Respond ONLY in English.'
-    const systemText = [
-      'You are a study assistant writing notesMarkdown only.',
-      languageDirective,
-      'Write structured exam-focused study notes.',
-      'Do not output JSON.',
-      'Output plain markdown only.',
-      'Write a complete study note of about 3000-4000 characters.',
-      'Do not stop after a short outline.',
-      'Make the note actually useful for studying.',
-      'Write a complete study note.',
-      'Finish the note properly.',
-      'Do not stop mid-list or mid-sentence.',
-      'End with a proper final section or closing summary.',
-      'Use clear headings and bullet points where useful.',
-      'Include: title, short explanation, main concepts, key facts, processes, examples.',
-      'If formulas are needed, output clean KaTeX-compatible LaTeX.',
-      'Never leave unmatched $ or $$.',
-      'Keep prose outside formulas and formulas inside proper LaTeX only.',
-      'For chemistry equations, use render-safe LaTeX (example: $$\\mathrm{C_3H_6 + H_2 \\rightarrow C_3H_8}$$).',
-      hasImages
-        ? 'Use the typed topic as primary instruction and use uploaded images as support material.'
-        : 'Use the typed topic only.',
-      'Do not transcribe images verbatim; explain and expand clearly.',
-    ].join('\n')
+  const runOnce = async (timeoutMs: number) => {
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), timeoutMs)
+    try {
+      const hasImages = imageUrls.length > 0
+      const languageDirective = language === 'hu' ? 'Respond ONLY in Hungarian.' : 'Respond ONLY in English.'
+      const systemText = [
+        'You are a study assistant writing notesMarkdown only.',
+        languageDirective,
+        'Write structured exam-focused study notes.',
+        'Do not output JSON.',
+        'Output plain markdown only.',
+        'Write a complete study note of about 3000-4000 characters.',
+        'Do not stop after a short outline.',
+        'Make the note actually useful for studying.',
+        'Write a complete study note.',
+        'Finish the note properly.',
+        'Do not stop mid-list or mid-sentence.',
+        'End with a proper final section or closing summary.',
+        'Use clear headings and bullet points where useful.',
+        'Include: title, short explanation, main concepts, key facts, processes, examples.',
+        'If formulas are needed, output clean KaTeX-compatible LaTeX.',
+        'Never leave unmatched $ or $$.',
+        'Keep prose outside formulas and formulas inside proper LaTeX only.',
+        'For chemistry equations, use render-safe LaTeX (example: $$\\mathrm{C_3H_6 + H_2 \\rightarrow C_3H_8}$$).',
+        hasImages
+          ? 'Use the typed topic as primary instruction and use uploaded images as support material.'
+          : 'Use the typed topic only.',
+        'Do not transcribe images verbatim; explain and expand clearly.',
+      ].join('\n')
 
-    const userText = hasImages
-      ? `Topic: ${topic}\nUse both topic and images, with topic as primary.`
-      : `Topic: ${topic}\nGenerate notes from topic only.`
+      const userText = hasImages
+        ? `Topic: ${topic}\nUse both topic and images, with topic as primary.`
+        : `Topic: ${topic}\nGenerate notes from topic only.`
 
-    const response = await client.responses.create(
-      {
-        model,
-        max_output_tokens: 4200,
-        temperature: 0.2,
-        input: [
-          {
-            role: 'system',
-            content: [{ type: 'input_text', text: systemText }],
+      const response = await client.responses.create(
+        {
+          model,
+          max_output_tokens: 4200,
+          temperature: 0.2,
+          input: [
+            {
+              role: 'system',
+              content: [{ type: 'input_text', text: systemText }],
+            },
+            {
+              role: 'user',
+              content: [
+                { type: 'input_text', text: userText },
+                ...imageUrls.map((url) => ({ type: 'input_image' as const, image_url: url, detail: 'auto' as const })),
+              ],
+            },
+          ],
+          metadata: {
+            requestId,
+            stage: 'plan_notes_markdown',
+            imageCount: String(imageUrls.length),
           },
-          {
-            role: 'user',
-            content: [
-              { type: 'input_text', text: userText },
-              ...imageUrls.map((url) => ({ type: 'input_image' as const, image_url: url, detail: 'auto' as const })),
-            ],
-          },
-        ],
-        metadata: {
-          requestId,
-          stage: 'plan_notes_markdown',
-          imageCount: String(imageUrls.length),
         },
-      },
-      { signal: controller.signal }
-    )
+        { signal: controller.signal }
+      )
 
-    return String(response.output_text || '').trim()
-  } finally {
-    clearTimeout(timer)
+      return String(response.output_text || '').trim()
+    } finally {
+      clearTimeout(timer)
+    }
+  }
+
+  try {
+    return await runOnce(90_000)
+  } catch (e: any) {
+    const msg = String(e?.message || '')
+    if (/aborted|aborterror|timed out|timeout/i.test(msg)) {
+      console.warn('plan.generate.step2.notes_retry_after_abort', { requestId, message: msg })
+      return await runOnce(120_000)
+    }
+    throw e
   }
 }
 

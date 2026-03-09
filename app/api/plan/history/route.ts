@@ -51,12 +51,35 @@ export async function GET(req: Request) {
   try {
     const user = await requireUser(req)
     const sb = createServerAdminClient()
+    const selectWithInputText =
+      'id, created_at, prompt, input_text, model, title, language, plan_json, notes_json, daily_json, practice_json, plan, notes, daily, practice'
+    const selectWithoutInputText =
+      'id, created_at, prompt, model, title, language, plan_json, notes_json, daily_json, practice_json, plan, notes, daily, practice'
 
-    const { data, error } = await sb
-      .from(TABLE_PLANS)
-      .select('id, created_at, prompt, input_text, model, title, language, plan_json, notes_json, daily_json, practice_json, plan, notes, daily, practice')
-      .eq('user_id', user.id)
-      .order('created_at', { ascending: false })
+    let data: HistoryRow[] | null = null
+    let error: any = null
+    {
+      const r = await sb
+        .from(TABLE_PLANS)
+        .select(selectWithInputText)
+        .eq('user_id', user.id)
+        .order('created_at', { ascending: false })
+      data = (r.data as HistoryRow[] | null) ?? null
+      error = r.error
+    }
+
+    if (error) {
+      const message = String(error?.message ?? '')
+      if (message.includes('input_text')) {
+        const r2 = await sb
+          .from(TABLE_PLANS)
+          .select(selectWithoutInputText)
+          .eq('user_id', user.id)
+          .order('created_at', { ascending: false })
+        data = (r2.data as HistoryRow[] | null) ?? null
+        error = r2.error
+      }
+    }
 
     if (error) {
       const message = String(error?.message ?? '')

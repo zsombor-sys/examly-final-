@@ -55,6 +55,90 @@ const extractSchema = {
   required: ['detected_language', 'tasks'],
 }
 
+function detectTaskType(text: string): 'math' | 'chem' | 'history' | 'other' {
+  const s = String(text || '').toLowerCase()
+  if (/[=+\-*/^]|sqrt|sin|cos|tan|log|\d/.test(s)) return 'math'
+  if (/mol|atom|reakci|reaction|equation|periodic|sav|bazis|acid|base|chem/.test(s)) return 'chem'
+  if (/year|century|war|torten|history|forradalom|uralkod|king|empire/.test(s)) return 'history'
+  return 'other'
+}
+
+function parseNumberedTasks(text: string): string[] {
+  const lines = String(text || '')
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+  const tasks: string[] = []
+  let current = ''
+  for (const line of lines) {
+    const numbered = line.match(/^\s*(\d{1,2})[.)-]\s+(.+)$/)
+    if (numbered) {
+      if (current.trim()) tasks.push(current.trim())
+      current = numbered[2].trim()
+      continue
+    }
+    if (current) {
+      current = `${current} ${line}`.trim()
+    }
+  }
+  if (current.trim()) tasks.push(current.trim())
+  return tasks
+}
+
+async function fallbackTextExtract(
+  client: OpenAI,
+  params: { images: VisionImage[]; subject: string; requestId: string }
+) {
+  const { images, subject, requestId } = params
+  const userContent: any[] = [
+    {
+      type: 'text',
+      text: [
+        'Read ALL homework tasks from the image(s).',
+        'Return ONLY a numbered task list.',
+        'Format exactly like:',
+        '1. ...',
+        '2. ...',
+        '3. ...',
+        'No markdown fences.',
+        'No explanations outside the numbered tasks.',
+        subject ? `Subject hint: ${subject}` : '',
+      ]
+        .filter(Boolean)
+        .join('\n'),
+    },
+  ]
+  for (const img of images) {
+    userContent.push({ type: 'image_url', image_url: { url: `data:${img.mime};base64,${img.b64}` } })
+  }
+
+  const resp = await client.chat.completions.create({
+    model: OPENAI_MODEL,
+    temperature: 0,
+    max_tokens: 1200,
+    messages: [
+      {
+        role: 'system',
+        content: 'Extract homework tasks. Return only numbered list text.',
+      },
+      {
+        role: 'user',
+        content: userContent as any,
+      },
+    ],
+    metadata: { requestId, stage: 'homework_extract_text_fallback' },
+  })
+
+  const text = structuredContentToText(resp.choices?.[0]?.message?.content).trim()
+  const parsed = parseNumberedTasks(text).slice(0, MAX_EXTRACTED_TASKS)
+  if (!parsed.length) {
+    const err: any = new Error('JSON_INVALID')
+    err.code = 'JSON_INVALID'
+    throw err
+  }
+  return parsed
+}
+
 async function repairJsonOnce(client: OpenAI, raw: string) {
   const repaired = await client.chat.completions.create({
     model: OPENAI_MODEL,
@@ -140,6 +224,8 @@ export async function POST(req: Request) {
   const requestId = crypto.randomUUID()
   let parseFailedOnce = false
   let repairAttempted = false
+  let fallbackTextAttempted = false
+  let fallbackTextSuccess = false
   try {
     await requireUser(req)
 
@@ -201,41 +287,74 @@ export async function POST(req: Request) {
     })
 
     const raw = structuredContentToText(resp.choices?.[0]?.message?.content)
-    const { value: parsed } = await parseStructuredJsonWithRepair({
-      raw,
-      validate: (value) => extractResponseSchema.parse(value),
-      repairOnce: async (malformed) => {
-        parseFailedOnce = true
-        repairAttempted = true
-        return repairJsonOnce(client, malformed)
-      },
-    })
+    let tasks: Array<{
+      id: string
+      title: string
+      raw_text: string
+      type: 'math' | 'chem' | 'history' | 'other'
+      confidence: number
+    }> = []
+    let detected_language: SupportedLanguage = 'hu'
+    try {
+      const { value: parsed } = await parseStructuredJsonWithRepair({
+        raw,
+        validate: (value) => extractResponseSchema.parse(value),
+        repairOnce: async (malformed) => {
+          parseFailedOnce = true
+          repairAttempted = true
+          return repairJsonOnce(client, malformed)
+        },
+      })
 
-    const tasks = parsed.tasks.slice(0, MAX_EXTRACTED_TASKS).map((task, idx) => ({
-      id: String(task.id || `t${idx + 1}`),
-      title: String(task.title || `Task ${idx + 1}`).trim(),
-      raw_text: String(task.raw_text || '').trim(),
-      type: task.type,
-      confidence: Math.max(0, Math.min(1, Number(task.confidence) || 0.5)),
-    }))
+      tasks = parsed.tasks.slice(0, MAX_EXTRACTED_TASKS).map((task, idx) => ({
+        id: String(task.id || `t${idx + 1}`),
+        title: String(task.title || `Task ${idx + 1}`).trim(),
+        raw_text: String(task.raw_text || '').trim(),
+        type: task.type,
+        confidence: Math.max(0, Math.min(1, Number(task.confidence) || 0.5)),
+      }))
 
-    const anyHungarianTask = tasks.some((t) => looksHungarianText(`${t.title}\n${t.raw_text}`))
-    const imageLang = parsed.detected_language as SupportedLanguage
-    const textCandidate = `${subject}\n${tasks.map((t) => `${t.title} ${t.raw_text}`).join('\n')}`
-    const fallbackFromText = looksHungarianText(textCandidate) ? 'hu' : 'en'
-    const detected_language =
-      anyHungarianTask
-        ? 'hu'
-        : imageLang === 'hu' || imageLang === 'en'
-          ? imageLang
-          : subject.trim()
-            ? fallbackFromText
-            : 'hu'
+      const anyHungarianTask = tasks.some((t) => looksHungarianText(`${t.title}\n${t.raw_text}`))
+      const imageLang = parsed.detected_language as SupportedLanguage
+      const textCandidate = `${subject}\n${tasks.map((t) => `${t.title} ${t.raw_text}`).join('\n')}`
+      const fallbackFromText = looksHungarianText(textCandidate) ? 'hu' : 'en'
+      detected_language =
+        anyHungarianTask
+          ? 'hu'
+          : imageLang === 'hu' || imageLang === 'en'
+            ? imageLang
+            : subject.trim()
+              ? fallbackFromText
+              : 'hu'
+    } catch (parseErr: any) {
+      const msg = String(parseErr?.message || parseErr?.code || '')
+      if (!/JSON_INVALID/.test(msg)) throw parseErr
+
+      fallbackTextAttempted = true
+      const textTasks = await fallbackTextExtract(client, { images, subject, requestId })
+      fallbackTextSuccess = true
+
+      tasks = textTasks.map((rawTask, idx) => {
+        const compact = rawTask.replace(/\s+/g, ' ').trim()
+        const title = compact.split(/[.!?]/)[0]?.trim() || compact.slice(0, 80) || `Task ${idx + 1}`
+        return {
+          id: `t${idx + 1}`,
+          title: title.length > 80 ? `${title.slice(0, 79)}…` : title,
+          raw_text: compact,
+          type: detectTaskType(compact),
+          confidence: 0.45,
+        }
+      })
+      const textCandidate = `${subject}\n${tasks.map((t) => `${t.title} ${t.raw_text}`).join('\n')}`
+      detected_language = looksHungarianText(textCandidate) ? 'hu' : 'en'
+    }
 
     console.log('homework.extract.parse', {
       requestId,
       parseFailedOnce,
       repairAttempted,
+      fallbackTextAttempted,
+      fallbackTextSuccess,
       success: true,
     })
     return NextResponse.json({ tasks, detected_language })
@@ -245,6 +364,8 @@ export async function POST(req: Request) {
       requestId,
       parseFailedOnce,
       repairAttempted,
+      fallbackTextAttempted,
+      fallbackTextSuccess,
       success: false,
       message: msg,
     })

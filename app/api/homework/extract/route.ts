@@ -86,7 +86,7 @@ async function repairJsonOnce(client: OpenAI, raw: string) {
       },
     },
   })
-  return String(repaired.choices?.[0]?.message?.content ?? '')
+  return structuredContentToText(repaired.choices?.[0]?.message?.content)
 }
 
 function normalizeBase64Image(input: string): VisionImage {
@@ -137,6 +137,9 @@ async function parseImages(req: Request): Promise<{ images: VisionImage[]; subje
 }
 
 export async function POST(req: Request) {
+  const requestId = crypto.randomUUID()
+  let parseFailedOnce = false
+  let repairAttempted = false
   try {
     await requireUser(req)
 
@@ -201,7 +204,11 @@ export async function POST(req: Request) {
     const { value: parsed } = await parseStructuredJsonWithRepair({
       raw,
       validate: (value) => extractResponseSchema.parse(value),
-      repairOnce: (malformed) => repairJsonOnce(client, malformed),
+      repairOnce: async (malformed) => {
+        parseFailedOnce = true
+        repairAttempted = true
+        return repairJsonOnce(client, malformed)
+      },
     })
 
     const tasks = parsed.tasks.slice(0, MAX_EXTRACTED_TASKS).map((task, idx) => ({
@@ -225,9 +232,23 @@ export async function POST(req: Request) {
             ? fallbackFromText
             : 'hu'
 
+    console.log('homework.extract.parse', {
+      requestId,
+      parseFailedOnce,
+      repairAttempted,
+      success: true,
+    })
     return NextResponse.json({ tasks, detected_language })
   } catch (error: any) {
-    console.error('homework.extract.error', { message: String(error?.message || 'Unknown error') })
+    const msg = String(error?.message || 'Unknown error')
+    console.error('homework.extract.parse', {
+      requestId,
+      parseFailedOnce,
+      repairAttempted,
+      success: false,
+      message: msg,
+    })
+    console.error('homework.extract.error', { message: msg })
     return NextResponse.json({ error: String(error?.message || 'Failed to extract tasks') }, { status: 500 })
   }
 }

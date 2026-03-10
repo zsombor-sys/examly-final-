@@ -126,7 +126,6 @@ async function fallbackTextExtract(
         content: userContent as any,
       },
     ],
-    metadata: { requestId, stage: 'homework_extract_text_fallback' },
   })
 
   const text = structuredContentToText(resp.choices?.[0]?.message?.content).trim()

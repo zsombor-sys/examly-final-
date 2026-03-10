@@ -5,6 +5,7 @@ import { requireUser } from '@/lib/authServer'
 import { OPENAI_MODEL } from '@/lib/limits'
 import { resolveLanguage } from '@/lib/language'
 import { parseStructuredJsonWithRepair, structuredContentToText } from '@/lib/structuredJsonSafe'
+import { sanitizeLatex } from '@/lib/latexSanitizer'
 
 export const runtime = 'nodejs'
 export const maxDuration = 60
@@ -132,6 +133,79 @@ function ensureWorkLatexFallback(parsed: unknown) {
     }
   }
   return root
+}
+
+function convertMhchemToKatexSafe(input: string) {
+  return String(input || '').replace(/\\ce\s*\{([^}]*)\}/g, (_m, innerRaw) => {
+    const inner = String(innerRaw || '')
+      .replace(/<=>/g, ' \\leftrightarrow ')
+      .replace(/->/g, ' \\rightarrow ')
+      .replace(/<-/g, ' \\leftarrow ')
+      .replace(/\s+/g, ' ')
+      .trim()
+    return `\\mathrm{${inner}}`
+  })
+}
+
+function maybeWrapMath(input: string) {
+  const value = String(input || '').trim()
+  if (!value) return ''
+  if (/\$\$|(?<!\$)\$(?!\$)|\\\(|\\\[/.test(value)) return value
+  if (/\\[a-zA-Z]+|[=^_]|\\rightarrow|\\leftarrow|\\leftrightarrow/.test(value)) return `$${value}$`
+  return value
+}
+
+function normalizeSolveText(input: string, preferMath = false) {
+  const withSafeChem = convertMhchemToKatexSafe(String(input || ''))
+  const cleaned = sanitizeLatex(withSafeChem)
+  return preferMath ? maybeWrapMath(cleaned) : cleaned
+}
+
+function normalizeComparable(input: string) {
+  return String(input || '')
+    .replace(/\$\$|(?<!\$)\$(?!\$)|\\\(|\\\)|\\\[|\\\]/g, '')
+    .replace(/\s+/g, '')
+    .toLowerCase()
+}
+
+function pickDerivedResult(
+  steps: Array<{ label: string; explain: string; work_latex: string; result_latex: string | null }>
+) {
+  for (let i = steps.length - 1; i >= 0; i -= 1) {
+    const step = steps[i]
+    if (step.result_latex && step.result_latex.trim()) return step.result_latex.trim()
+    const work = String(step.work_latex || '').trim()
+    if (!work) continue
+    const eqParts = work.split('=').map((part) => part.trim()).filter(Boolean)
+    if (eqParts.length >= 2) return eqParts[eqParts.length - 1]
+  }
+  return ''
+}
+
+function applyFinalAnswerSafety(params: {
+  finalAnswer: string
+  steps: Array<{ label: string; explain: string; work_latex: string; result_latex: string | null }>
+  confidence: number
+  language: 'hu' | 'en'
+}) {
+  const { finalAnswer, steps, confidence, language } = params
+  const derived = normalizeSolveText(pickDerivedResult(steps), true)
+  let out = normalizeSolveText(finalAnswer, true)
+  if (derived) {
+    const outCmp = normalizeComparable(out)
+    const derivedCmp = normalizeComparable(derived)
+    if (!outCmp || (derivedCmp && !outCmp.includes(derivedCmp))) {
+      out = derived
+    }
+  }
+  if (confidence < 0.7) {
+    const note =
+      language === 'hu'
+        ? 'Megjegyzés: alacsonyabb bizonyosság, érdemes ellenőrizni az eredményt.'
+        : 'Note: lower confidence, please verify the result.'
+    out = out ? `${out}\n\n${note}` : note
+  }
+  return out
 }
 
 function isStructuredSolveFailure(error: unknown) {
@@ -277,11 +351,11 @@ async function solveOneTaskStructured(params: {
     title: String(normalized.title || task.title).trim(),
     steps: normalized.steps.map((step, idx) => ({
       label: String(step.label || `Step ${idx + 1}`).trim(),
-      explain: String(step.explain || '').trim(),
-      work_latex: String(step.work_latex || '').trim(),
-      result_latex: step.result_latex == null ? null : String(step.result_latex).trim() || null,
+      explain: normalizeSolveText(String(step.explain || '').trim(), false),
+      work_latex: normalizeSolveText(String(step.work_latex || '').trim(), true),
+      result_latex: step.result_latex == null ? null : normalizeSolveText(String(step.result_latex).trim(), true) || null,
     })),
-    final_answer: String(normalized.final_answer || '').trim(),
+    final_answer: normalizeSolveText(String(normalized.final_answer || '').trim(), true),
   }
 }
 
@@ -341,8 +415,13 @@ async function solveOneTaskFallbackText(params: {
   return {
     language,
     title: String(task.title || '').trim(),
-    steps: parsed.steps,
-    final_answer: parsed.finalAnswer,
+    steps: parsed.steps.map((step) => ({
+      ...step,
+      explain: normalizeSolveText(step.explain, false),
+      work_latex: normalizeSolveText(step.work_latex, true),
+      result_latex: step.result_latex ? normalizeSolveText(step.result_latex, true) : null,
+    })),
+    final_answer: normalizeSolveText(parsed.finalAnswer, true),
   }
 }
 
@@ -399,7 +478,12 @@ export async function POST(req: Request) {
           language: solved.language,
           title: solved.title,
           steps: solved.steps,
-          final_answer: solved.final_answer,
+          final_answer: applyFinalAnswerSafety({
+            finalAnswer: solved.final_answer,
+            steps: solved.steps,
+            confidence: Number(task.confidence ?? 1),
+            language: solved.language,
+          }),
         })
       } catch (taskErr: any) {
         const primaryCode = String(taskErr?.code || taskErr?.message || '')
@@ -420,7 +504,12 @@ export async function POST(req: Request) {
               language: fallbackSolved.language,
               title: fallbackSolved.title,
               steps: fallbackSolved.steps,
-              final_answer: fallbackSolved.final_answer,
+              final_answer: applyFinalAnswerSafety({
+                finalAnswer: fallbackSolved.final_answer,
+                steps: fallbackSolved.steps,
+                confidence: Number(task.confidence ?? 1),
+                language: fallbackSolved.language,
+              }),
             })
           } catch (fallbackErr: any) {
             console.error('homework.solve.task_fallback_failed', {

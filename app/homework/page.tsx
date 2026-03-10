@@ -1,7 +1,6 @@
 'use client'
 
-import { Component, useMemo, useState } from 'react'
-import type { ReactNode } from 'react'
+import { useMemo, useState } from 'react'
 import Link from 'next/link'
 import AuthGate from '@/components/AuthGate'
 import ClientAuthGuard from '@/components/ClientAuthGuard'
@@ -9,8 +8,6 @@ import { Button, Textarea } from '@/components/ui'
 import { authedFetch } from '@/lib/authClient'
 import { MAX_HOMEWORK_IMAGES } from '@/lib/limits'
 import MarkdownMath from '@/components/MarkdownMath'
-import { BlockMath, InlineMath } from 'react-katex'
-import { sanitizeLatex } from '@/lib/latexSanitizer'
 
 type ExtractedTask = {
   id: string
@@ -24,27 +21,6 @@ type SolvedTask = {
   title: string
   steps: Array<{ label: string; explain: string; work_latex: string | null; result_latex: string | null }>
   final_answer: string
-}
-
-class HomeworkMathBoundary extends Component<{ fallback: ReactNode; children: ReactNode }, { failed: boolean }> {
-  constructor(props: { fallback: ReactNode; children: ReactNode }) {
-    super(props)
-    this.state = { failed: false }
-  }
-
-  static getDerivedStateFromError() {
-    return { failed: true }
-  }
-
-  componentDidCatch(error: unknown) {
-    if (process.env.NODE_ENV !== 'production') {
-      console.warn('Homework KaTeX render failed:', error)
-    }
-  }
-
-  render() {
-    return this.state.failed ? this.props.fallback : this.props.children
-  }
 }
 
 export default function HomeworkPage() {
@@ -127,14 +103,13 @@ function Inner() {
       }
 
   function renderHomeworkMath(latex?: string | null, mode: 'block' | 'inline' = 'block') {
-    const cleaned = sanitizeLatex(String(latex || ''))
-    if (!cleaned) return null
-    const rawFallback = <pre className="whitespace-pre-wrap text-white/80 text-xs">{String(latex || '')}</pre>
-    return (
-      <HomeworkMathBoundary fallback={rawFallback}>
-        {mode === 'inline' ? <InlineMath math={cleaned} /> : <BlockMath math={cleaned} />}
-      </HomeworkMathBoundary>
-    )
+    const raw = String(latex || '').trim()
+    if (!raw) return null
+    if (/\$\$|(?<!\$)\$(?!\$)|\\\(|\\\[/.test(raw)) {
+      return <MarkdownMath content={raw} />
+    }
+    const wrapped = mode === 'inline' ? `$${raw}$` : `$$${raw}$$`
+    return <MarkdownMath content={wrapped} />
   }
 
   async function extractTasks() {
